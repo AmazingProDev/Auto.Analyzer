@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Optim Analyzer Pro - Nemo Visualizer</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+    <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+    <link rel="stylesheet" href="style.css?v=32">
+    <link rel="stylesheet" href="grid_styles.css?v=2">
+    <link rel="stylesheet" href="additional_styles.css?v=2">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        /* Emergency Styles to force visibility */
+        #app {
+            display: flex !important;
+            flex-direction: column !important;
+            height: 100vh !important;
+        }
+
+        header {
+            display: flex !important;
+            min-height: 60px !important;
+            background: #2d2d2d !important;
+            z-index: 9999 !important;
+            /* border-bottom: 2px solid red !important; REMOVED DEBUG */
+        }
+
+        #logs-sidebar {
+            display: flex !important;
+            width: 250px !important;
+            z-index: 9998 !important;
+        }
+
+        main {
+            display: flex !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <!-- Main Application Header -->
+        <header id="mainHeader" class="main-header">
+            <div class="logo">Optim Analyzer Pro</div>
+            <div class="header-map-actions">
+                <!-- Hidden Inputs -->
+                <input type="file" id="fileInput" accept=".nmf, .nmfs, .csv, .txt, .xlsx, .xls, .trp"
+                    class="hidden-input" aria-label="Import Log File">
+                <input type="file" id="siteInput" accept=".xlsx, .xls, .csv" class="hidden-input"
+                    aria-label="Import Site Data">
+                <input type="file" id="shpInput" accept=".shp, .zip, .dbf, .shx, .prj, .xlsx, .xls" multiple
+                    class="hidden-input" aria-label="Import Shapefile or SmartCare Data">
+
+                <!-- Action Buttons -->
+                <button id="importBtn" class="btn header-btn" title="Import Logs, Sites, or SmartCare data">📂
+                    Import</button>
+                <button id="exportKmlBtn" class="btn header-btn" title="Export current view to KML">🌍 Export</button>
+                <button id="spiderSmartCareBtn" class="btn header-btn" title="Draw spider lines for SmartCare grid">🕸️
+                    Spider</button>
+                <button id="btnSmoothEdges" class="btn header-btn" title="Toggle Smooth Edges (Heatmap View)">💧
+                    Smooth</button>
+                <button id="btnZones" class="btn header-btn" title="Toggle Administrative Boundaries">🗺️ Zones</button>
+                <button id="btnAddSector" class="btn header-btn" onclick="window.openAddSectorModal()"
+                    title="Add Site Manually">📍 Add Site</button>
+                <button id="siteSettingsBtn" class="btn header-btn" title="Site Display Settings">⚙️ Sites</button>
+                <button id="themeSettingsBtn" class="btn header-btn" title="Thematic Analysis Settings">🎨
+                    Theme</button>
+            </div>
+            <div class="controls">
+                <div class="search-container">
+                    <input type="text" id="searchInput" placeholder="Search (Lat Lng, Site, CI, PCI)"
+                        class="search-input">
+                    <button id="searchBtn" class="search-btn-icon">🔍</button>
+                    <button id="addPointBtn" class="search-btn-icon add-point-btn" title="Add User Point">📍</button>
+                    <button id="rulerBtn" class="search-btn-icon ruler-btn"
+                        title="Ruler Tool (Distance/Bearing)">📏</button>
+                </div>
+                <span id="fileStatus">No file loaded</span>
+            </div>
+
+            <!-- Boundaries Modal -->
+            <div id="boundariesModal" class="modal">
+                <div class="modal-content boundary-modal-content">
+                    <div class="modal-header">
+                        <h3>Admin Zones</h3>
+                        <span class="close" id="closeBoundariesModal">&times;</span>
+                    </div>
+                    <div class="modal-body">
+                        <div class="setting-item">
+                            <label class="setting-label">Direction Régionale</label>
+                            <select id="drSelect" class="form-control boundary-select"
+                                aria-label="Select Direction Régionale" title="Select Direction Régionale">
+                                <option value="">-- Select DR --</option>
+                                <option value="All">Show All</option>
+                                <option value="DR Casa">DR Casa</option>
+                                <option value="DR Rabat">DR Rabat</option>
+                                <option value="DR Fes">DR Fes</option>
+                                <option value="DR Tanger">DR Tanger</option>
+                                <option value="DR Marrakech">DR Marrakech</option>
+                                <option value="DR Agadir">DR Agadir</option>
+                                <option value="DR Oujda">DR Oujda</option>
+                                <option value="DR Beni Mellal">DR Beni Mellal</option>
+                                <option value="DR Errachidia">DR Errachidia</option>
+                                <option value="DR Sud">DR Sud</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Regions</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkRegions" title="Toggle Regions"
+                                    aria-label="Toggle Regions">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Provinces</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkProvinces" title="Toggle Provinces"
+                                    aria-label="Toggle Provinces">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Communes</label>
+                            <label class="switch">
+                                <input type="checkbox" id="chkCommunes" title="Toggle Communes"
+                                    aria-label="Toggle Communes">
+                                <span class="slider round"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Site Settings Modal -->
+            <!-- Site Settings Panel -->
+            <div id="siteSettingsPanel" class="settings-panel">
+                <h4 class="settings-header">Site Settings</h4>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeSiteDist">Range (m): <span id="valRange">100</span></label>
+                    <input type="range" id="rangeSiteDist" min="50" max="1000" step="5" value="100"
+                        class="setting-input" aria-label="Site Range">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeIconBeam">Beamwidth (°): <span id="valBeam">35</span></label>
+                    <input type="range" id="rangeIconBeam" min="10" max="180" step="5" value="35" class="setting-input"
+                        aria-label="Icon Beamwidth">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeSiteOpacity">Opacity: <span
+                            id="valOpacity">0.6</span></label>
+                    <input type="range" id="rangeSiteOpacity" min="0.1" max="1" step="0.1" value="0.6"
+                        class="setting-input" aria-label="Site Opacity">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="siteColorBy">Color By</label>
+                    <select id="siteColorBy" class="setting-input site-color-mode" aria-label="Site Color Mode">
+                        <option value="tech">Technology</option>
+                        <option value="identity">Cell Identity (RNC/CID)</option>
+                    </select>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="pickerSiteColor">Color Override</label>
+                    <div class="site-color-picker-container">
+                        <input type="color" id="pickerSiteColor" value="#3b82f6" class="site-color-picker"
+                            aria-label="Site Color Picker">
+                        <label class="site-checkbox-label" for="checkSiteColorOverride"><input type="checkbox"
+                                id="checkSiteColorOverride">
+                            Apply</label>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label">Labels</label>
+                    <div class="site-names-container">
+                        <label class="site-checkbox-label" for="checkShowSiteNames"><input type="checkbox"
+                                id="checkShowSiteNames"> Show
+                            Site Names</label>
+                        <label class="site-checkbox-label" for="checkShowCellNames"><input type="checkbox"
+                                id="checkShowCellNames"> Show
+                            Cell Names</label>
+                    </div>
+                </div>
+
+                <div class="settings-footer-right">
+                    <button id="closeSiteSettings" class="close-settings-btn">Close</button>
+                </div>
+            </div>
+
+            <!-- Theme Settings Panel -->
+            <div id="themeSettingsPanel" class="settings-panel theme-settings-panel-custom">
+                <h4 class="settings-header">Thematic Analysis</h4>
+
+                <div class="setting-item">
+                    <label class="setting-label">Active Theme</label>
+                    <select id="themeSelect" class="setting-input theme-select" aria-label="Active Theme">
+                        <option value="level">Coverage (RSCP/RSRP)</option>
+                        <option value="quality">Quality (EcNo/RSRQ)</option>
+                    </select>
+                </div>
+
+                <div id="thresholdsContainer" class="thresholds-container">
+                    <!-- Thresholds injected here by JS -->
+                </div>
+
+                <div class="theme-footer">
+                    <button id="resetThemeBtn" class="btn theme-btn-reset">Reset</button>
+                    <div class="theme-footer-actions">
+                        <button id="applyThemeBtn" class="btn theme-btn-apply">Apply</button>
+                        <button id="closeThemeSettings" class="btn theme-btn-close">Close</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="stats" id="statsDisplay">
+                <!-- Stats will go here -->
+            </div>
+        </header>
+
+        <main>
+            <div id="logs-sidebar" class="logs-sidebar-flex">
+                <h3>Loaded Logs</h3>
+                <div id="logsList" class="logs-list-container">
+                    <div class="empty-state">No logs loaded</div>
+                </div>
+
+                <!-- Docked Views Container REMOVED -->
+            </div>
+
+            <div id="center-pane" class="center-pane">
+                <div id="map" class="map-container" ondrop="window.drop(event)" ondragover="window.allowDrop(event)">
+                </div>
+
+
+
+                <!-- Bottom Panel for Docked Views (Legacy/Bottom) -->
+                <!-- Bottom Panel for Docked Views (Legacy/Bottom) -->
+                <div id="bottomPanel" class="bottom-panel">
+                    <div id="bottomResizer" class="bottom-resizer">
+                        <div class="bottom-resizer-handle"></div>
+                    </div>
+                    <div id="bottomContent" class="bottom-content">
+                        <!-- Docked Content Will Go Here -->
+                        <div id="dockedChart" class="docked-pane-hidden">
+                        </div>
+                        <div id="dockedSignaling" class="docked-pane-hidden">
+                        </div>
+                        <div id="dockedGrid" class="docked-grid-container">
+                            <div class="docked-item-header docked-grid-header-placeholder">
+                                <!-- Placeholders if needed -->
+                            </div>
+                            <!-- Helper Container for body -->
+                            <div id="dockedGridBody" class="docked-grid-body"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="distanceDisplay" class="distance-display"></div>
+            </div>
+
+            <div id="mapControls">
+            </div>
+
+            <div id="sidebar" class="hidden">
+                <h3>Point Details</h3>
+                <div id="pointDetails"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+    <!-- Signaling Modal -->
+    <!-- Signaling Modal -->
+    <div id="signalingModal" class="modal">
+        <div class="modal-content signaling-modal-content">
+            <div class="modal-header signaling-modal-header">
+                <div class="signaling-header-left">
+                    <h3 id="signalingModalTitle" class="signaling-modal-title">Signaling Data</h3>
+                    <select id="signalingFilter" onchange="filterSignaling()" class="signaling-filter"
+                        aria-label="Signaling Type Filter">
+                        <option value="ALL">All Types</option>
+                        <option value="RRC">RRC Only</option>
+                        <option value="L3">L3 Only</option>
+                    </select>
+                </div>
+                <span class="close signaling-close" onclick="closeSignalingModal()">&times;</span>
+            </div>
+            <div class="modal-body signaling-modal-body">
+                <table class="data-table signaling-table">
+                    <thead class="signaling-thead">
+                        <tr>
+                            <th class="th-padding">Time
+                            </th>
+                            <th class="th-padding">Type
+                            </th>
+                            <th class="th-padding">
+                                Direction</th>
+                            <th class="th-padding">Message
+                            </th>
+                            <th class="th-padding">Details
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody id="signalingTableBody">
+                        <!-- Data rows -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Grid Modal -->
+    <!-- Grid Modal -->
+    <div id="gridModal" class="modal grid-modal-overlay">
+        <div class="modal-content grid-modal-content">
+
+            <!-- Header (Draggable) -->
+            <div class="modal-header grid-modal-header grid-modal-header-custom">
+                <h3 class="grid-title">Grid View
+                </h3>
+                <div class="grid-controls">
+                    <button class="btn btn-sm btn-secondary" onclick="sortGrid()">Sort</button>
+                    <button class="btn btn-sm btn-secondary" onclick="window.exportGridToCSV()">Export CSV</button>
+                    <!-- Dock Button -->
+                    <button class="dock-btn" onclick="toggleGridDock()" title="Dock">&#8595;</button>
+                    <span class="close grid-close"
+                        onclick="document.getElementById('gridModal').style.display='none'">&times;</span>
+                </div>
+            </div>
+
+            <!-- Body -->
+            <div id="gridBody" class="modal-body grid-body grid-modal-body-custom">
+                <!-- Grid Table Generated via JS -->
+                <div class="grid-placeholder">
+                    Drag metrics from the sidebar here to add columns.<br>
+                    (e.g. Serving RSCP, EcNo, SC, etc.)
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart Modal -->
+    <!-- Chart Modal -->
+    <div id="chartModal" class="modal">
+        <div class="modal-content chart-modal-content">
+            <div class="modal-header chart-modal-header">
+                <h3 id="chartTitle" class="chart-title">Chart</h3>
+                <span class="close chart-close" onclick="closeChartModal()">&times;</span>
+            </div>
+            <div class="chart-container">
+                <canvas id="chartCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <!-- Floating Info Panel (Draggable) -->
+    <div id="floatingInfoPanel" class="floating-info-panel">
+        <!-- Header (Drag Handle) -->
+        <div id="infoPanelHeader" class="infoPanelHeader info-panel-header">
+            <span class="info-panel-title">Point Details</span>
+            <span onclick="document.getElementById('floatingInfoPanel').style.display='none'"
+                class="info-panel-close">&times;</span>
+        </div>
+        <!-- Content -->
+        <div id="infoPanelContent" class="info-panel-content">
+            <div class="info-panel-placeholder">Select a point to view details</div>
+        </div>
+    </div>
+
+    <!-- SmartCare Sidebar (Right Side) -->
+    <aside id="smartcare-sidebar">
+        <div class="sidebar-header">
+            <h3>Site Layers</h3>
+        </div>
+        <div id="sites-layer-list">
+            <!-- Site Layers added dynamically -->
+        </div>
+
+        <div class="sidebar-header">
+            <h3>SmartCare Layers</h3>
+            <!-- Minimize Button -->
+            <button id="toggleSmartCareSidebar" class="sidebar-toggle-btn" title="Toggle Sidebar">_</button>
+        </div>
+        <div id="smartcare-layer-list">
+            <!-- Items added dynamically -->
+        </div>
+    </aside>
+
+    <script src="map_renderer.js?v=64"></script>
+    <script src="parser.js?v=46"></script>
+    <!-- KML Export Choice Modal -->
+    <!-- KML Export Choice Modal -->
+    <div id="exportKmlModal" class="modal modal-centered">
+        <div class="modal-content glass-modal-content">
+            <div class="modal-header glass-modal-header">
+                <h3>Export KML</h3>
+                <span class="close"
+                    onclick="document.getElementById('exportKmlModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <p class="modal-subtext modal-subtext-clean">Choose what you want to export:</p>
+                <div class="glass-btn-group">
+                    <button id="btnExportCurrentView" class="btn">Current View</button>
+                    <button id="btnExportAllSites" class="btn">All Sites</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Choice Modal -->
+    <!-- Import Choice Modal -->
+    <div id="importModal" class="modal modal-centered">
+        <div class="modal-content glass-modal-content">
+            <div class="modal-header glass-modal-header">
+                <h3>Import Data</h3>
+                <span class="close" onclick="document.getElementById('importModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <p class="modal-subtext modal-subtext-clean">Choose what you want to import:</p>
+                <div class="glass-btn-group">
+                    <button id="btnImportSites" class="btn">Sites (Excel/CSV)</button>
+                    <button id="btnImportSmartCare" class="btn">SmartCare Data</button>
+                    <button id="btnImportLog" class="btn">Log File (NMF/CSV)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="theme_config.js"></script>
+    <script src="app.js?v=v124"></script>
+    <!-- User Point Modal -->
+    <div id="userPointModal" class="modal">
+        <div class="modal-content user-point-modal-content">
+            <div class="modal-header user-point-modal-header">
+                <h3>Add User Point</h3>
+                <span class="close"
+                    onclick="document.getElementById('userPointModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body user-point-modal-body">
+                <div class="up-input-group">
+                    <label class="up-label" for="upName">Name</label>
+                    <input type="text" id="upName" placeholder="Point Name" class="up-input">
+                </div>
+                <div class="up-input-row">
+                    <div class="up-input-item">
+                        <label class="up-label" for="upLat">Latitude</label>
+                        <input type="number" id="upLat" placeholder="33.xxx" step="any" class="up-input">
+                    </div>
+                    <div class="up-input-item">
+                        <label class="up-label" for="upLng">Longitude</label>
+                        <input type="number" id="upLng" placeholder="-7.xxx" step="any" class="up-input">
+                    </div>
+                </div>
+                <div class="up-footer">
+                    <button id="submitUserPoint" class="btn up-submit-btn">Add to Map</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Site Editor Modal (Draggable) -->
+    <div id="siteEditorModal" class="modal">
+        <!-- Added .site-editor-size to strictly keep it wider -->
+        <div class="modal-content glass-modal-content site-editor-size">
+            <div class="modal-header glass-modal-header site-editor-modal-header">
+                <h3 id="siteEditorTitle">Edit Sector</h3>
+                <span class="close"
+                    onclick="document.getElementById('siteEditorModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body site-editor-body">
+                <input type="hidden" id="editOriginalId">
+                <input type="hidden" id="editOriginalIndex">
+                <input type="hidden" id="editLayerId">
+
+                <div class="modal-section-title">Site Information</div>
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editSiteName">Site Name</label>
+                        <input type="text" id="editSiteName" class="form-control" placeholder="e.g. Site A">
+                    </div>
+                    <div class="form-group">
+                        <label for="editCellName">Cell Name (Base)</label>
+                        <input type="text" id="editCellName" class="form-control" placeholder="e.g. SiteA_1">
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editLat">Latitude</label>
+                        <input type="number" step="any" id="editLat" class="form-control" placeholder="33.xxxxx">
+                    </div>
+                    <div class="form-group">
+                        <label for="editLng">Longitude</label>
+                        <input type="number" step="any" id="editLng" class="form-control" placeholder="-7.xxxxx">
+                    </div>
+                </div>
+
+                <div class="modal-section-title">Sector Details</div>
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editCellId">Cell ID (Base)</label>
+                        <input type="text" id="editCellId" class="form-control" placeholder="e.g. 1001">
+                    </div>
+                    <div class="form-group">
+                        <label for="editPci">PCI / SC (Start)</label>
+                        <input type="number" id="editPci" class="form-control" placeholder="e.g. 50">
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editAzimuth">Azimuth (1st Sector)</label>
+                        <input type="number" id="editAzimuth" class="form-control" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="editTech">Technology</label>
+                        <select id="editTech" class="form-control">
+                            <option value="4G">4G / LTE</option>
+                            <option value="3G">3G / UMTS</option>
+                            <option value="2G">2G / GSM</option>
+                            <option value="5G">5G / NR</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-grid-row">
+                    <div class="form-group">
+                        <label for="editBeamwidth">Beamwidth</label>
+                        <input type="number" id="editBeamwidth" class="form-control" placeholder="65" value="65">
+                    </div>
+                </div>
+
+                <div class="editor-footer">
+                    <button class="btn btn-red" id="btnDeleteSector"
+                        onclick="window.deleteSectorCurrent()">Delete</button>
+                    <button class="btn btn-blue mr-2" id="btnAddSiblingSector"
+                        onclick="window.addSectorToCurrentSite()">+ Add Sector</button>
+                    <button class="btn btn-green" onclick="window.saveSector()">Save Site</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

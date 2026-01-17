@@ -1,0 +1,45 @@
+<!-- Site Editor Modal -->
+<div id="siteEditorModal" class="modal">
+    <div class="modal-content site-editor-modal-content">
+        <div class="modal-header site-editor-modal-header">
+            <h3>Edit Sector</h3>
+            <span class="close" onclick="closeSiteEditor()">&times;</span>
+        </div>
+        <div class="modal-body site-editor-body">
+            <input type="hidden" id="editOriginalId">
+            <div class="editor-row">
+                <label for="editSiteName">Site Name:</label>
+                <input type="text" id="editSiteName">
+            </div>
+            <div class="editor-row">
+                <label for="editCellId">Cell ID:</label>
+                <input type="text" id="editCellId">
+            </div>
+            <div class="editor-row">
+                <label for="editLat">Latitude:</label>
+                <input type="number" step="any" id="editLat">
+            </div>
+            <div class="editor-row">
+                <label for="editLng">Longitude:</label>
+                <input type="number" step="any" id="editLng">
+            </div>
+            <div class="editor-row">
+                <label for="editAzimuth">Azimuth:</label>
+                <input type="number" id="editAzimuth">
+            </div>
+            <div class="editor-row">
+                <label for="editTech">Technology:</label>
+                <input type="text" id="editTech">
+            </div>
+            <div class="editor-row">
+                <label for="editPci">PCI/SC:</label>
+                <input type="number" id="editPci">
+            </div>
+            <!-- Delete & Save -->
+            <div class="editor-footer">
+                <button class="btn btn-red" onclick="deleteSectorFromEditor()">Delete</button>
+                <button class="btn btn-green" onclick="saveSector()">Save</button>
+            </div>
+        </div>
+    </div>
+</div>

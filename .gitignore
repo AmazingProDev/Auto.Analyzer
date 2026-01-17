@@ -1,0 +1,14 @@
+# Data Files
+*.nmf
+*.nmfs
+*.xlsx
+*.csv
+*.zip
+*.bak
+
+# System Files
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,46 @@
+/* Grid Modal Specifics */
+.modal-content-grid {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 0;
+}
+
+.grid-modal-header {
+    padding: 10px;
+    background: #252525;
+    border-bottom: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: grab;
+}
+
+.grid-title {
+    margin: 0;
+    font-size: 14px;
+    color: #ddd;
+}
+
+.grid-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.dock-btn {
+    cursor: pointer;
+    font-size: 14px;
+    color: #aaa;
+    border: 1px solid #555;
+    padding: 0 6px;
+    border-radius: 3px;
+}
+
+.grid-body {
+    flex: 1;
+    overflow: auto;
+    padding: 0;
+    background: #1e1e1e;
+}
