@@ -1,555 +1,301 @@
 const NMFParser = {
     parse(content) {
         const lines = content.split(/\r?\n/);
-        let allPoints = []; // Renamed to avoid confusion
-        let currentGPS = null;
-        let currentLAC = 'N/A';
-
-        // Debug Wrapper for currentCellID
-        let _currentCellID = 'N/A';
-        // We can't easily use a setter here without an object, but we can log updates
-        // Let's manually log where we assign it.
-        let currentCellID = 'N/A';
-        let currentRNC = null; // New Global RNC Tracker
-        const setCellID = (val) => {
-            if (val !== currentCellID) {
-                // console.log(`[Parser] CellID Changed: ${currentCellID} -> ${val}`);
-                currentCellID = val;
-            }
-        };
-        let currentPSC = null;
-
         const uniqueHeaders = new Set();
 
+        // Pass 1: State Tracking Structures
+        const identityTrack = []; // [{time, cid, rnc, lac, psc}]
+        const gpsTrack = [];      // [{time, lat, lng, alt, speed}]
+
+        // --- PASS 1: Collection ---
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
-            if (!line) continue;
-
+            if (!line || line.startsWith('#')) continue;
             const parts = line.split(',');
             const header = parts[0];
-            uniqueHeaders.add(header);
-
-            if (header.startsWith('#')) continue;
+            const time = parts[1];
+            if (!time) continue;
 
             if (header === 'CHI') {
                 const tech = parseInt(parts[3]);
-
-                // CHI Parsing Rule based on Technology
-                // Tech 5 (3G/UMTS): CHI,Time,,5,PLMN,1,Freq,CellID,LAC,PSC...
-                // Tech 7 (4G/LTE):  CHI,Time,,7,PLMN,1,?,?,?,CellID,LAC...
+                let state = { time, cid: null, rnc: null, lac: null, psc: null };
 
                 if (tech === 5) {
-                    // Robust search for Cell ID (Large Integer) in Tech 5 CHI line
-                    // Standard formats vary: Ind 7, 8, 9, or 10.
-                    // We look for a value > 20000 (Safety threshold) to identify a valid RNC-based CellID
-                    let foundCid = false;
-                    for (let k = 6; k < Math.min(parts.length, 14); k++) {
+                    // Refined 3G Search
+                    let foundBigId = false;
+                    for (let k = 6; k < parts.length; k++) {
                         const val = parseInt(parts[k]);
                         if (!isNaN(val) && val > 20000) {
-                            currentCellID = val;
-                            foundCid = true;
-                            // Try to guess LAC as next valid small short
-                            if (k + 1 < parts.length) {
-                                const nextVal = parseInt(parts[k + 1]);
-                                if (!isNaN(nextVal) && nextVal > 0 && nextVal < 65535) currentLAC = nextVal;
-                                // Try to guess PSC after LAC (k+2)
-                                if (k + 2 < parts.length) {
-                                    const pscVal = parseInt(parts[k + 2]);
-                                    if (!isNaN(pscVal) && pscVal >= 0 && pscVal <= 511) currentPSC = pscVal;
+                            state.cid = val;
+                            state.rnc = val >> 16;
+                            foundBigId = true;
+                            // Search for LAC and PSC nearby
+                            for (let j = 1; j <= 4; j++) {
+                                if (k + j >= parts.length) break;
+                                const cand = parts[k + j];
+                                if (cand.includes('.') || cand === '') continue;
+                                const cVal = parseInt(cand);
+                                if (!isNaN(cVal) && cVal > 0 && cVal < 65535) {
+                                    if (!state.lac || state.lac === 0) state.lac = cVal;
+                                    else if (state.psc === null && cVal <= 511) state.psc = cVal;
                                 }
                             }
                             break;
                         }
                     }
-                    if (!foundCid) {
-                        // RNC Search Logic: 
-                        for (let k = 6; k < Math.min(parts.length, 14); k++) {
-                            const rncCand = parseInt(parts[k]);
-                            if (!isNaN(rncCand) && rncCand > 0 && rncCand < 4096) {
-                                // Heuristic: Avoid Tech(5), Status(1)
-                                if (rncCand > 10) {
-                                    currentRNC = rncCand;
-                                    // Now look for CID (Small) in this CHI line logic
-                                    // CID is usually near RNC.
-                                    for (let m = 6; m < Math.min(parts.length, 14); m++) {
-                                        if (m === k) continue; // Skip RNC itself
-                                        const cidCand = parseInt(parts[m]);
-                                        // HEURISTIC REFINEMENT:
-                                        // 1. Strict Float Exclusion: metrics like '3.0' or '6.0' are NOT IDs.
-                                        if (parts[m].includes('.')) continue;
-
-                                        // 2. Avoid Frequencies (UARFCNs). Frequencies are usually followed by a Level (negative number or float).
-                                        if (m + 1 < parts.length) {
-                                            const nextVal = parseFloat(parts[m + 1]);
-                                            if (!isNaN(nextVal) && (nextVal < 0 || parts[m + 1].includes('.'))) {
-                                                continue;
-                                            }
-                                        }
-
-                                        // 3. Known UARFCN Ranges
-                                        if ((cidCand >= 10562 && cidCand <= 10838) ||
-                                            (cidCand >= 2937 && cidCand <= 3088) ||
-                                            (cidCand > 9000)) {
-                                            continue;
-                                        }
-
-                                        // CID > 0, < 65535.
-                                        if (!isNaN(cidCand) && cidCand > 0 && cidCand < 65535) {
-                                            // Heuristic: CID is usually larger than RNC? Not always.
-                                            if (cidCand !== 5 && cidCand !== 1) { // Avoid obvious Tech/Status
-                                                const synId = (currentRNC << 16) + cidCand;
-                                                setCellID(synId);
-                                                foundCid = true;
-
-                                                // DEBUG: Trace origin of Weird IDs
-                                                if (currentRNC === 320 || cidCand === 3) {
-                                                    // console.log(`[Parser DEBUG] Synthesized RNC=${currentRNC} CID=${cidCand} from Indices RNC=${k} CID=${m}`);
-                                                    // console.log(`[Parser DEBUG] Parts[m]: "${parts[m]}"`);
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
+                    if (!foundBigId) {
+                        // Strict fallback check for specific columns (Standard NMF: 9=RNC, 12=CID or vice versa)
+                        // If we didn't find a Big ID, we look for two valid integers
+                        let candidates = [];
+                        for (let k = 6; k < parts.length; k++) {
+                            const cVal = parseInt(parts[k]);
+                            if (!isNaN(cVal) && !parts[k].includes('.') && cVal > 0) candidates.push({ idx: k, val: cVal });
                         }
-                    }
-
-                    if (!foundCid) {
-                        // Fallback to strict index if search failed (though search covers strict ind 7)
-                        if (parts.length >= 8) {
-                            const cid = parseInt(parts[7]);
-                            if (!isNaN(cid) && cid > 0) currentCellID = cid;
-                            const lac = parseInt(parts[8]);
-                            if (!isNaN(lac)) currentLAC = lac;
-                            // Heuristic: Search for a valid PSC (Integer 0-511, NOT float)
-                            // Skip known indices for CellID (7/9) and LAC (8/10)
-                            // We look specifically for an integer that doesn't contain '.'
-                            for (let k = 9; k < parts.length; k++) {
-                                if (parts[k] && !parts[k].includes('.') && parts[k] !== '') {
-                                    const candidate = parseInt(parts[k]);
-                                    // PSC is usually <= 511. 
-                                    // Avoid confusing with other small integers like tech (5) or status (1) or PLMN (50001)
-                                    // PSC usually appears around indices 9-12.
-                                    if (!isNaN(candidate) && candidate >= 0 && candidate <= 511) {
-                                        // Double check it's not the same as a small CellID or LAC (unlikely here as they are large)
-                                        // Basic Priority: Index 9, 11, 12... 
-                                        // Current Logic: Take the first valid integer found after index 9?
-                                        // Or specific index? 
-                                        // Let's rely on it being the first "clean" integer > 0? No, SC can be 0.
-
-                                        // Given "3.0" at index 9 was filtered, let's see what's next.
-                                        // In the user's log: 3.0, 320, 6.0, 640...
-                                        // 320 is valid PSC. 640 is invalid.
-                                        // So maybe 320 is the PSC?
-
-                                        // Let's extract valid candidates and log them for now
-                                        // But to fix the "3" issue, excluding '.' is the key.
-                                        currentPSC = candidate;
-                                        // console.log(`[Parser] CHI Found PSC Candidate (Index ${k}): ${candidate}`);
-                                        break; // Take first match? 
-                                    }
-                                }
-                            }
+                        // Priority: If we have an obvious RNC/CID pair (e.g. 445 and 58134)
+                        let rnc = candidates.find(c => c.val > 10 && c.val < 4096);
+                        let cid = candidates.find(c => c.val > 4096 && c.val < 65535 && (!rnc || c.idx !== rnc.idx));
+                        if (rnc && cid) {
+                            state.rnc = rnc.val;
+                            state.cid = (rnc.val << 16) + cid.val;
                         }
                     }
                 } else if (tech === 7) {
+                    // LTE
                     if (parts.length > 10) {
-                        const cid = parseInt(parts[9]);
-                        if (!isNaN(cid)) currentCellID = cid;
-                        const lac = parseInt(parts[10]);
-                        if (!isNaN(lac)) currentLAC = lac;
-                    }
-                } else {
-                    // Fallback / Default
-                    if (parts.length > 10) {
-                        // Heuristic from before, but likely one of the above matches better
-                        const lac = parseInt(parts[10]);
-                        if (!isNaN(lac)) currentLAC = lac;
-                        const cid = parseInt(parts[8]);
-                        if (!isNaN(cid)) currentCellID = cid;
+                        state.cid = parseInt(parts[9]);
+                        state.lac = parseInt(parts[10]);
                     }
                 }
+                if (state.cid) identityTrack.push(state);
+
             } else if (header === 'GPS') {
                 if (parts.length > 4) {
                     const lat = parseFloat(parts[4]);
                     const lng = parseFloat(parts[3]);
-                    const alt = parseFloat(parts[5]);
-                    const speed = parseFloat(parts[8]);
-
                     if (!isNaN(lat) && !isNaN(lng)) {
-                        currentGPS = { lat, lng, alt, speed };
+                        gpsTrack.push({
+                            time,
+                            lat, lng,
+                            alt: parseFloat(parts[5]),
+                            speed: parseFloat(parts[8])
+                        });
                     }
                 }
-            } else if (header === 'CELLMEAS') {
-                if (!currentGPS) continue;
+            } else if (header === 'EDCHI' || header === 'CHI' || header === 'PCHI') {
+                const tech = parseInt(parts[3]);
+                if (tech === 5) {
+                    // Extract PSC and Freq from Event Identity records
+                    const freq = parseFloat(parts[10]);
+                    const psc = parseInt(parts[11]);
+                    if (!isNaN(freq) && freq > 0) {
+                        // Create a partial identity state if we don't have a full UCID yet
+                        identityTrack.push({
+                            time,
+                            freq: freq,
+                            psc: psc,
+                            source: header
+                        });
+                    }
+                }
+            } else if (header === 'RRCSM') {
+                // PASS 1 SIGNALING HEURISTIC: Extract authoritative UCID from hex payloads
+                const tech = parseInt(parts[3]);
+                const hex = parts[parts.length - 1];
+                if (tech === 5 && hex && hex.length > 30) {
+                    const msgType = parts[5];
+                    const isRelevantMsg = msgType && (
+                        msgType.includes('RECONFIGURATION') ||
+                        msgType.includes('ACTIVE_SET_UPDATE') ||
+                        msgType.includes('MEASUREMENT_CONTROL') ||
+                        msgType.includes('CELL_UPDATE') ||
+                        msgType.includes('TRANSPORT_CHANNEL') ||
+                        msgType.includes('HANDOVER_FROM_UTRAN') ||
+                        msgType.includes('SYSTEM_INFORMATION')
+                    );
 
-                // DEBUG: Log CELLMEAS to find PSC (Looking for 288)
-                // Only log first few to avoid spam
-                // if (Math.random() < 0.01) console.log('[Parser] CELLMEAS Debug:', parts);
+                    if (isRelevantMsg) {
+                        // HEURISTIC: Skip headers
+                        const payload = hex.substring(8);
 
+                        // Search for known RNC hex patterns: 442-446 (0x1BA-0x1BE)
+                        let foundIdx = -1;
+                        let matchedRnc = null;
+
+                        const patterns = { "1BA": 442, "1BB": 443, "1BC": 444, "1BD": 445, "1BE": 446 };
+                        for (const [prefix, rncVal] of Object.entries(patterns)) {
+                            const idx = payload.indexOf(prefix);
+                            if (idx !== -1) {
+                                foundIdx = idx;
+                                matchedRnc = rncVal;
+                                break;
+                            }
+                        }
+
+                        if (foundIdx !== -1 && foundIdx + 6 <= payload.length) {
+                            const ucidShortHex = payload.substring(foundIdx, foundIdx + 6);
+                            const ucidShortVal = parseInt(ucidShortHex, 16);
+                            if (!isNaN(ucidShortVal)) {
+                                const rnc = ucidShortVal >> 12;
+                                const cidShort = (ucidShortVal & 0xFFF);
+
+                                // Synthesize a 28nd bit compatible ID (RNC << 16 + ShortCID << 4)
+                                const synthesizedCid = (rnc << 16) + (cidShort << 4);
+
+                                identityTrack.push({
+                                    time,
+                                    cid: synthesizedCid,
+                                    rnc: matchedRnc,
+                                    psc: parseInt(parts[8]),
+                                    source: 'signaling_rrc',
+                                    isSignaling: true
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if (header === 'CHI') {
+                const tech = parseInt(parts[3]);
+                if (tech === 5) {
+                    const ucid = parseInt(parts[7]);
+                    const rnc = parseInt(parts[8]);
+                    const lac = parseInt(parts[9]);
+                    if (!isNaN(rnc) && !isNaN(ucid)) {
+                        identityTrack.push({ time, cid: ucid, rnc: rnc, lac: lac, source: 'CHI', isSignaling: true });
+                    }
+                } else if (tech === 7) {
+                    const eci = parseInt(parts[9]);
+                    const tac = parseInt(parts[10]);
+                    if (!isNaN(eci)) {
+                        identityTrack.push({ time, cid: eci, lac: tac, source: 'CHI', isSignaling: true });
+                    }
+                }
+            } else if (header === 'CREL') {
+                const tech = parseInt(parts[10]);
+                const rnc = parseInt(parts[12]);
+                const ucid = parseInt(parts[13]);
+                if (tech === 5 && !isNaN(rnc) && !isNaN(ucid)) {
+                    identityTrack.push({ time, cid: ucid, rnc: rnc, source: 'CREL', isSignaling: true });
+                }
+            }
+        }
+
+        // Sort tracks to ensure lookup works
+        const timeSort = (a, b) => a.time.localeCompare(b.time);
+        identityTrack.sort(timeSort);
+        gpsTrack.sort(timeSort);
+
+        // --- Helper: Find State at Time ---
+        const findLastAt = (track, time) => {
+            if (!track.length) return null;
+            let last = null;
+            for (let item of track) {
+                if (item.time.localeCompare(time) <= 0) last = item;
+                else break;
+            }
+            return last;
+        };
+
+        // --- PASS 2: Processing ---
+        let allPoints = [];
+        let currentNeighbors = []; // Global state for signaling snapshot
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line || line.startsWith('#')) continue;
+            const parts = line.split(',');
+            const header = parts[0];
+            const time = parts[1];
+            if (!time) continue;
+
+            const state = findLastAt(identityTrack, time) || { cid: 'N/A', rnc: null, lac: 'N/A', psc: null };
+            const gps = findLastAt(gpsTrack, time);
+
+            if (header === 'CELLMEAS') {
+                if (!gps) continue;
                 const techId = parseInt(parts[3]);
-                let servingFreq = 0;
-                let servingLevel = -999;
+                let servingFreq = parseFloat(parts[7]);
+                let servingLevel = parseFloat(parts[8]);
                 let servingBand = 'Unknown';
                 let servingSc = null;
                 let servingEcNo = null;
-
                 let neighbors = [];
-                let nBlockSize = 18;
-                let nStartIndex = 14;
-
-                let n1_rscp, n1_ecno, n1_sc;
-                let n2_rscp, n2_ecno, n2_sc;
-                let n3_rscp, n3_ecno, n3_sc;
 
                 if (techId === 5) {
-                    // UMTS
-                    servingFreq = parseFloat(parts[7]);
-                    servingLevel = parseFloat(parts[8]);
-
-                    // Attempt to parse CellID from CELLMEAS
-                    if (parts.length > 12) {
-                        const cellIdCandidate = parseInt(parts[12]);
-
-                        // Rule 1: Standard Big Cell ID (RNC+CID combined)
-                        if (!isNaN(cellIdCandidate) && cellIdCandidate > 20000) {
-                            if (currentCellID !== 'N/A' && currentCellID !== cellIdCandidate) {
-                                currentPSC = null;
-                            }
-                            setCellID(cellIdCandidate);
-                            currentRNC = (cellIdCandidate >> 16); // Extract RNC from valid ID
-                        }
-                        // Rule 2: Split RNC/CID Case (Small CID + Known RNC)
-                        else if (!isNaN(cellIdCandidate) && cellIdCandidate > 0 && cellIdCandidate < 65535 && currentRNC > 0) {
-                            // Synthesize Full ID
-                            const synthesizedID = (currentRNC << 16) + cellIdCandidate;
-                            if (currentCellID !== 'N/A' && currentCellID !== synthesizedID) {
-                                currentPSC = null;
-                            }
-                            setCellID(synthesizedID);
-
-                        }
-                    }
-
-                    // Removed flaky LAC guessing from CELLMEAS (Indices 11/13 were unreliable)
-
+                    // Band Logic
                     if (servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
                     else if (servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
-                    else if (servingFreq > 10000) servingBand = 'High Band';
-                    else if (servingFreq < 4000) servingBand = 'Low Band';
 
-                    // Use PSC from CHI if available (REVERTED: CHI index 9 is bad)
-                    // if (currentPSC !== null) {
-                    //    servingSc = currentPSC;
-                    // }
+                    // Initialize serving SC from identity track if available
+                    if (state.psc !== undefined && state.psc !== null) servingSc = state.psc;
 
-                    nStartIndex = 14;
-                    nBlockSize = 17;
+                    // Neighbors
+                    let nStartIndex = 14;
+                    let nBlockSize = 17;
                     for (let j = nStartIndex; j < parts.length; j += nBlockSize) {
                         if (j + 4 >= parts.length) break;
                         const nFreq = parseFloat(parts[j]);
                         const nPci = parseInt(parts[j + 1]);
                         const nEcNo = parseFloat(parts[j + 2]);
                         const nRscp = parseFloat(parts[j + 4]);
-
                         if (!isNaN(nFreq) && !isNaN(nPci)) {
-                            let nBand = 'Unknown';
-                            // Same band logic as serving
-                            if (nFreq >= 10562 && nFreq <= 10838) nBand = 'B1 (2100)';
-                            else if (nFreq >= 2937 && nFreq <= 3088) nBand = 'B8 (900)';
-                            else if (nFreq > 10000) nBand = 'High Band';
-                            else if (nFreq < 4000) nBand = 'Low Band';
+                            neighbors.push({ freq: nFreq, pci: nPci, ecno: nEcNo, rscp: nRscp });
 
-                            neighbors.push({ freq: nFreq, pci: nPci, ecno: nEcNo, rscp: nRscp, band: nBand });
-                            if (Math.abs(nFreq - servingFreq) < 1 && servingSc === null) {
-                                servingSc = nPci;
-                                servingEcNo = nEcNo;
+                            // If this neighbor entry matches our serving freq and SC, capture its metrics
+                            if (Math.abs(nFreq - servingFreq) < 1 && (nPci === servingSc || servingSc === null)) {
+                                if (servingSc === null) servingSc = nPci;
+                                if (servingEcNo === null) servingEcNo = nEcNo;
+                                // Do NOT overwrite servingLevel (RSCP) as it comes from the primary header
                             }
                         }
                     }
-                    if (neighbors.length > 0 && n1_rscp === undefined) {
-                        // Fallback N1 logic will be handled below
-                    }
-                } else if (techId === 1 || techId === 2) {
-                    if (parts.length > 11) {
-                        servingFreq = parseFloat(parts[8]);
-                        servingLevel = parseFloat(parts[11]);
-                    }
-                } else {
-                    servingFreq = parseFloat(parts[7]);
-                    servingLevel = parseFloat(parts[8]);
+                    currentNeighbors = neighbors;
                 }
 
-                if (servingLevel > -20 && servingLevel !== -999) {
-                    if (servingLevel > 0) servingLevel = NaN;
-                }
-
-                // RELAXED FILTER: If we have a valid Cell ID, keep the point even if level is bad.
-                // Only skip if BOTH level is bad AND Cell ID is missing.
-                if ((servingLevel === -999 || isNaN(servingLevel)) && (!currentCellID || currentCellID <= 0)) {
-                    continue;
-                }
-
-                neighbors.sort((a, b) => b.rscp - a.rscp);
-
-                if (neighbors.length > 0) {
-                    // Check if Serving SC was found
-                    if (servingSc !== null) {
-                        // Filter out the serving cell from neighbors to avoid A1 == A2
-                        neighbors = neighbors.filter(n => n.pci !== servingSc);
-                    }
-
-                    // Re-sort after filtering (just in case)
-                    neighbors.sort((a, b) => b.rscp - a.rscp);
-                }
-
-                if (neighbors.length > 0) {
-                    n1_sc = neighbors[0].pci;
-                    n1_rscp = neighbors[0].rscp;
-                    n1_ecno = neighbors[0].ecno;
-                }
-                if (neighbors.length > 1) {
-                    n2_sc = neighbors[1].pci;
-                    n2_rscp = neighbors[1].rscp;
-                    n2_ecno = neighbors[1].ecno;
-                }
-                if (neighbors.length > 2) {
-                    n3_sc = neighbors[2].pci;
-                    n3_rscp = neighbors[2].rscp;
-                    n3_ecno = neighbors[2].ecno;
-                }
-
-                const cellData = {
-                    serving: {
-                        freq: servingFreq,
-                        level: servingLevel,
-                        band: servingBand,
-                        sc: servingSc,
-                        ecno: servingEcNo,
-                        lac: currentLAC,
-                        cellId: currentCellID
-                    },
-                    neighbors: neighbors
-                };
+                const rnc = state.rnc;
+                const cid = (state.cid && !isNaN(state.cid)) ? (state.cid & 0xFFFF) : null;
 
                 const point = {
-                    lat: currentGPS.lat,
-                    lng: currentGPS.lng,
-                    time: parts[1],
-                    type: 'MEASUREMENT', // Standardize type
-                    level: servingLevel,
-                    ecno: servingEcNo,
-                    sc: servingSc,
-                    freq: servingFreq,
-                    cellId: currentCellID,
-                    rnc: ((!isNaN(currentCellID) && currentCellID >= 0) ? (currentCellID >> 16) : null),
-                    cid: ((!isNaN(currentCellID) && currentCellID >= 0) ? (currentCellID & 0xFFFF) : null),
-                    lac: currentLAC,
-                    active_set: (() => {
-                        let aset = [];
-                        // 1. Identify Candidates (Serving + Neighbors in Window)
-                        // Note: servingLevel is RSCP for 3G
-                        const windowSize = 6;
-                        let candidates = [];
-
-                        if (servingSc !== null && servingLevel !== -999 && !isNaN(servingLevel)) {
-                            candidates.push({ pci: servingSc, rscp: servingLevel, type: 'S' });
-                        }
-
-                        neighbors.forEach(n => {
-                            if (Math.abs(n.freq - servingFreq) < 1) { // Only intra-freq
-                                if (n.rscp >= servingLevel - windowSize) {
-                                    // Avoid duplicates (if neighbor is serving, though parser filters that usually)
-                                    if (!candidates.some(c => c.pci === n.pci)) {
-                                        candidates.push({ pci: n.pci, rscp: n.rscp, type: 'N' });
-                                    }
-                                }
-                            }
-                        });
-
-                        // 2. Sort by RSCP Descending
-                        candidates.sort((a, b) => b.rscp - a.rscp);
-
-                        // 3. Extract SCs for the string representation
-                        aset = candidates.map(c => c.pci);
-
-                        return aset.join(', ');
-                    })(),
-                    // A1..A3 Metrics (Sorted Active Set)
-                    get a1_sc() {
-                        const parts = this.active_set.split(', ');
-                        return parts.length > 0 && parts[0] !== '' ? parseInt(parts[0]) : null;
+                    lat: gps.lat, lng: gps.lng, time,
+                    type: 'MEASUREMENT', level: servingLevel, ecno: servingEcNo, sc: servingSc, freq: servingFreq,
+                    cellId: state.cid, rnc: rnc, cid: cid, lac: state.lac,
+                    parsed: {
+                        serving: {
+                            freq: servingFreq, [techId === 5 ? 'rscp' : 'rsrp']: servingLevel, band: servingBand, sc: servingSc,
+                            [techId === 5 ? 'ecno' : 'rsrq']: servingEcNo, lac: state.lac, cellId: state.cid, rnc: rnc, cid: cid
+                        },
+                        neighbors
                     },
-                    get a1_rscp() {
-                        const sc = this.a1_sc;
-                        if (sc === null) return null;
-                        if (this.sc === sc) return this.level; // Serving
-                        // Check neighbors
-                        const n = this.parsed.neighbors.find(x => x.pci === sc);
-                        return n ? n.rscp : null;
-                    },
-                    get a2_sc() {
-                        const parts = this.active_set.split(', ');
-                        return parts.length > 1 ? parseInt(parts[1]) : null;
-                    },
-                    get a2_rscp() {
-                        const sc = this.a2_sc;
-                        if (sc === null) return null;
-                        if (this.sc === sc) return this.level;
-                        const n = this.parsed.neighbors.find(x => x.pci === sc);
-                        return n ? n.rscp : null;
-                    },
-                    get a3_sc() {
-                        const parts = this.active_set.split(', ');
-                        return parts.length > 2 ? parseInt(parts[2]) : null;
-                    },
-                    get a3_rscp() {
-                        const sc = this.a3_sc;
-                        if (sc === null) return null;
-                        if (this.sc === sc) return this.level;
-                        const n = this.parsed.neighbors.find(x => x.pci === sc);
-                        return n ? n.rscp : null;
-                    },
-                    get a3_rscp() {
-                        const sc = this.a3_sc;
-                        if (sc === null) return null;
-                        if (this.sc === sc) return this.level;
-                        const n = this.parsed.neighbors.find(x => x.pci === sc);
-                        return n ? n.rscp : null;
-                    },
-                    n1_sc, n1_rscp, n1_ecno,
-                    n2_sc, n2_rscp, n2_ecno,
-                    n3_sc, n3_rscp, n3_ecno,
-                    details: line,
-                    parsed: cellData,
-                    properties: { // Standardized Raw Data Container
-                        'Time': parts[1],
-                        'Type': 'MEASUREMENT',
-                        'Tech': techId === 5 ? 'UMTS' : (techId === 7 ? 'LTE' : (techId === 1 || techId === 2 ? 'GSM' : techId)),
-                        'Serving Freq': servingFreq,
-                        'Serving Band': servingBand,
-                        'Serving Level': servingLevel,
-                        'Serving Qual': servingEcNo,
+                    properties: {
+                        'Time': time,
+                        'Tech': techId === 5 ? 'UMTS' : 'LTE',
+                        'Cell ID': state.cid,
+                        'RNC': rnc,
+                        'CID': cid,
+                        'RNC/CID': (rnc !== null && cid !== null) ? `${rnc}/${cid}` : 'N/A',
+                        [techId === 5 ? 'Serving RSCP' : 'Serving RSRP']: servingLevel,
                         'Serving SC/PCI': servingSc,
-                        'Cell ID': currentCellID,
-                        'RNC': ((!isNaN(currentCellID) && currentCellID >= 0) ? (currentCellID >> 16) : null),
-                        'CID': ((!isNaN(currentCellID) && currentCellID >= 0) ? (currentCellID & 0xFFFF) : null),
-                        'LAC': currentLAC,
-                        // Flattened Neighbors (Top 3)
-                        'N1 PCI': n1_sc, 'N1 Level': n1_rscp, 'N1 Qual': n1_ecno,
-                        'N2 PCI': n2_sc, 'N2 Level': n2_rscp, 'N2 Qual': n2_ecno,
-                        'N3 PCI': n3_sc, 'N3 Level': n3_rscp, 'N3 Qual': n3_ecno
+                        [techId === 5 ? 'EcNo' : 'RSRQ']: servingEcNo
                     }
                 };
-
                 allPoints.push(point);
 
-            } else if (header.toUpperCase().includes('RRC') || header.toUpperCase().includes('L3') || header.toUpperCase().includes('NAS')) {
-                const time = parts[1];
-                let direction = '-';
-                let message = 'Unknown'; // Initialize message
-                let payload = 'N/A'; // Initialize payload
-
-                // Improved Heuristic: Search for the "best" candidate for a message name across ALL parts.
-                // We want the longest string that contains letters and is not a common keyword.
-
-                let longestCandidate = '';
-                // let bestIndex = -1; // Unused
-
+            } else if (header.toUpperCase().includes('RRC') || header.toUpperCase().includes('L3')) {
+                // Heuristic for message name
+                let message = 'Unknown';
                 for (let k = 2; k < parts.length; k++) {
-                    const p = parts[k].trim().replace(/"/g, '');
-                    // Skip numeric, empty, or short strings
-                    if (!p || p.length < 3 || /^\d+$/.test(p)) continue;
-
-                    // Skip common keywords
-                    const up = p.toUpperCase();
-                    if (['UL', 'DL', 'UPLINK', 'DOWNLINK', 'UMTS', 'LTE', 'GSM', 'WCDMA'].includes(up)) {
-                        if (['UL', 'DL', 'UPLINK', 'DOWNLINK'].includes(up)) direction = p;
-                        continue;
-                    }
-
-                    // HEX FILTER: If string is purely Hex characters (0-9, A-F), it's likely a raw payload dump.
-                    // A valid message name usually contains letters G-Z (e.g. "REQUEST", "Master") or underscores.
-                    // Exception: Short hex words could be names, but usually > 8 chars hex is payload.
-                    if (/^[0-9A-Fa-f]+$/.test(p) && p.length > 6) {
-                        payload = p; // Capture it!
-                        continue;
-                    }
-
-                    // Prefer strings with underscores (very strong signal for a message name)
-                    const hasUnderscore = p.includes('_');
-                    const currentHasUnderscore = longestCandidate.includes('_');
-
-                    // If current candidate has underscore and new one doesn't, keep current (unless new is much longer?)
-                    // Actually, underscore is a better indicator than length for things like "MEASUREMENT_REPORT" vs "SomeLongGarbageString".
-
-                    if (hasUnderscore && !currentHasUnderscore) {
-                        longestCandidate = p;
-                    } else if (!hasUnderscore && currentHasUnderscore) {
-                        // Keep existing
-                    } else {
-                        // Both have underscore, or neither. Use length.
-                        if (p.length > longestCandidate.length) {
-                            longestCandidate = p;
-                        }
-                    }
-                }
-
-                if (longestCandidate) {
-                    message = longestCandidate;
-                }
-
-                if (message) message = message.replace(/"/g, '');
-
-                // Event Detection Logic
-                let eventType = null;
-                const mUpper = message.toUpperCase();
-
-                if (mUpper.includes('HANDOVER_FAILURE') ||
-                    mUpper.includes('ACTIVE_SET_UPDATE_FAILURE') ||
-                    mUpper.includes('PHYSICAL_CHANNEL_RECONFIGURATION_FAILURE') ||
-                    (mUpper.includes('FAILURE') && (mUpper.includes('HO') || mUpper.includes('RECONF')))) {
-                    eventType = 'HO Fail';
-                } else if (mUpper.includes('RADIO_LINK_FAILURE') || mUpper.includes('RLF') || mUpper.includes('DROP')) {
-                    eventType = 'Call Drop';
-                } else if (mUpper.includes('DISCONNECT') || mUpper.includes('RELEASE_COMPLETE') || mUpper.includes('DEACTIVATE')) {
-                    eventType = 'Call Disconnect';
-                } else if (mUpper.includes('REJECT') || mUpper.includes('SETUP_FAILURE') || mUpper.includes('CALL_FAIL') || mUpper.includes('ABORT')) {
-                    eventType = 'Call Fail';
+                    const p = parts[k].trim();
+                    if (p.length > 5 && !/^\d+$/.test(p)) { message = p; break; }
                 }
 
                 allPoints.push({
-                    lat: currentGPS ? currentGPS.lat : null,
-                    lng: currentGPS ? currentGPS.lng : null,
-                    time: time,
-                    type: 'SIGNALING',
-                    category: (header.toUpperCase().includes('L3') || header.toUpperCase().includes('NAS')) ? 'L3' : 'RRC',
-                    direction: direction,
-                    message: message,
-                    payload: payload,
-                    details: line,
-                    event: eventType, // New property
-                    properties: {
-                        'Time': time,
-                        'Type': 'SIGNALING',
-                        'Category': (header.toUpperCase().includes('L3') || header.toUpperCase().includes('NAS')) ? 'L3' : 'RRC',
-                        'Direction': direction,
-                        'Message': message,
-                        'Event': eventType,
-                        'Payload': payload
-                    }
+                    lat: gps ? gps.lat : null, lng: gps ? gps.lng : null,
+                    time, type: 'SIGNALING', message, details: line,
+                    radioSnapshot: { cellId: state.cid, lac: state.lac, psc: state.psc, rnc: state.rnc, neighbors: currentNeighbors.slice(0, 8) },
+                    properties: { 'Time': time, 'Type': 'SIGNALING', 'Message': message }
                 });
             }
         }
 
-        // console.log('--- NMF PARSER DEBUG ---');
-        // console.log('Unique Event Headers Found:', Array.from(uniqueHeaders));
-        // console.log('Signaling Points Found:', allPoints.filter(p => p.type === 'SIGNALING').length);
-        // console.log('------------------------');
-
-        // Split points
         const measurementPoints = allPoints.filter(p => p.type === 'MEASUREMENT');
         const signalingPoints = allPoints.filter(p => p.type === 'SIGNALING');
 
@@ -557,25 +303,23 @@ const NMFParser = {
         let detectedTech = 'Unknown';
         if (measurementPoints.length > 0) {
             const sample = measurementPoints.slice(0, 50);
-            const freqs = sample.map(p => p.parsed && p.parsed.serving ? parseFloat(p.parsed.serving.freq) : NaN).filter(f => !isNaN(f));
-            const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
-            if (is3G) {
-                detectedTech = '3G (UMTS)';
-            } else {
-                const avgFreq = freqs.reduce((a, b) => a + b, 0) / freqs.length;
-                if (avgFreq < 1000) detectedTech = '2G (GSM)';
-                else if (avgFreq > 120000) detectedTech = '5G (NR)';
-                else detectedTech = '4G (LTE)';
+            const freqs = sample.map(p => p.freq).filter(f => !isNaN(f) && f > 0);
+            if (freqs.length > 0) {
+                const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
+                if (is3G) {
+                    detectedTech = '3G (UMTS)';
+                } else {
+                    const avgFreq = freqs.reduce((a, b) => a + b, 0) / freqs.length;
+                    if (avgFreq < 1000) detectedTech = '2G (GSM)';
+                    else if (avgFreq > 120000) detectedTech = '5G (NR)';
+                    else detectedTech = '4G (LTE)';
+                }
             }
-            if (freqs.includes(10788)) detectedTech = '3G (WCDMA)';
         }
 
-        return {
-            points: measurementPoints,
-            signaling: signalingPoints,
-            tech: detectedTech
-        };
+        return { points: measurementPoints, signaling: signalingPoints, tech: detectedTech };
     }
+
 };
 
 const ExcelParser = {
@@ -708,8 +452,7 @@ const ExcelParser = {
                     band: (bandCol && row[bandCol] !== undefined) ? row[bandCol] : undefined,
                     cellId: (cellIdCol && row[cellIdCol] !== undefined) ? row[cellIdCol] : undefined,
                     throughput_dl: (dlThputCol && row[dlThputCol] !== undefined) ? (parseNumber(row[dlThputCol]) * 1000.0) : undefined, // Convert -> Kbps
-                    throughput_ul: (ulThputCol && row[ulThputCol] !== undefined) ? (parseNumber(row[ulThputCol]) * 1000.0) : undefined,  // Convert -> Kbps
-                    properties: { ...row } // Populate with raw Excel row data
+                    throughput_ul: (ulThputCol && row[ulThputCol] !== undefined) ? (parseNumber(row[ulThputCol]) * 1000.0) : undefined  // Convert -> Kbps
                 };
 
                 // Fallback: If SC is 0 and CellID looks like PCI (and no explicit SC col), try to recover
@@ -732,8 +475,16 @@ const ExcelParser = {
                             if (!isNaN(c)) point.cid = c;
                         }
                     } else {
-                        // Conventional Short CID
-                        point.cid = parseInt(point.cellId);
+                        // Check if it's a Big Int (RNC+CID)
+                        const val = parseInt(point.cellId);
+                        if (!isNaN(val)) {
+                            if (val > 65535) {
+                                point.rnc = val >> 16;
+                                point.cid = val & 0xFFFF;
+                            } else {
+                                point.cid = val;
+                            }
+                        }
                     }
                 }
 

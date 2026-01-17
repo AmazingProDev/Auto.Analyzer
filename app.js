@@ -3633,7 +3633,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     id: s.cellId || s.calculatedEci || s.id,
                     lat: s.lat,
                     lng: s.lng,
-                    azimuth: s.azimuth
+                    azimuth: s.azimuth,
+                    rnc: s.rnc,
+                    cid: s.cid,
+                    pci: s.pci || s.sc,
+                    freq: s.currentFreq || s.freq
                 };
             }
 
@@ -3712,6 +3716,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let html = `
             <div style="padding: 10px;">
+                <!-- Serving Cell Header (Fixed) -->
+                ${servingRes && servingRes.name ? `
+                <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid #444;">
+                    <div style="font-size:14px; font-weight:bold; color:#22c55e;">${servingRes.name}</div>
+                    <div style="font-size:11px; color:#888;">ID: ${servingRes.id || '-'}</div>
+                </div>` : ''}
+
                 <div style="display:flex; justify-content:space-between; margin-bottom:10px; border-bottom: 2px solid #555; padding-bottom:5px;">
                     <span style="font-size:12px; color:#ccc;">${p.time || sourceObj.Time || 'No Time'}</span>
                     <span style="font-size:12px; color:#ccc;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
@@ -4110,42 +4121,137 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- NEW: Log View Generator ---
     function generatePointInfoHTMLLog(p, logColor) {
         // Extract Serving
-        let sName = 'Unknown', sSC = '-', sRSCP = '-', sEcNo = '-', sFreq = '-';
+        let sName = 'Unknown', sSC = '-', sRSCP = '-', sEcNo = '-', sFreq = '-', sRnc = null, sCid = null, sLac = null;
+        let isLTE = false;
+
+        // Explicit Name Resolution (Matches Map Logic)
+        let servingRes = null;
+        if (window.resolveSmartSite) {
+            servingRes = window.resolveSmartSite(p);
+            if (servingRes && servingRes.name) sName = servingRes.name;
+        }
+
+        const connectionTargets = [];
+        if (servingRes && servingRes.lat && servingRes.lng) {
+            connectionTargets.push({
+                lat: servingRes.lat, lng: servingRes.lng, color: '#3b82f6', weight: 8, cellId: servingRes.id
+            });
+        }
+
         if (p.parsed && p.parsed.serving) {
-            sName = p.parsed.serving.cellName || p.parsed.serving.name || p.cellName || sName;
-            sSC = p.parsed.serving.sc !== undefined ? p.parsed.serving.sc : sSC;
-            sRSCP = p.parsed.serving.rscp !== undefined ? p.parsed.serving.rscp : sRSCP;
-            sEcNo = p.parsed.serving.ecno !== undefined ? p.parsed.serving.ecno : sEcNo;
-            sFreq = p.parsed.serving.freq !== undefined ? p.parsed.serving.freq : sFreq;
+            const s = p.parsed.serving;
+            if (sName === 'Unknown') sName = s.cellName || s.name || p.cellName || sName;
+            sSC = s.sc !== undefined ? s.sc : sSC;
+
+            // Flexible Level Extraction
+            sRSCP = s.rscp !== undefined ? s.rscp : (s.rsrp !== undefined ? s.rsrp : (s.level !== undefined ? s.level : sRSCP));
+            sEcNo = s.ecno !== undefined ? s.ecno : (s.rsrq !== undefined ? s.rsrq : sEcNo);
+
+            sFreq = s.freq !== undefined ? s.freq : sFreq;
+            sRnc = s.rnc || p.rnc;
+            sCid = s.cid || p.cid;
+            sLac = s.lac || p.lac;
+            isLTE = s.rsrp !== undefined;
         } else {
             // Flat fallback
-            sName = p.cellName || p.siteName || sName;
+            if (sName === 'Unknown') sName = p.cellName || p.siteName || sName;
             sSC = p.sc !== undefined ? p.sc : sSC;
-            sRSCP = p.rscp !== undefined ? p.rscp : (p.level !== undefined ? p.level : sRSCP);
+            sRSCP = p.rscp !== undefined ? p.rscp : (p.rsrp !== undefined ? p.rsrp : (p.level !== undefined ? p.level : sRSCP));
             sEcNo = p.ecno !== undefined ? p.ecno : (p.qual !== undefined ? p.qual : sEcNo);
             sFreq = p.freq !== undefined ? p.freq : sFreq;
+            sRnc = p.rnc;
+            sCid = p.cid;
+            sLac = p.lac;
+            isLTE = p.Tech === 'LTE';
+        }
+
+        // DATABASE FALLBACK: If RNC/CID are still missing but we resolved a site, use its IDs
+        if ((sRnc === null || sRnc === undefined) && servingRes && servingRes.rnc) {
+            sRnc = servingRes.rnc;
+            sCid = servingRes.cid;
+            if (sName === 'Unknown') sName = servingRes.name || sName;
+        }
+
+        const levelHeader = isLTE ? 'RSRP' : 'RSCP';
+        const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
+
+        // Determine Identity Label
+        let identityLabel = `${sSC}/${sFreq}`; // Default 
+        if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
+            identityLabel = `${sRnc}/${sCid}`; // UMTS RNC/CID
+        } else if (p.cellId && p.cellId !== 'N/A') {
+            identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
         }
 
         // Neighbors
-        const neighbors = [];
+        let rawNeighbors = [];
+        const resolveN = (sc, freq, cellName) => {
+            if (window.resolveSmartSite && (sc !== undefined || freq !== undefined)) {
+                // Try with current LAC first
+                let nRes = window.resolveSmartSite({
+                    sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng, lac: sLac
+                });
+
+                // Fallback: Try without LAC (neighbors are often on different LACs)
+                if ((!nRes || nRes.name === 'Unknown') && sLac) {
+                    nRes = window.resolveSmartSite({
+                        sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng
+                    });
+                }
+
+                if (nRes && nRes.name && nRes.name !== 'Unknown') {
+                    return { name: nRes.name, rnc: nRes.rnc, cid: nRes.cid };
+                }
+            }
+            return { name: cellName || 'Unknown', rnc: null, cid: null };
+        };
+
         if (p.parsed && p.parsed.neighbors) {
-            p.parsed.neighbors.forEach((n, i) => {
-                neighbors.push({
-                    type: `N${i + 1}`,
-                    name: n.cellName || '-',
-                    sc: n.pci !== undefined ? n.pci : (n.sc !== undefined ? n.sc : '-'),
-                    rscp: n.rscp !== undefined ? n.rscp : '-',
+            p.parsed.neighbors.forEach(n => {
+                const sc = n.pci !== undefined ? n.pci : (n.sc !== undefined ? n.sc : undefined);
+                const freq = n.freq !== undefined ? n.freq : undefined;
+
+                // FILTER: Skip if this neighbor matches the serving cell
+                if (sc == sSC && freq == sFreq) return;
+
+                rawNeighbors.push({
+                    sc: sc !== undefined ? sc : '-',
+                    rscp: n.rscp !== undefined ? n.rscp : -140, // Default low for sort
                     ecno: n.ecno !== undefined ? n.ecno : '-',
-                    freq: n.freq !== undefined ? n.freq : '-'
+                    freq: n.freq !== undefined ? n.freq : '-',
+                    cellName: n.cellName
                 });
             });
         }
         // Fallback Flat Neighbors (N1..N3)
-        if (neighbors.length === 0) {
-            if (p.n1_sc !== undefined) neighbors.push({ type: 'N1', name: '-', sc: p.n1_sc, rscp: p.n1_rscp, ecno: p.n1_ecno, freq: sFreq }); // Assume Intrafreq
-            if (p.n2_sc !== undefined) neighbors.push({ type: 'N2', name: '-', sc: p.n2_sc, rscp: p.n2_rscp, ecno: p.n2_ecno, freq: sFreq });
-            if (p.n3_sc !== undefined) neighbors.push({ type: 'N3', name: '-', sc: p.n3_sc, rscp: p.n3_rscp, ecno: p.n3_ecno, freq: sFreq });
+        if (rawNeighbors.length === 0) {
+            if (p.n1_sc !== undefined && (p.n1_sc != sSC)) rawNeighbors.push({ sc: p.n1_sc, rscp: p.n1_rscp || -140, ecno: p.n1_ecno, freq: sFreq });
+            if (p.n2_sc !== undefined && (p.n2_sc != sSC)) rawNeighbors.push({ sc: p.n2_sc, rscp: p.n2_rscp || -140, ecno: p.n2_ecno, freq: sFreq });
+            if (p.n3_sc !== undefined && (p.n3_sc != sSC)) rawNeighbors.push({ sc: p.n3_sc, rscp: p.n3_rscp || -140, ecno: p.n3_ecno, freq: sFreq });
         }
+
+        // Sort by RSCP Descending
+        rawNeighbors.sort((a, b) => {
+            const valA = parseFloat(a.rscp);
+            const valB = parseFloat(b.rscp);
+            if (isNaN(valA)) return 1;
+            if (isNaN(valB)) return -1;
+            return valB - valA;
+        });
+
+        const neighbors = rawNeighbors.map((n, i) => {
+            const resolved = resolveN(n.sc, n.freq, n.cellName);
+            return {
+                type: `N${i + 1}`,
+                name: resolved.name,
+                rnc: resolved.rnc,
+                cid: resolved.cid,
+                sc: n.sc,
+                rscp: n.rscp === -140 ? '-' : n.rscp,
+                ecno: n.ecno,
+                freq: n.freq
+            };
+        });
 
         // Build HTML
         let rows = '';
@@ -4153,7 +4259,7 @@ document.addEventListener('DOMContentLoaded', () => {
         rows += `
             <tr class="log-row serving-row">
                 <td class="log-cell-type">Serving</td>
-                <td class="log-cell-name"><span class="log-header-serving">${sName}</span> <span style="color:#666; font-size:10px;">(${sSC}/${sFreq})</span></td>
+                <td class="log-cell-name"><span class="log-header-serving">${sName}</span> <span style="color:#666; font-size:10px;">(${identityLabel})</span></td>
                 <td class="log-cell-val">${sSC}</td>
                 <td class="log-cell-val">${sRSCP}</td>
                 <td class="log-cell-val">${sEcNo}</td>
@@ -4162,10 +4268,13 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
 
         neighbors.forEach(n => {
+            let nIdLabel = `${n.sc}/${n.freq}`;
+            if (n.rnc && n.cid) nIdLabel = `${n.rnc}/${n.cid}`;
+
             rows += `
                 <tr class="log-row">
                     <td class="log-cell-type">${n.type}</td>
-                    <td class="log-cell-name">${n.name} <span style="color:#666; font-size:10px;">(${n.sc}/${n.freq})</span></td>
+                    <td class="log-cell-name">${n.name} <span style="color:#666; font-size:10px;">(${nIdLabel})</span></td>
                     <td class="log-cell-val">${n.sc}</td>
                     <td class="log-cell-val">${n.rscp}</td>
                     <td class="log-cell-val">${n.ecno}</td>
@@ -4190,8 +4299,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             <th style="width:10%">Type</th>
                             <th style="width:40%">Cell Name</th>
                             <th>SC</th>
-                            <th>RSCP</th>
-                            <th>EcNo</th>
+                            <th>${levelHeader}</th>
+                            <th>${qualHeader}</th>
                             <th>Freq</th>
                         </tr>
                     </thead>
@@ -4202,7 +4311,17 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
         `;
 
-        return { html, connectionTargets: [] }; // Connections can be added if needed, kept empty for clean view
+        // Add connection targets for top 3 neighbors if they resolve
+        neighbors.slice(0, 3).forEach(n => {
+            if (window.resolveSmartSite) {
+                const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
+                if (nRes && nRes.lat && nRes.lng) {
+                    connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: '#ef4444', weight: 4, cellId: nRes.id });
+                }
+            }
+        });
+
+        return { html, connectionTargets };
     }
 
 
@@ -4225,14 +4344,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Remove existing title text to replace with flex container if needed, or just append
                 // Let's repurpose the header content slightly
                 const closeBtn = headerDom.querySelector('.info-panel-close');
-                
+
                 toggleBtn = document.createElement('span');
                 toggleBtn.id = 'toggleViewBtn';
                 toggleBtn.className = 'toggle-view-btn';
-                toggleBtn.innerHTML = '⚙️ View'; 
+                toggleBtn.innerHTML = '⚙️ View';
                 toggleBtn.title = 'Switch View Mode';
                 toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };
-                
+
                 // Insert before close button
                 headerDom.insertBefore(toggleBtn, closeBtn);
             }
@@ -4259,7 +4378,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Use new Log Generator if mode is 'log', else default
                 const generator = window.pointDetailsMode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
                 const { html, connectionTargets } = generator(point, log.color, false);
-                
+
                 const body = document.createElement('div');
                 body.innerHTML = html;
                 content.appendChild(body);
@@ -4743,17 +4862,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Try to match common headers
                     // Map needs: lat, lng, azimuth, name, cellId, tech, color
                     const sectors = json.map(row => {
-                        // Normalize helper: remove spaces, underscores, lowercase
-                        const normalize = (str) => str.toString().toLowerCase().replace(/[\s_]/g, '');
+                        // Normalize helper: lowercase, remove ALL non-alphanumeric chars
+                        const normalize = (str) => String(str).toLowerCase().replace(/[^a-z0-9]/g, '');
                         const rowKeys = Object.keys(row);
 
                         const getVal = (possibleNames) => {
                             for (let name of possibleNames) {
                                 const target = normalize(name);
-                                // Check exact match first
-                                if (row[name] !== undefined) return row[name];
-
-                                // Check normalized match against all row keys
+                                // Check exact match of normalized keys
                                 const foundKey = rowKeys.find(k => normalize(k) === target);
                                 if (foundKey) return row[foundKey];
                             }
@@ -4769,22 +4885,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         // New Fields for Strict Matching
                         const lac = getVal(['lac', 'location area code']);
-                        const pci = getVal(['psc', 'sc', 'pci', 'physcial cell id', 'scrambling code']);
-                        const freq = getVal(['downlink uarfcn', 'dl uarfcn', 'uarfcn', 'freq', 'frequency', 'dl freq']);
+                        const pci = getVal(['psc', 'sc', 'pci', 'physical cell id', 'physcial cell id', 'scrambling code', 'physicalcellid']);
+                        const freq = getVal(['downlink uarfcn', 'dl uarfcn', 'uarfcn', 'freq', 'frequency', 'dl freq', 'downlink earfcn', 'dl earfcn', 'earfcn', 'downlinkearfcn']);
                         const band = getVal(['band', 'band name', 'freq band']);
 
                         // Specific Request: eNodeB ID-Cell ID
                         const enodebCellIdRaw = getVal(['enodeb id-cell id', 'enodebid-cellid', 'enodebidcellid']);
+
+                        let rnc = parseInt(getVal(['rnc', 'rncid', 'rnc_id', 'enodeb', 'enodebid', 'enodeb id', 'enodeb_id']));
+                        let cid = parseInt(getVal(['cid', 'c_id', 'ci', 'cell id', 'cell_id', 'cellid']));
 
                         let calculatedEci = null;
                         if (enodebCellIdRaw) {
                             const parts = String(enodebCellIdRaw).split('-');
                             if (parts.length === 2) {
                                 const enb = parseInt(parts[0]);
-                                const cid = parseInt(parts[1]);
-                                if (!isNaN(enb) && !isNaN(cid)) {
+                                const c = parseInt(parts[1]);
+                                if (!isNaN(enb) && !isNaN(c)) {
                                     // Standard LTE ECI Calculation: eNodeB * 256 + CellID
-                                    calculatedEci = (enb * 256) + cid;
+                                    calculatedEci = (enb * 256) + c;
+
+                                    // Fallback: If RNC/CID columns were missing, use these
+                                    if (isNaN(rnc)) rnc = enb;
+                                    if (isNaN(cid)) cid = c;
                                 }
                             }
                         }
@@ -4799,6 +4922,25 @@ document.addEventListener('DOMContentLoaded', () => {
                             else if (combinedName.includes('3g') || combinedName.includes('umts') || combinedName.includes('wcdma')) tech = '3G';
                             else if (combinedName.includes('2g') || combinedName.includes('gsm')) tech = '2G';
                             else if (combinedName.includes('5g') || combinedName.includes('nr')) tech = '5G';
+                        }
+
+                        // Robust Fallback: Attempt to extract RNC from CellID or RawID if still missing
+                        if (isNaN(rnc) || !rnc) {
+                            const candidates = [String(enodebCellIdRaw), String(cellId), String(name)];
+                            for (let c of candidates) {
+                                if (c && (c.includes('-') || c.includes('/'))) {
+                                    const parts = c.split(/[-/]/);
+                                    if (parts.length === 2) {
+                                        const p1 = parseInt(parts[0]);
+                                        if (!isNaN(p1) && p1 > 0 && p1 < 65535) {
+                                            rnc = p1;
+                                            // Also recover CID if missing
+                                            if (isNaN(cid)) cid = parseInt(parts[1]);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Determine Color
@@ -4818,13 +4960,16 @@ document.addEventListener('DOMContentLoaded', () => {
                             cellName,
                             cellId,
                             lac,
-                            pci, sc: pci,
-                            freq,
+                            lac,
+                            pci: parseInt(pci), sc: parseInt(pci),
+                            freq: parseInt(freq),
                             band,
                             tech,
                             color,
                             rawEnodebCellId: enodebCellIdRaw,
-                            calculatedEci: calculatedEci
+                            calculatedEci: calculatedEci,
+                            rnc: isNaN(rnc) ? undefined : rnc,
+                            cid: isNaN(cid) ? undefined : cid
                         };
                     })
                     // Filter out invalid

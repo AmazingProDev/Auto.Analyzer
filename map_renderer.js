@@ -52,7 +52,7 @@ class MapRenderer {
 
         // Custom Pane for Connections (Lines) to ensure they are ON TOP of filled polygons
         this.map.createPane('connectionsPane');
-        this.map.getPane('connectionsPane').style.zIndex = 620; // Lower than sites/points
+        this.map.getPane('connectionsPane').style.zIndex = 800; // Above sites (650) and points
         this.map.getPane('connectionsPane').style.pointerEvents = 'none';
 
         // Define Custom Renderers
@@ -425,6 +425,25 @@ class MapRenderer {
         if (p.rnc != null && p.cid != null) {
             const key = `${p.rnc}/${p.cid}`.replace(/\s/g, '');
             if (this.siteIndex.byId.has(key)) return this.siteIndex.byId.get(key);
+
+            // Fallback: Try matching as Long Cell ID
+            const longId = (Number(p.rnc) << 16) + Number(p.cid);
+            let s = siteData.find(x => x.cellId == longId || x.calculatedEci == longId || x.rawEnodebCellId == longId);
+            if (s) return s;
+
+            // Fallback 2: CID Bitmask Discrepancy (Some logs set bit 12, value 4096, which site data ignores)
+            const maskedCid = p.cid & 0xEFFF;
+            const maskedLongId = (Number(p.rnc) << 16) + maskedCid;
+            const maskedKey = `${p.rnc}/${maskedCid}`;
+
+            if (this.siteIndex.byId.has(maskedKey)) return this.siteIndex.byId.get(maskedKey);
+            s = siteData.find(x => x.cellId == maskedLongId || x.cellId == maskedCid || x.rawEnodebCellId == maskedLongId);
+            if (s) return s;
+
+            // Fallback 3: Short ID Match (RNC + High 12 bits of CID) - Very common in 3G
+            const shortId = p.cid >> 4;
+            const shortKeyMatch = siteData.find(x => x.rnc == p.rnc && (x.cid >> 4) == shortId);
+            if (shortKeyMatch) return shortKeyMatch;
         }
 
         // 0. PRIORITY: Strict eNodeB ID-Cell ID Matching
@@ -454,18 +473,46 @@ class MapRenderer {
             if (s) return s;
         }
 
-        // 3. CellID Only
+        // 3. Smart Fallback: RF + Proximity (If CellID is stale or missing)
+        if (pci !== null && freq !== null && p.lat && p.lng) {
+            const nearbyRadius = 0.02; // Roughly 2km in lat/lng degrees
+            const candidates = siteData.filter(x => {
+                const pciMatch = (x.pci == pci || x.sc == pci);
+                const freqMatch = (Math.abs(x.freq - freq) < 1);
+                const distMatch = Math.abs(x.lat - p.lat) < nearbyRadius && Math.abs(x.lng - p.lng) < nearbyRadius;
+                return pciMatch && freqMatch && distMatch;
+            });
+
+            // 4. Loose Fallback: PCI + Proximity (Ignore Freq mismatch if strictly close)
+            if (candidates.length === 0) {
+                const looseCandidates = siteData.filter(x => {
+                    const pciMatch = (x.pci == pci || x.sc == pci);
+                    // Stricter distance for loose match (0.005 ~ 500m)
+                    const distMatch = Math.abs(x.lat - p.lat) < 0.005 && Math.abs(x.lng - p.lng) < 0.005;
+                    return pciMatch && distMatch;
+                });
+                if (looseCandidates.length > 0) return looseCandidates[0]; // Take first/closest
+            }
+
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) {
+                // If multiple candidates, pick the closest one
+                return candidates.sort((a, b) => {
+                    const distA = Math.pow(a.lat - p.lat, 2) + Math.pow(a.lng - p.lng, 2);
+                    const distB = Math.pow(b.lat - p.lat, 2) + Math.pow(b.lng - p.lng, 2);
+                    return distA - distB;
+                })[0];
+            }
+        }
+
+        // 4. Last Resort: CellID Only
         if (cellId) {
-            // Optimization: check index first if string match
             const norm = String(cellId).replace(/\s/g, '');
             if (this.siteIndex.byId.has(norm)) return this.siteIndex.byId.get(norm);
-
-            // Fallback for numeric vs string types mismatch
             const s = siteData.find(x => x.cellId == cellId);
             if (s) return s;
         }
 
-        console.warn('[MapRenderer] getServingCell: Failed to find match.', { pci, lac, freq, cellId });
         return null;
     }
 
@@ -1066,13 +1113,21 @@ class MapRenderer {
                 }
 
                 // Popup
+                let displayId = `${s.rnc}/${s.cid}`;
+
+                // Fallback Display Logic: Parse cellId if RNC is missing
+                if ((!s.rnc || s.rnc === 'undefined') && s.cellId && String(s.cellId).match(/[\-\/]/)) {
+                    const parts = String(s.cellId).split(/[\-\/]/);
+                    if (parts.length === 2) displayId = `${parts[0]}/${parts[1]}`;
+                }
+
                 const content = `
                 <div style="font-family: sans-serif; font-size: 13px;">
                     <strong>${s.name || 'Unknown Site'}</strong><br>
                     Cell: ${s.cellId || '-'}<br>
                     Azimuth: ${azimuth}°<br>
                     Tech: ${s.tech || '-'}<br>
-                    <span style="font-size:10px; color:#888;">(RNC/CID: ${s.rnc}/${s.cid})</span><br>
+                    <span style="font-size:10px; color:#888;">(RNC/CID: ${displayId})</span><br>
                     <button style="margin-top:5px; cursor:pointer;" onclick="window.editSector('${layer.id}', ${index})">Edit</button>
                 </div>
             `;
