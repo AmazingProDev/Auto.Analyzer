@@ -88,8 +88,9 @@ class MapRenderer {
             clearTimeout(zoomTimeout);
             zoomTimeout = setTimeout(() => {
                 this.updateLabelVisibility();
-                if (this.siteData && this.siteData.length > 0) {
-                    this.renderSites(false); // Refresh
+                // Check if we have active layers (siteData is legacy/aggregated, siteLayers is source of truth)
+                if (this.siteLayers.size > 0 || (this.siteData && this.siteData.length > 0)) {
+                    this.renderSites(false); // Refresh LOD (Dots vs Sectors)
                 }
             }, 300); // Wait for zoom to settle
         });
@@ -1040,6 +1041,19 @@ class MapRenderer {
             return;
         }
         console.log(`[MapRenderer] Rendering ${visibleSectors.length} sectors.`);
+
+        // AUTO-ZOOM (Fix for "Dots only" issue)
+        if (fitBounds) {
+            const lats = visibleSectors.map(s => s.lat).filter(l => !isNaN(l));
+            const lngs = visibleSectors.map(s => s.lng).filter(l => !isNaN(l));
+            if (lats.length > 0 && lngs.length > 0) {
+                const minLat = Math.min(...lats);
+                const maxLat = Math.max(...lats);
+                const minLng = Math.min(...lngs);
+                const maxLng = Math.max(...lngs);
+                this.map.fitBounds([[minLat, minLng], [maxLat, maxLng]], { padding: [50, 50] });
+            }
+        }
 
         this.sitesLayer = L.layerGroup();
 

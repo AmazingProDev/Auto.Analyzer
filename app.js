@@ -5088,15 +5088,15 @@ document.addEventListener('DOMContentLoaded', () => {
         item.id = `site - layer - ${id}`;
 
         item.innerHTML = `
-< div class= "layer-info" >
-<span class="layer-name" title="${name}" style="font-size:13px;">${name}</span>
-        </div >
-    <div class="layer-controls">
-        <button class="layer-btn settings-btn" data-id="${id}" title="Layer Settings">⚙️</button>
-        <button class="layer-btn visibility-btn" data-id="${id}" title="Toggle Visibility">👁️</button>
-        <button class="layer-btn remove-btn" data-id="${id}" title="Remove Layer">✕</button>
-    </div>
-    `;
+        <div class="layer-info">
+            <span class="layer-name" title="${name}" style="font-size:13px;">${name}</span>
+        </div>
+        <div class="layer-controls">
+            <button class="layer-btn settings-btn" data-id="${id}" title="Layer Settings">⚙️</button>
+            <button class="layer-btn visibility-btn" data-id="${id}" title="Toggle Visibility">👁️</button>
+            <button class="layer-btn remove-btn" data-id="${id}" title="Remove Layer">✕</button>
+        </div>
+        `;
 
         // Event Listeners
         const settingsBtn = item.querySelector('.settings-btn');
