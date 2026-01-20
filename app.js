@@ -5650,7 +5650,7 @@ function renderSignalingTable() {
 
         displayPoints.forEach((p, index) => {
             const tr = document.createElement('tr');
-            tr.id = `sig - row - ${p.time.replace(/[:.]/g, '')} - ${index}`; // Unique ID for scrolling
+            tr.id = 'sig-row-' + p.time.replace(/[:.]/g, '') + '-' + index;
             tr.className = 'signaling-row'; // Add class for selection
             tr.style.cursor = 'pointer';
 
@@ -5684,7 +5684,7 @@ function renderSignalingTable() {
             };
 
             const mapBtn = (p.lat && p.lng)
-                ? `< button onclick = "window.map.setView([${p.lat}, ${p.lng}], 16); event.stopPropagation();" class= "btn" style = "padding:2px 6px; font-size:10px; background-color:#3b82f6;" > Map</button > `
+                ? '<button onclick="window.map.setView([' + p.lat + ', ' + p.lng + '], 16); event.stopPropagation();" class="btn" style="padding:2px 6px; font-size:10px; background-color:#3b82f6;">Map</button>'
                 : '<span style="color:#666; font-size:10px;">No GPS</span>';
 
             // Store point data for the info button handler (simulated via dataset or just passing object index if we could, but stringifying is easier for this hack)
@@ -5694,16 +5694,15 @@ function renderSignalingTable() {
             let typeClass = 'badge-rrc';
             if (p.category === 'L3') typeClass = 'badge-l3';
 
-            tr.innerHTML = `
-< td > ${p.time}</td >
-                    <td><span class="${typeClass}">${p.category}</span></td>
-                    <td>${p.direction}</td>
-                    <td style="max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${p.message}">${p.message}</td>
-                    <td>
-                        ${mapBtn} 
-                        <button onclick="const p = this.parentElement.parentElement.pointData; showSignalingPayload(p); event.stopPropagation();" class="btn" style="padding:2px 6px; font-size:10px; background-color:#475569;">Info</button>
-                    </td>
-                `;
+            tr.innerHTML = 
+                '<td>' + p.time + '</td>' +
+                '<td><span class="' + typeClass + '">' + p.category + '</span></td>' +
+                '<td>' + p.direction + '</td>' +
+                '<td style="max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' + p.message + '">' + p.message + '</td>' +
+                '<td>' +
+                    mapBtn +
+                    '<button onclick="const p = this.parentElement.parentElement.pointData; showSignalingPayload(p); event.stopPropagation();" class="btn" style="padding:2px 6px; font-size:10px; background-color:#475569;">Info</button>' +
+                '</td>';
             tbody.appendChild(tr);
         });
     }
