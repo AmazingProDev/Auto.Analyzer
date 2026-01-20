@@ -61,7 +61,10 @@ class MapRenderer {
         // CUSTOM PANE FOR SITES & LOG POINTS (Interactive Top Layer)
         this.map.createPane('sitesPane');
         this.map.getPane('sitesPane').style.zIndex = 650;
+        this.map.getPane('sitesPane').style.pointerEvents = 'none'; // Critical: Allow clicks to pass through empty areas
         this.sitesRenderer = L.canvas({ pane: 'sitesPane', tolerance: 5 });
+        // SVG Renderer for Sites (Sectors) to allow click-through transparency
+        this.sitesSvgRenderer = L.svg({ pane: 'sitesPane' });
 
         // CUSTOM PANE FOR LABELS (Highest)
         this.map.createPane('labelsPane');
@@ -252,7 +255,11 @@ class MapRenderer {
 
         // 1. Priority: Discrete Identity Metrics
         // (Moved up to prevent 'Cell ID' being matched as 'level' by getThresholdKey default)
-        if (['cellId', 'cid', 'pci', 'sc', 'lac', 'serving_cell_name', 'Cell ID'].includes(metric)) {
+        const discreteMetrics = [
+            'cellId', 'cid', 'pci', 'sc', 'lac', 'serving_cell_name', 'Cell ID',
+            'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name'
+        ];
+        if (discreteMetrics.includes(metric) || metric.toLowerCase().includes('name') || metric.toLowerCase().includes('id-cell')) {
             return this.getDiscreteColor(val);
         }
 
@@ -671,17 +678,20 @@ class MapRenderer {
 
                     // CHECK FOR POLYGON GEOMETRY (Imported SHP Grid)
                     if (p.geometry && (p.geometry.type === 'Polygon' || p.geometry.type === 'MultiPolygon')) {
-                        layer = L.geoJSON(p.geometry, {
-                            pane: 'sitesPane', // Shared pane to ensure interactivity (Canvas stacking issue fix)
-                            renderer: this.sitesRenderer,
-                            style: {
-                                fillColor: color,
-                                color: "transparent",
-                                weight: 0,
-                                opacity: 0,
-                                fillOpacity: 0.8,
-                                interactive: true
-                            }
+                        // Manually create L.polygon to ensure 'renderer' option is passed correctly
+                        // L.geoJSON doesn't always propagate the renderer option to generated paths
+                        const isMulti = p.geometry.type === 'MultiPolygon';
+                        const latlngs = L.GeoJSON.coordsToLatLngs(p.geometry.coordinates, isMulti ? 2 : 1);
+
+                        layer = L.polygon(latlngs, {
+                            pane: 'smartCarePane', // Specific Pane (Z 640)
+                            renderer: this.smartCareRenderer,
+                            fillColor: color,
+                            color: "transparent",
+                            weight: 0,
+                            opacity: 0,
+                            fillOpacity: 0.8,
+                            interactive: true
                         }).addTo(layerGroup);
                     } else {
                         // Default Point Rendering
@@ -693,7 +703,7 @@ class MapRenderer {
                             opacity: 1,
                             fillOpacity: 0.8,
                             pane: 'sitesPane',
-                            renderer: this.sitesRenderer,
+                            renderer: this.sitesSvgRenderer,
                             interactive: true
                         }).addTo(layerGroup);
                     }
@@ -1055,7 +1065,15 @@ class MapRenderer {
             }
         }
 
-        this.sitesLayer = L.layerGroup();
+        // Fix: Reuse existing layer group to avoid leaks/ghost layers
+        if (!this.sitesLayer) {
+            this.sitesLayer = L.layerGroup().addTo(this.map);
+        } else {
+            this.sitesLayer.clearLayers();
+            if (!this.map.hasLayer(this.sitesLayer)) {
+                this.sitesLayer.addTo(this.map);
+            }
+        }
 
         // Clear Labels
         if (this.siteLabelsLayer) {
@@ -1118,6 +1136,8 @@ class MapRenderer {
                 let radiusOffset = 0;
 
                 // 1. External Highlight (User Click) - Highest Priority
+                let currentRadius = range; // Base radius
+
                 if (this.externalHighlight && (s.cellId == this.externalHighlight.id || `${s.rnc}/${s.cid}` == this.externalHighlight.id)) {
                     color = this.externalHighlight.color;
                     finalOpacity = 1;
@@ -1155,6 +1175,8 @@ class MapRenderer {
                     color = overrideColor || this.getSiteColor(s);
                 }
 
+                s.currentRadius = range + radiusOffset; // PERSIST RADIUS FOR CONNECTIONS
+
                 // Calculations
                 const azimuth = s.azimuth || 0;
                 const getPoint = (originLat, originLng, bearing, dist) => {
@@ -1178,7 +1200,7 @@ class MapRenderer {
                         fillOpacity: finalFillOpacity,
                         opacity: finalOpacity,
                         pane: 'sitesPane',
-                        renderer: this.sitesRenderer
+                        renderer: this.sitesSvgRenderer
                     }).addTo(this.sitesLayer);
                 } else {
                     const p1 = getPoint(s.lat, s.lng, azimuth - beam / 2, range + radiusOffset);
@@ -1193,7 +1215,7 @@ class MapRenderer {
                         className: 'sector-polygon',
                         interactive: true,
                         pane: 'sitesPane',
-                        renderer: this.sitesRenderer
+                        renderer: this.sitesSvgRenderer
                     }).addTo(this.sitesLayer);
                 }
 
@@ -1277,8 +1299,9 @@ class MapRenderer {
             });
         });
 
-        this.sitesLayer.addTo(this.map);
+        this.customDiscreteColors = this.customDiscreteColors || {}; // Ensure defined
         this.updateLabelVisibility();
+
 
     }
 

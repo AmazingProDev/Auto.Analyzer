@@ -321,32 +321,50 @@ document.addEventListener('DOMContentLoaded', () => {
         scSidebar.style.display = 'flex'; // Auto-show
 
         const item = document.createElement('div');
-        item.className = 'sc-layer-item';
-        item.id = `sc-item-${layerId}`;
+        item.className = 'sc-layer-group-header expanded'; // Default open on import
+        item.id = `sc-group-${layerId}`;
 
-        let metricsHtml = '';
-        if (customMetrics && customMetrics.length > 0) {
-            metricsHtml = `
-                <div class="sc-metrics-label">DETECTED METRICS</div>
-                <div class="sc-metric-container">
-                    ${customMetrics.map(m => `
-                        <div class="sc-metric-button ${log.currentParam === m ? 'active' : ''}" onclick="window.showMetricOptions(event, '${layerId}', '${m}', 'smartcare')">${m}</div>
-                    `).join('')}
-                </div>
-            `;
-        }
+        // Toggle Logic embedded in onclick
+        item.onclick = (e) => {
+            // Prevent toggling if clicking specific control buttons
+            if (e.target.closest('.sc-btn') || e.target.closest('.sc-metric-button')) return;
+            item.classList.toggle('expanded');
+        };
+
+        const metricsHtml = (customMetrics && customMetrics.length > 0)
+            ? `<div class="sc-metric-container">
+                ${customMetrics.map(m => `
+                    <div class="sc-metric-button ${log.currentParam === m ? 'active' : ''}" 
+                         onclick="window.showMetricOptions(event, '${layerId}', '${m}', 'smartcare')">${m}</div>
+               `).join('')}
+               </div>`
+            : '<div style="font-size:10px; color:#666; font-style:italic;">No metrics found</div>';
 
         item.innerHTML = `
-            <div class="sc-layer-header-row">
-                <div class="sc-tech-tag">${techLabel}</div>
-                <div class="sc-point-count">${pointCount} pts</div>
+            <div class="sc-group-title-row">
+                <div class="sc-group-name">
+                    <span class="sc-caret">▶</span>
+                    ${name}
+                </div>
+                <!-- Top Level Controls -->
                 <div class="sc-layer-controls">
                     <button class="sc-btn sc-btn-toggle" onclick="toggleSmartCareLayer('${layerId}')" title="Toggle Visibility">👁️</button>
                     <button class="sc-btn sc-btn-remove" onclick="removeSmartCareLayer('${layerId}')" title="Remove Layer">❌</button>
                 </div>
             </div>
-            <div class="sc-layer-name-row" title="${name}">${name}</div>
-            ${metricsHtml}
+
+            <!-- Expandable Body -->
+            <div class="sc-layer-body">
+                <!-- Meta Row -->
+                <div class="sc-meta-row">
+                    <div class="sc-meta-left">
+                        <span class="sc-tech-badge-sm">${techLabel}</span>
+                        <span class="sc-count-badge-sm">${pointCount} pts</span>
+                    </div>
+                </div>
+                <!-- Metrics Grid -->
+                ${metricsHtml}
+            </div>
         `;
 
         scLayerList.appendChild(item);
@@ -632,11 +650,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }).filter(p => p !== null);
 
             // Detect Metrics
-            const firstRow = json[0];
-            const customMetrics = Object.keys(firstRow).filter(key => {
-                const val = firstRow[key];
-                return typeof val === 'number' || (!isNaN(parseFloat(val)) && isFinite(val));
-            });
+            // Detect Metrics (Robust Scan of 50 rows)
+            const keysSet = new Set();
+            if (json && json.length > 0) {
+                const scanLimit = Math.min(json.length, 50);
+                for (let i = 0; i < scanLimit; i++) {
+                    Object.keys(json[i]).forEach(k => keysSet.add(k));
+                }
+            }
+            const customMetrics = Array.from(keysSet);
+            // Removed restrictive number-only filtering to allow all columns.
 
             return { points, customMetrics };
         } catch (e) {
@@ -686,9 +709,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function handleMergedExcelImport(files) {
         fileStatus.textContent = `Merging ${files.length} Excel files...`;
-        let pooledPoints = [];
-        let allMetrics = new Set();
-        let nameList = [];
+
+        // Map to store merged points: Key -> Point
+        const mergedPointsMap = new Map();
+        const allMetrics = new Set();
+        const nameList = [];
 
         try {
             for (let i = 0; i < files.length; i++) {
@@ -696,20 +721,51 @@ document.addEventListener('DOMContentLoaded', () => {
                 fileStatus.textContent = `Parsing ${i + 1}/${files.length}: ${file.name}...`;
                 const result = await parseExcelFile(file);
 
-                // Re-index IDs to avoid collisions
-                const offset = pooledPoints.length;
-                const pointsWithOffset = result.points.map(p => ({ ...p, id: p.id + offset }));
-
-                pooledPoints = pooledPoints.concat(pointsWithOffset);
-                result.customMetrics.forEach(m => allMetrics.add(m));
                 nameList.push(file.name.split('.')[0]);
+                result.customMetrics.forEach(m => allMetrics.add(m));
+
+                // MERGE LOGIC (Spatial Join)
+                result.points.forEach(p => {
+                    // Precision for 50m grid (5 decimals is ~1m, adequate for aggregation)
+                    const key = `${p.lat.toFixed(5)}_${p.lng.toFixed(5)}`;
+
+                    if (mergedPointsMap.has(key)) {
+                        const existing = mergedPointsMap.get(key);
+
+                        // 1. Merge Properties (Dictionary Union)
+                        existing.properties = { ...existing.properties, ...p.properties };
+
+                        // 2. Merge Top-Level Keys (excluding identity/geometry)
+                        const keysToExclude = ['id', 'geometry', 'lat', 'lng', 'properties'];
+                        Object.keys(p).forEach(k => {
+                            if (!keysToExclude.includes(k) && p[k] !== undefined) {
+                                // Overwrite or add
+                                existing[k] = p[k];
+                            }
+                        });
+
+                        // 3. Preserve Geometry if existing was missing (unlikely for same key)
+                        if (!existing.geometry && p.geometry) {
+                            existing.geometry = p.geometry;
+                        }
+
+                    } else {
+                        // New Point
+                        mergedPointsMap.set(key, p);
+                    }
+                });
             }
+
+            const pooledPoints = Array.from(mergedPointsMap.values());
 
             if (pooledPoints.length === 0) {
                 alert("No valid data found in selected files.");
                 fileStatus.textContent = 'Merge Failed (No Data)';
                 return;
             }
+
+            // Re-index IDs to ensure clean array connectivity
+            pooledPoints.forEach((p, idx) => p.id = idx);
 
             const fileName = nameList.length > 3 ? `${nameList[0]}_plus_${nameList.length - 1}_merged` : nameList.join('_');
             const logId = `smartcare_merged_${Date.now()}`;
@@ -2287,9 +2343,6 @@ document.addEventListener('DOMContentLoaded', () => {
         // ----------------------------------------------------
         // Drag / Scrubbing Logic for Line Chart
         // ----------------------------------------------------
-        // ----------------------------------------------------
-        // Drag / Scrubbing Logic for Line Chart
-        // ----------------------------------------------------
         let isScrubbing = false;
         const lineCanvas = document.getElementById('lineChartCanvas');
 
@@ -3638,6 +3691,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     lat: s.lat,
                     lng: s.lng,
                     azimuth: s.azimuth,
+                    range: s.currentRadius, // Expose Visual Radius
                     rnc: s.rnc,
                     cid: s.cid,
                     pci: s.pci || s.sc,
@@ -3682,7 +3736,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let servingRes = window.resolveSmartSite(p);
         if (servingRes.lat && servingRes.lng) {
             connectionTargets.push({
-                lat: servingRes.lat, lng: servingRes.lng, color: logColor || '#3b82f6', weight: 8, cellId: servingRes.id
+                lat: servingRes.lat, lng: servingRes.lng, color: logColor || '#3b82f6', weight: 8, cellId: servingRes.id,
+                azimuth: servingRes.azimuth, range: servingRes.range // Enable "Tip" connection
             });
         }
 
@@ -3761,13 +3816,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     ${rawHtml}
                 </div>
                 
-                <div style="margin-top: 15px; text-align: center;">
-                    <button onclick="window.analyzePoint(this)" 
-                            style="background: #3b82f6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;">
-                        Analyze Point
-                    </button>
+                <div style="display:flex; gap:10px; margin-top:10px;">
+                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>
+                    <button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>
+                </div>
                     <!-- Hidden data stash for the analyzer -->
-                    <script type="application/json" id="point-data-stash">${JSON.stringify(sourceObj)}</script>
+                    <script type="application/json" id="point-data-stash">
+                    ${(() => {
+                // Robust Key Finder for Stash
+                const findKey = (obj, target) => {
+                    const t = target.toLowerCase().replace(/\s/g, '');
+                    for (let k of Object.keys(obj)) {
+                        if (k.toLowerCase().replace(/\s/g, '') === t) return obj[k];
+                    }
+                    return undefined;
+                };
+                const cellName = findKey(sourceObj, 'Cell Name') || findKey(sourceObj, 'CellName') || findKey(sourceObj, 'Site Name');
+                const cellId = findKey(sourceObj, 'Cell ID') || findKey(sourceObj, 'CellID') || findKey(sourceObj, 'CI');
+
+                return JSON.stringify({
+                    ...sourceObj,
+                    'Cell Identifier': servingRes && servingRes.name ? servingRes.name : (cellName || servingRes.id || cellId || 'Unknown'),
+                    'Cell Name': servingRes && servingRes.name ? servingRes.name : (cellName || 'Unknown'),
+                    'Tech': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? 'LTE' : 'UMTS')
+                });
+            })()}
+                    </script>
                 </div>
             </div>
         `;
@@ -3780,10 +3854,18 @@ document.addEventListener('DOMContentLoaded', () => {
     window.analyzePoint = (btn) => {
         try {
             // Retrieve data from stash or passed argument
-            const container = btn.parentNode;
-            const script = container.querySelector('#point-data-stash');
+            // FIX: Stash might be sibling or global due to layout changes
+            let script = document.getElementById('point-data-stash');
+
+            // Fallback scope check if needed (though ID should be unique in panel)
+            if (!script && btn) {
+                const container = btn.parentNode.parentNode; // Check grandparent
+                if (container) script = container.querySelector('#point-data-stash');
+            }
+
             if (!script) {
                 console.error("No point data found for analysis.");
+                alert("Error: Analysis data missing from panel.");
                 return;
             }
             const data = JSON.parse(script.textContent);
@@ -3808,7 +3890,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Get Strings for Context
                 const time = d['Time'] || d['time'] || d['timestamp'] || 'N/A';
                 const tech = d['Tech'] || d['Technology'] || d['rat'] || 'LTE'; // Default LTE as per template if unknown
-                const cellId = d['Cell ID'] || d['cellid'] || d['ci'] || d['Serving SC/PCI'] || 'Unknown';
+                const cellId = d['Cell Identifier'] || d['Cell ID'] || d['cellid'] || d['ci'] || d['Serving SC/PCI'] || 'Unknown';
                 const lat = d['Latitude'] || d['lat'] || 'Unknown';
                 const lng = d['Longitude'] || d['lng'] || 'Unknown';
 
@@ -4230,7 +4312,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Determine Identity Label
         let identityLabel = `${sSC}/${sFreq}`; // Default 
-        if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
+        if (servingRes && servingRes.id) {
+            identityLabel = servingRes.id;
+        } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
             identityLabel = `${sRnc}/${sCid}`; // UMTS RNC/CID
         } else if (p.cellId && p.cellId !== 'N/A') {
             identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
@@ -4355,6 +4439,38 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
         });
 
+        // ----------------------------------------------------
+        // EXTRACT OTHER METRICS
+        // ----------------------------------------------------
+        let extraMetricsHtml = '';
+        const sourceObj = p.properties ? p.properties : p;
+        const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
+            'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual',
+            'rnc', 'cid', 'lac', 'freq', 'earfcn', 'uarfcn', 'band', 'tech', 'technology',
+            'cellid', 'cell_id', 'sitename', 'cellname', 'name',
+            'n1_sc', 'n1_rscp', 'n1_ecno', 'n2_sc', 'n2_rscp', 'n2_ecno', 'n3_sc', 'n3_rscp', 'n3_ecno',
+            'a2_sc', 'a2_rscp', 'a3_sc', 'a3_rscp'];
+
+        const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
+
+        Object.entries(sourceObj).forEach(([k, v]) => {
+            const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
+            if (isNeighborKey(k.toLowerCase())) return;
+            if (typeof v === 'object') return; // Skip nested objects for now
+            if (v === undefined || v === null || v === '') return;
+
+            // Format numeric
+            let val = v;
+            if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
+
+            extraMetricsHtml += `
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">
+                <span style="color:#aaa; margin-right: 10px;">${k}</span>
+                <span style="color:#fff; font-weight:bold; text-align: right;">${val}</span>
+            </div>`;
+        });
+
         const html = `
             <div class="log-view-container">
              <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">
@@ -4380,6 +4496,30 @@ document.addEventListener('DOMContentLoaded', () => {
                         ${rows}
                     </tbody>
                 </table>
+                
+                ${extraMetricsHtml ? `
+                <div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">
+                    <div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>
+                    <div style="max-height: 200px; overflow-y: auto;">
+                        ${extraMetricsHtml}
+                    </div>
+                </div>` : ''}
+
+                <div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">
+                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>
+                    <button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>
+                </div>
+                    <!-- Hidden data stash for the analyzer -->
+                    <script type="application/json" id="point-data-stash">
+                    ${JSON.stringify({
+            ...(p.properties || p),
+            'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
+            'Cell Name': sName,
+            'Tech': isLTE ? 'LTE' : 'UMTS'
+        })}
+                    </script>
+                </div>
+
             </div>
         `;
 
@@ -5041,7 +5181,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         try {
                             if (window.mapRenderer) {
                                 console.log('[Sites] Calling mapRenderer.addSiteLayer...');
-                                window.mapRenderer.addSiteLayer(id, name, validSectors, true);
+                                window.mapRenderer.addSiteLayer(id, name, validSectors, false); // DO NOT FIT BOUNDS
                                 console.log('[Sites] addSiteLayer successful. Adding sidebar item...');
                                 addSiteLayerToSidebar(id, name, validSectors.length);
                                 console.log('[Sites] Sidebar item added.');
@@ -6477,4 +6617,253 @@ window.syncToBackend = function (siteData) {
 // Initialize Map Action Controls Draggability
 // Map Action Controls are now fixed in the header, no draggability needed.
 
+// ----------------------------------------------------
+// GLOBAL MANAGEMENT SUMMARY GENERATOR (MOVED TO ROOT SCOPE)
+// ----------------------------------------------------
+// ----------------------------------------------------
+// GLOBAL MANAGEMENT SUMMARY GENERATOR (MOVED TO ROOT SCOPE)
+// ----------------------------------------------------
+window.generateManagementSummary = () => {
+    const stash = document.getElementById('point-data-stash');
+    if (!stash || !stash.textContent) {
+        alert("No point data available for summary.");
+        return;
+    }
 
+    let d;
+    try {
+        d = JSON.parse(stash.textContent);
+    } catch (e) {
+        console.error("Stash parse error", e);
+        return;
+    }
+
+    // --- 1. Data Abstraction & Cleaning ---
+    const getVal = (keys) => {
+        for (const k of keys) {
+            if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
+                const clean = String(d[k]).replace(/[^\d.-]/g, '');
+                const floatVal = parseFloat(clean);
+                if (!isNaN(floatVal)) return floatVal;
+            }
+        }
+        return null;
+    };
+
+    // Metrics
+    const rsrp = getVal(['RSRP', 'Signal Strength', 'rsrp']);
+    const sinr = getVal(['SINR', 'Sinr', 'sinr']);
+    const dlTput = getVal(['DL Throughput', 'Downlink Throughput', 'DL_Throughput']);
+    const prbLoad = getVal(['PRB Load', 'Load', 'Cell Load']);
+
+    // Context
+    const cellId = d['Cell Identifier'] || 'Unknown';
+
+    // Robust Location Lookup
+    const latRaw = d['lat'] || d['Latitude'] || d['latitude'] || d['LAT'];
+    const lngRaw = d['lng'] || d['Longitude'] || d['longitude'] || d['LONG'];
+
+    let location = "Unknown";
+    if (latRaw && lngRaw) {
+        const lat = parseFloat(latRaw);
+        const lng = parseFloat(lngRaw);
+        if (!isNaN(lat) && !isNaN(lng)) {
+            location = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+        }
+    }
+
+    // --- 2. Logic Engine ---
+
+    // A. Overall Performance Status
+    let status = "Satisfactory";
+    let statusClass = "status-ok"; // Default Green
+
+    if (rsrp !== null && rsrp < -110) { status = "Critically Degraded (Coverage)"; statusClass = "status-bad"; }
+    else if (sinr !== null && sinr < 0) { status = "Critically Degraded (Interference)"; statusClass = "status-bad"; }
+    else if (rsrp !== null && rsrp < -100) { status = "Poor"; statusClass = "status-bad"; }
+    else if (sinr !== null && sinr < 5) { status = "Suboptimal"; statusClass = "status-warn"; }
+    else if (rsrp > -95 && sinr > 10) { status = "Excellent"; statusClass = "status-ok"; }
+
+    // B. User Impact & Service
+    let userExp = "Satisfactory";
+    let impactedService = "None specific";
+    let impactClass = "status-ok";
+    let isLowTput = false;
+
+    if (dlTput !== null) {
+        if (dlTput < 1) { userExp = "Severely Limited"; impactedService = "Real-time Video & Browsing"; isLowTput = true; impactClass = "status-bad"; }
+        else if (dlTput < 3) { userExp = "Degraded"; impactedService = "HD Video Streaming"; isLowTput = true; impactClass = "status-warn"; }
+        else if (dlTput < 5) { userExp = "Acceptable"; impactedService = "File Downloads"; impactClass = "status-warn"; }
+        else { userExp = "Good"; impactedService = "High Bandwidth Applications"; impactClass = "status-ok"; }
+    } else {
+        if (status.includes("Critical")) { userExp = "Severely Limited"; impactedService = "All Data Services"; impactClass = "status-bad"; }
+        else if (status.includes("Poor")) { userExp = "Degraded"; impactedService = "High Bitrate Video"; impactClass = "status-warn"; }
+    }
+
+    // C. Primary Issues
+    let primaryCause = "None detected";
+    let secondaryCause = "";
+
+    if (rsrp !== null && rsrp < -110) primaryCause = "Weak RF Coverage (Dead Zone)";
+    else if (sinr !== null && sinr < 3) primaryCause = "High Signal Interference";
+    else if (prbLoad !== null && prbLoad > 80) primaryCause = "High Capacity Utilization (Load)";
+    else if (sinr !== null && sinr < 8) primaryCause = "Moderate Interference (Pilot Pollution)";
+    else if (rsrp !== null && rsrp < -100) primaryCause = "Weak RF Coverage (Edge of Cell)";
+
+    if (primaryCause.includes("Coverage") && sinr !== null && sinr < 5) secondaryCause = "Compounded by Interference";
+    if (primaryCause.includes("Interference") && rsrp !== null && rsrp < -105) secondaryCause = "Compounded by Weak Signal";
+
+    // D. Congestion Analysis
+    let congestionStatus = "not congested";
+    let issueType = "radio-quality-related";
+    let congestionClass = "status-ok";
+
+    if (prbLoad !== null && prbLoad > 75) {
+        congestionStatus = "congested";
+        issueType = "capacity-related";
+        congestionClass = "status-bad";
+    } else if (rsrp > -95 && sinr > 10 && isLowTput) {
+        congestionStatus = "likely congested (Backhaul/Transport)";
+        issueType = "capacity-related";
+        congestionClass = "status-warn";
+    }
+
+    // E. Actions
+    let highPriority = [];
+    let mediumPriority = [];
+    let conclusionAction = "targeted optimization";
+
+    if (primaryCause.includes("Coverage") && congestionStatus.includes("congested")) {
+        highPriority.push("Review Power Settings / Load Balancing");
+        highPriority.push("Capacity Expansion (Carrier Add/Sector Split)");
+        conclusionAction = "capacity expansion";
+    } else if (primaryCause.includes("Coverage")) {
+        highPriority.push("Check Antenna Tilt (Uptilt if possible)");
+        highPriority.push("Verify Neighbor Cell Relations");
+        mediumPriority.push("Drive Test Verification required");
+    } else if (primaryCause.includes("Interference")) {
+        highPriority.push("Check Overshooting Neighbors");
+        highPriority.push("Review Antenna Downtilts");
+        mediumPriority.push("PCI Planning Review");
+    } else if (congestionStatus.includes("congested")) {
+        highPriority.push("Load Balancing Strategy Review");
+        highPriority.push("Capacity Expansion Planning");
+        conclusionAction = "capacity expansion";
+    } else {
+        highPriority.push("Routine Performance Monitoring");
+        mediumPriority.push("Verify Parameter Consistency");
+    }
+
+    if (highPriority.length === 0) highPriority.push("Monitor Performance Trend");
+
+    // --- 3. Format Output (HTML Structure) ---
+    // Helper to colorize Cause
+    const causeClass = primaryCause === "None detected" ? "status-ok" : "status-bad";
+
+    const report = `
+            <div class="report-block">
+                <h4>CELL PERFORMANCE – MANAGEMENT SUMMARY</h4>
+                <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+                    <div><strong>Cell ID:</strong> ${cellId}</div>
+                    <div><strong>Location:</strong> ${location}</div>
+                    <div><strong>Technology:</strong> LTE</div>
+                </div>
+            </div>
+
+            <div class="report-block">
+                <h4>Overall Performance Status</h4>
+                <p>The cell performance is classified as <span class="${statusClass}" style="padding:2px 6px; border-radius:4px; font-weight:bold;">${status}</span>.</p>
+            </div>
+
+            <div class="report-block">
+                <h4>User Impact</h4>
+                <p>
+                   Downlink user experience is <span class="${impactClass}" style="font-weight:bold;">${userExp}</span>,
+                   mainly affecting <strong>${impactedService}</strong> traffic.
+                </p>
+            </div>
+
+            <div class="report-block">
+                <h4>Primary Issue(s)</h4>
+                <p>The main performance limitation(s) identified are:</p>
+                <ul>
+                    <li><span class="${causeClass}" style="font-weight:bold;">${primaryCause}</span></li>
+                    ${secondaryCause ? `<li>${secondaryCause}</li>` : ''}
+                </ul>
+                <p style="margin-top:5px; font-size:0.9em; color:#bbb;">
+                    <em>This issue is impacting: Data speeds, Service stability, User experience consistency.</em>
+                </p>
+            </div>
+
+            <div class="report-block">
+                <h4>Network Load Assessment</h4>
+                <p>The cell is <span class="${congestionClass}" style="font-weight:bold;">${congestionStatus}</span>,</p>
+                <p>indicating that the performance issue is <strong>${issueType}</strong>.</p>
+            </div>
+
+            <div class="report-block">
+                <h4>Recommended Actions</h4>
+                
+                <h5 style="color:#ff6b6b; margin:10px 0 5px 0;">Immediate actions recommended:</h5>
+                <ul>
+                    ${highPriority.map(a => `<li>${a}</li>`).join('')}
+                </ul>
+
+                <h5 style="color:#ffd93d; margin:10px 0 5px 0;">Supporting optimization actions:</h5>
+                <ul>
+                    ${mediumPriority.length > 0 ? mediumPriority.map(a => `<li>${a}</li>`).join('') : '<li>None required at this stage</li>'}
+                </ul>
+            </div>
+
+            <div class="report-block" style="border-left: 4px solid #a29bfe; background: rgba(162, 155, 254, 0.1);">
+                <h4 style="color:#a29bfe;">EXECUTIVE CONCLUSION</h4>
+                <p>
+                    This LTE cell requires <strong>${conclusionAction.toUpperCase()}</strong> 
+                    to improve customer experience and overall network efficiency.
+                </p>
+            </div>
+        `;
+
+    // --- 4. Display ---
+    window.showAnalysisModal(report, "MANAGEMENT SUMMARY");
+};
+
+window.showAnalysisModal = (content, title) => {
+    let modal = document.getElementById('analysisModal');
+
+    // --- LAZY CREATE MODAL IF MISSING ---
+    if (!modal) {
+        const modalHtml = `
+                <div class="analysis-modal-overlay" onclick="const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()">
+                    <div class="analysis-modal" id="analysisModal" style="width: 800px; max-width: 90vw; display:flex;">
+                        <div class="analysis-header">
+                            <h3 id="analysisModalTitle">Cell Performance Analysis Report</h3>
+                            <button class="analysis-close-btn" onclick="document.querySelector('.analysis-modal-overlay').remove()">×</button>
+                        </div>
+                        <div class="analysis-content" style="padding: 30px;" id="analysisResultBody">
+                            <!-- Content Injected Here -->
+                        </div>
+                    </div>
+                </div>
+            `;
+        const div = document.createElement('div');
+        div.innerHTML = modalHtml;
+        document.body.appendChild(div.firstElementChild);
+        modal = document.getElementById('analysisModal'); // Re-select
+    }
+
+    const body = document.getElementById('analysisResultBody');
+    const header = document.getElementById('analysisModalTitle');
+
+    if (header && title) header.textContent = title;
+
+    // Always render HTML now. 
+    // Logic for "MANAGEMENT SUMMARY" specifically handled <pre> before, 
+    // now we WANT HTML for it too.
+    body.innerHTML = content;
+
+    // Ensure overlay is visible if it was hidden or re-created
+    const overlay = modal.closest('.analysis-modal-overlay');
+    if (overlay) overlay.style.display = 'flex'; // Assuming flex for overlay centering
+    modal.style.display = 'block';
+};

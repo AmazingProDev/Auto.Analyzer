@@ -352,18 +352,25 @@ const ExcelParser = {
         if (json.length === 0) return { points: [], tech: 'Unknown', customMetrics: [] };
 
         // 1. Identify Key Columns (Time, Lat, Lon)
-        // ROBUST HEADER EXTRACTION: Get headers explicitly, don't rely on json[0] keys
-        const headerJson = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-        const keys = (headerJson && headerJson.length > 0) ? headerJson[0].map(k => String(k)) : Object.keys(json[0]);
+        // ROBUST HEADER EXTRACTION: Scan first 50 rows to find ALL potential keys (sparse data support)
+        const keysSet = new Set();
+        if (json && json.length > 0) {
+            const scanLimit = Math.min(json.length, 50);
+            for (let i = 0; i < scanLimit; i++) {
+                Object.keys(json[i]).forEach(k => keysSet.add(k));
+            }
+        }
+        const keys = Array.from(keysSet);
 
         const normalize = k => k.toLowerCase().replace(/[\s_]/g, '');
 
-        let timeKey = keys.find(k => /time/i.test(normalize(k)));
-        let latKey = keys.find(k => /lat/i.test(normalize(k)));
-        let lngKey = keys.find(k => /lon/i.test(normalize(k)) || /lng/i.test(normalize(k)));
+        let timeKey = keys.find(k => /^(time|timestamp|date|datetime)$/i.test(normalize(k)) || /time/i.test(normalize(k))); // Prioritize exact, then loose
+        let latKey = keys.find(k => /^(lat|latitude|y_coord|y)$/i.test(normalize(k)));
+        let lngKey = keys.find(k => /^(lon|long|longitude|lng|x_coord|x)$/i.test(normalize(k)));
 
-        // 2. Identify Metrics (Exclude key columns)
-        const customMetrics = keys.filter(k => k !== timeKey && k !== latKey && k !== lngKey);
+        // 2. Identify Metrics (Include All Keys as requested)
+        const customMetrics = [...keys]; // User wants EVERY column to be a metric
+        // const customMetrics = keys.filter(k => k !== timeKey && k !== latKey && k !== lngKey);
 
         // 1. Identify Best Columns for Primary Metrics
         const detectBestColumn = (candidates, exclusions = []) => {
