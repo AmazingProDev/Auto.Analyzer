@@ -5449,7 +5449,7 @@ function addSiteLayerToSidebar(id, name, count) {
 
             // Update Title to show we are editing a layer
             const title = panel.querySelector('h3');
-            if (title) title.textContent = `Settings: ${name}`;
+            if (title) title.textContent = 'Settings: ' + name;
         }
     };
     const visBtn = item.querySelector('.visibility-btn');
