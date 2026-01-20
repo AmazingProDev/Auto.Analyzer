@@ -4015,50 +4015,49 @@ document.addEventListener('DOMContentLoaded', () => {
             return "";
         };
 
-        const row = (label, val) => `
-            <div style = "display:flex; justify-content:space-between; margin-bottom:4px; padding-bottom:4px; border-bottom:1px solid #333;" >
-                <span style="color:#aaa;">${label}</span>
-                <span class="${getCls(val)}" style="font-weight:600;">${val || 'N/A'}</span>
-            </div > `;
+        const row = (label, val) => {
+            return '<div style="display:flex; justify-content:space-between; margin-bottom:4px; padding-bottom:4px; border-bottom:1px solid #333;">' +
+                '<span style="color:#aaa;">' + label + '</span>' +
+                '<span class="' + getCls(val) + '" style="font-weight:600;">' + (val || 'N/A') + '</span>' +
+                '</div>';
+        };
 
-        let html = `<div class="report-block" >
-            <h4 class="report-header">EXPERT ANALYSIS</h4>
-            ${ row('Confidence Level', confLevel) }
-            ${ row('Confidence Score', finalScore + '%') }
-            ${ row('Data Confidence', output.dataConf) }
-        <br>
-            ${row('Coverage Status', output.coverage)}
-            ${row('Signal Quality', output.quality)}
-            ${row('Channel Quality', output.cqi)}
-            ${row('DL User Exp', output.dlExp)}
-            ${row('Cell Load', output.load)}
-            ${row('Spectral Perf', output.specEff)}
-            ${row('MIMO Utilization', output.mimo)}
-            ${row('CA Effectiveness', output.ca)}
-        </div>`;
+        let html = '<div class="report-block">' +
+            '<h4 class="report-header">EXPERT ANALYSIS</h4>' +
+            row('Confidence Level', confLevel) +
+            row('Confidence Score', finalScore + '%') +
+            row('Data Confidence', output.dataConf) +
+            '<br>' +
+            row('Coverage Status', output.coverage) +
+            row('Signal Quality', output.quality) +
+            row('Channel Quality', output.cqi) +
+            row('DL User Exp', output.dlExp) +
+            row('Cell Load', output.load) +
+            row('Spectral Perf', output.specEff) +
+            row('MIMO Utilization', output.mimo) +
+            row('CA Effectiveness', output.ca) +
+            '</div>';
 
-        html += `<div class="report-block" >
-            <h4 class="report-header">DIAGNOSIS & ACTIONS</h4>
-            <div style="margin-bottom:8px;">
-                <div style="color:#888; font-size:10px; text-transform:uppercase;">Expert Diagnosis</div>
-                <div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">${diagnosis}</div>
-            </div>
-            
-            ${
-            interpretation ? `
-            <div style="margin-bottom:8px;">
-                <div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>
-                <div style="color:#ddd; font-style:italic; margin-top:2px;">"${interpretation}"</div>
-            </div>` : ''
-        }
+        html += '<div class="report-block">' +
+            '<h4 class="report-header">DIAGNOSIS & ACTIONS</h4>' +
+            '<div style="margin-bottom:8px;">' +
+            '<div style="color:#888; font-size:10px; text-transform:uppercase;">Expert Diagnosis</div>' +
+            '<div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">' + diagnosis + '</div>' +
+            '</div>' +
 
-        <div style="margin-top:10px;">
-            <div style="color:#888; font-size:10px; text-transform:uppercase;">Optimization Actions</div>
-            <ul style="margin:5px 0 0 15px; padding:0; color:#cbd5e1;">
-                ${actions.map(a => `<li>${a}</li>`).join('')}
-            </ul>
-        </div>
-        </div > `;
+            (interpretation ?
+                '<div style="margin-bottom:8px;">' +
+                '<div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>' +
+                '<div style="color:#ddd; font-style:italic; margin-top:2px;">"' + interpretation + '"</div>' +
+                '</div>' : '') +
+
+            '<div style="margin-top:10px;">' +
+            '<div style="color:#888; font-size:10px; text-transform:uppercase;">Optimization Actions</div>' +
+            '<ul style="margin:5px 0 0 15px; padding:0; color:#cbd5e1;">' +
+            actions.map(a => '<li>' + a + '</li>').join('') +
+            '</ul>' +
+            '</div>' +
+            '</div>';
 
         return html;
     };
@@ -4250,13 +4249,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Styles for specific keywords
                 const colorize = (txt) => {
                     const t = txt.toLowerCase();
-                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `<span class="status-good" > ${ txt }</span > `;
-                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `<span class="status-fair" > ${ txt }</span > `;
-                    return `<span class="status-poor" > ${ txt }</span > `;
+                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `< span class="status-good" > ${ txt }</span > `;
+                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `< span class="status-fair" > ${ txt }</span > `;
+                    return `< span class="status-poor" > ${ txt }</span > `;
                 };
 
                 combinedHtml += `
-            <div class="report-section" style = "${idx > 0 ? 'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;' : ''}" >
+            < div class="report-section" style = "${idx > 0 ? 'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;' : ''}" >
                 ${ item.name ? `<h2 style="margin: 0 0 20px 0; color: #60a5fa; border-bottom: 1px solid #444; padding-bottom: 10px; font-size: 18px;">${item.name} Analysis</h2>` : '' }
 
                         <div class="report-block">
@@ -4366,7 +4365,7 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
 
             const modalHtml = `
-            <div class="analysis-modal-overlay" onclick = "const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()" >
+            < div class="analysis-modal-overlay" onclick = "const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()" >
                 <div class="analysis-modal" style="width: 800px; max-width: 90vw;">
                     <div class="analysis-header">
                         <h3>Cell Performance Analysis Report</h3>
