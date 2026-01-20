@@ -5374,7 +5374,7 @@ fileStatus.textContent = 'Importing Sites...';
                     const id = Date.now().toString();
                     const name = file.name.replace(/\.[^/.]+$/, "");
 
-                    console.log(`[Sites] Importing ${validSectors.length} sites as layer: ${name}`);
+                    console.log('[Sites] Importing ' + validSectors.length + ' sites as layer: ' + name);
 
                     // Add Layer
                     try {
@@ -5387,7 +5387,7 @@ fileStatus.textContent = 'Importing Sites...';
                         } else {
                             throw new Error("MapRenderer not initialized");
                         }
-                        fileStatus.textContent = `Sites Imported: ${validSectors.length}(${name})`;
+                        fileStatus.textContent = 'Sites Imported: ' + validSectors.length + '(' + name + ')';
                     } catch (innerErr) {
                         console.error('[Sites] CRITICAL ERROR adding layer:', innerErr);
                         alert(`Error adding site layer: ${innerErr.message}`);
