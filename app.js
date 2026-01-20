@@ -4587,8 +4587,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const neighbors = rawNeighbors.map((n, i) => {
             const resolved = resolveN(n.sc, n.freq, n.cellName);
             return {
-                type: `N${ i + 1
-    } `,
+                type: 'N' + (i + 1),
                 name: resolved.name,
                 rnc: resolved.rnc,
                 cid: resolved.cid,
@@ -4609,8 +4608,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let sClickAction = '';
         /* FIX: Use highlightAndPan */
         if (servingRes && servingRes.lat && servingRes.lng) {
-            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? `${ servingRes.rnc }/${servingRes.cid}` : '');
-sClickAction = `onclick="window.highlightAndPan(${servingRes.lat}, ${servingRes.lng}, '${safeId}', 'serving')" style="cursor:pointer; color:#fff;"`;
+            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? servingRes.rnc + '/' + servingRes.cid : '');
+            sClickAction = 'onclick="window.highlightAndPan(' + servingRes.lat + ', ' + servingRes.lng + ', \'' + safeId + '\', \'serving\')" style="cursor:pointer; color:#fff;"';
         }
 
 // Serving Row
