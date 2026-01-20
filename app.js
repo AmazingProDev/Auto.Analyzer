@@ -5628,7 +5628,7 @@ function renderSignalingTable() {
     const title = document.getElementById('signalingModalTitle');
 
     tbody.innerHTML = '';
-    title.textContent = `Signaling Data - ${log.name}`; // Changed visual to verify update
+    title.textContent = 'Signaling Data - ' + log.name;
 
     // Filter Data
     let sigPoints = log.signaling || [];
@@ -5644,7 +5644,7 @@ function renderSignalingTable() {
 
         if (sigPoints.length > limit) {
             const tr = document.createElement('tr');
-            tr.innerHTML = `< td colspan = "5" style = "background:#552200; color:#fff; text-align:center;" > Showing first ${limit} of ${sigPoints.length} messages.</td > `;
+            tr.innerHTML = '<td colspan="5" style="background:#552200; color:#fff; text-align:center;">Showing first ' + limit + ' of ' + sigPoints.length + ' messages.</td>';
             tbody.appendChild(tr);
         }
 
