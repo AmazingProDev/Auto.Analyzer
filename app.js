@@ -4658,75 +4658,77 @@ const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed
 
 const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
 
-Object.entries(sourceObj).forEach(([k, v]) => {
-    const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
-    if (isNeighborKey(k.toLowerCase())) return;
-    if (typeof v === 'object') return; // Skip nested objects for now
-    if (v === undefined || v === null || v === '') return;
+    Object.entries(sourceObj).forEach(([k, v]) => {
+        const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
+        if (isNeighborKey(k.toLowerCase())) return;
+        if (typeof v === 'object') return; // Skip nested objects for now
+        if (v === undefined || v === null || v === '') return;
 
-    // Format numeric
-    let val = v;
-    if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
+        // Format numeric
+        let val = v;
+        if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
 
-    extraMetricsHtml += `
-            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">
-                <span style="color:#aaa; margin-right: 10px;">${k}</span>
-                <span style="color:#fff; font-weight:bold; text-align: right;">${val}</span>
-            </div>`;
-});
+        extraMetricsHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">' +
+            '<span style="color:#aaa; margin-right: 10px;">' + k + '</span>' +
+            '<span style="color:#fff; font-weight:bold; text-align: right;">' + val + '</span>' +
+            '</div>';
+    });
 
-const html = `
-            <div class="log-view-container">
-             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">
-                    <div>
-                         <div class="log-header-serving" style="font-size:14px; margin-bottom:2px;">${sName}</div>
-                         <div style="color:#aaa; font-size:11px;">Lat: ${p.lat.toFixed(6)}  Lng: ${p.lng.toFixed(6)}</div>
-                    </div>
-                     <div style="color:#aaa; font-size:11px;">${p.time || ''}</div>
-                </div>
+    let extraMetricsSection = '';
+    if (extraMetricsHtml) {
+        extraMetricsSection = '<div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">' +
+            '<div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>' +
+            '<div style="max-height: 200px; overflow-y: auto;">' +
+            extraMetricsHtml +
+            '</div>' +
+            '</div>';
+    }
 
-                <table class="log-details-table">
-                    <thead>
-                        <tr>
-                            <th style="width:10%">Type</th>
-                            <th style="width:40%">Cell Name</th>
-                            <th>SC</th>
-                            <th>${levelHeader}</th>
-                            <th>${qualHeader}</th>
-                            <th>Freq</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${rows}
-                    </tbody>
-                </table>
-                
-                ${extraMetricsHtml ? `
-                <div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">
-                    <div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>
-                    <div style="max-height: 200px; overflow-y: auto;">
-                        ${extraMetricsHtml}
-                    </div>
-                </div>` : ''}
+    const html = '<div class="log-view-container">' +
+        '<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">' +
+        '<div>' +
+        '<div class="log-header-serving" style="font-size:14px; margin-bottom:2px;">' + sName + '</div>' +
+        '<div style="color:#aaa; font-size:11px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
+        '</div>' +
+        '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
+        '</div>' +
 
-                <div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">
-                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>
-                    <button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>
-                </div>
-                    <!-- Hidden data stash for the analyzer -->
-                    <script type="application/json" id="point-data-stash">
-                    ${JSON.stringify({
-    ...(p.properties || p),
-    'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
-    'Cell Name': sName,
-    'Tech': isLTE ? 'LTE' : 'UMTS'
-})}
-                    </script>
-                </div>
+        '<table class="log-details-table">' +
+        '<thead>' +
+        '<tr>' +
+        '<th style="width:10%">Type</th>' +
+        '<th style="width:40%">Cell Name</th>' +
+        '<th>SC</th>' +
+        '<th>' + levelHeader + '</th>' +
+        '<th>' + qualHeader + '</th>' +
+        '<th>Freq</th>' +
+        '</tr>' +
+        '</thead>' +
+        '<tbody>' +
+        rows +
+        '</tbody>' +
+        '</table>' +
 
-            </div>
-        `;
+        extraMetricsSection +
+
+        '<div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
+        '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>' +
+        '<button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>' +
+        '</div>' +
+
+        '<!-- Hidden data stash for the analyzer -->' +
+        '<script type="application/json" id="point-data-stash">' +
+        JSON.stringify({
+            ...(p.properties || p),
+            'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
+            'Cell Name': sName,
+            'Tech': isLTE ? 'LTE' : 'UMTS'
+        }) +
+        '</script>' +
+        '</div>' +
+        '</div>';
+
 
 // Add connection targets for top 3 neighbors if they resolve
 neighbors.slice(0, 3).forEach(n => {
