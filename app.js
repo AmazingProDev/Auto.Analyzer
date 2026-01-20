@@ -4930,7 +4930,7 @@ window.globalSync = (logId, index, source, skipPanel = false) => {
 // Global Listener for Custom Legend Color Changes
 window.addEventListener('metric-color-changed', (e) => {
     const { id, color } = e.detail;
-    console.log(`[App] Color overridden for ${id} -> ${color}`);
+    console.log('[App] Color overridden for ' + id + ' -> ' + color);
 
     // Re-render ALL logs currently showing Discrete Metrics (CellId or CID)
     loadedLogs.forEach(log => {
