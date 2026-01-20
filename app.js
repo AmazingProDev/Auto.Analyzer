@@ -54,7 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Global Listener for Map Rendering Completion (Async Legend)
     window.addEventListener('layer-metric-ready', (e) => {
-        // console.log(`[App] layer-metric-ready received for: ${e.detail.metric}`);
+        // console.log('[App] layer-metric-ready received for: ' + (e.detail.metric));
         if (typeof window.updateLegend === 'function') {
             window.updateLegend();
         }
@@ -124,7 +124,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // 3. Optional: Highlight Serving Cell (Visual Feedback)
             mapRenderer.highlightCell(bestId);
 
-            // console.log(`[App] Drawn line to Serving Cell: ${servingCell.cellName || servingCell.cellId}`);
+            // console.log('[App] Drawn line to Serving Cell: ' + (servingCell.cellName || servingCell.cellId));
         } else {
             console.warn('[App] Serving Cell not found for clicked point.');
             // Clear previous connections if any
@@ -205,7 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `${log.name}_${renderer.activeMetric}.kml`;
+            a.download = (log.name) + '_' + (renderer.activeMetric) + '.kml';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -242,7 +242,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `Sites_Database_${new Date().getTime()}.kml`;
+            a.download = 'Sites_Database_' + (new Date().getTime()) + '.kml';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -322,7 +322,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const item = document.createElement('div');
         item.className = 'sc-layer-group-header expanded'; // Default open on import
-        item.id = `sc-group-${layerId}`;
+        item.id = 'sc-group-' + (layerId);
 
         // Toggle Logic embedded in onclick
         item.onclick = (e) => {
@@ -332,40 +332,13 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         const metricsHtml = (customMetrics && customMetrics.length > 0)
-            ? `<div class="sc-metric-container">
-                ${customMetrics.map(m => `
+            ? '<div class="sc-metric-container">\n                ${customMetrics.map(m => '
                     <div class="sc-metric-button ${log.currentParam === m ? 'active' : ''}" 
                          onclick="window.showMetricOptions(event, '${layerId}', '${m}', 'smartcare')">${m}</div>
-               `).join('')}
-               </div>`
+               ').join(\'\')}\n               </div>'
             : '<div style="font-size:10px; color:#666; font-style:italic;">No metrics found</div>';
 
-        item.innerHTML = `
-            <div class="sc-group-title-row">
-                <div class="sc-group-name">
-                    <span class="sc-caret">▶</span>
-                    ${name}
-                </div>
-                <!-- Top Level Controls -->
-                <div class="sc-layer-controls">
-                    <button class="sc-btn sc-btn-toggle" onclick="toggleSmartCareLayer('${layerId}')" title="Toggle Visibility">👁️</button>
-                    <button class="sc-btn sc-btn-remove" onclick="removeSmartCareLayer('${layerId}')" title="Remove Layer">❌</button>
-                </div>
-            </div>
-
-            <!-- Expandable Body -->
-            <div class="sc-layer-body">
-                <!-- Meta Row -->
-                <div class="sc-meta-row">
-                    <div class="sc-meta-left">
-                        <span class="sc-tech-badge-sm">${techLabel}</span>
-                        <span class="sc-count-badge-sm">${pointCount} pts</span>
-                    </div>
-                </div>
-                <!-- Metrics Grid -->
-                ${metricsHtml}
-            </div>
-        `;
+        item.innerHTML = '\n            <div class="sc-group-title-row">\n                <div class="sc-group-name">\n                    <span class="sc-caret">▶</span>\n                    ' + (name) + '\n                </div>\n                <!-- Top Level Controls -->\n                <div class="sc-layer-controls">\n                    <button class="sc-btn sc-btn-toggle" onclick="toggleSmartCareLayer(\'' + (layerId) + '\')" title="Toggle Visibility">👁️</button>\n                    <button class="sc-btn sc-btn-remove" onclick="removeSmartCareLayer(\'' + (layerId) + '\')" title="Remove Layer">❌</button>\n                </div>\n            </div>\n\n            <!-- Expandable Body -->\n            <div class="sc-layer-body">\n                <!-- Meta Row -->\n                <div class="sc-meta-row">\n                    <div class="sc-meta-left">\n                        <span class="sc-tech-badge-sm">' + (techLabel) + '</span>\n                        <span class="sc-count-badge-sm">' + (pointCount) + ' pts</span>\n                    </div>\n                </div>\n                <!-- Metrics Grid -->\n                ' + (metricsHtml) + '\n            </div>\n        ';
 
         scLayerList.appendChild(item);
     }
@@ -373,12 +346,12 @@ document.addEventListener('DOMContentLoaded', () => {
     window.switchSmartCareMetric = (layerId, metric) => {
         const log = window.loadedLogs.find(l => l.id === layerId);
         if (log && window.mapRenderer) {
-            console.log(`[SmartCare] Switching metric for ${layerId} to ${metric}`);
+            console.log('[SmartCare] Switching metric for ' + (layerId) + ' to ' + (metric));
             log.currentParam = metric; // Track active metric for this layer
             window.mapRenderer.updateLayerMetric(layerId, log.points, metric);
 
             // Update UI active state
-            const container = document.querySelector(`#sc-item-${layerId} .sc-metric-container`);
+            const container = document.querySelector('#sc-item-' + (layerId) + ' .sc-metric-container');
             if (container) {
                 container.querySelectorAll('.sc-metric-button').forEach(btn => {
                     btn.classList.toggle('active', btn.textContent === metric);
@@ -402,25 +375,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Position menu near the clicked button
         const rect = event.currentTarget.getBoundingClientRect();
-        menu.style.top = `${rect.bottom + window.scrollY + 5}px`;
-        menu.style.left = `${rect.left + window.scrollX}px`;
+        menu.style.top = (rect.bottom + window.scrollY + 5) + 'px';
+        menu.style.left = (rect.left + window.scrollX) + 'px';
 
-        menu.innerHTML = `
-            <div class="sc-menu-item" id="menu-map-${layerId}">
-                <span>🗺️</span> Map
-            </div>
-            <div class="sc-menu-item" id="menu-grid-${layerId}">
-                <span>📊</span> Grid
-            </div>
-            <div class="sc-menu-item" id="menu-chart-${layerId}">
-                <span>📈</span> Chart
-            </div>
-        `;
+        menu.innerHTML = '\n            <div class="sc-menu-item" id="menu-map-' + (layerId) + '">\n                <span>🗺️</span> Map\n            </div>\n            <div class="sc-menu-item" id="menu-grid-' + (layerId) + '">\n                <span>📊</span> Grid\n            </div>\n            <div class="sc-menu-item" id="menu-chart-' + (layerId) + '">\n                <span>📈</span> Chart\n            </div>\n        ';
 
         document.body.appendChild(menu);
 
         // Map Click Handler
-        menu.querySelector(`#menu-map-${layerId}`).onclick = () => {
+        menu.querySelector('#menu-map-' + (layerId)).onclick = () => {
             if (type === 'smartcare') {
                 window.switchSmartCareMetric(layerId, metric);
             } else {
@@ -440,13 +403,13 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         // Grid Click Handler
-        menu.querySelector(`#menu-grid-${layerId}`).onclick = () => {
+        menu.querySelector('#menu-grid-' + (layerId)).onclick = () => {
             window.openGridModal(log, metric);
             menu.remove();
         };
 
         // Chart Click Handler
-        menu.querySelector(`#menu-chart-${layerId}`).onclick = () => {
+        menu.querySelector('#menu-chart-' + (layerId)).onclick = () => {
             window.openChartModal(log, metric);
             menu.remove();
         };
@@ -454,10 +417,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Auto-position adjustment if it goes off screen
         const menuRect = menu.getBoundingClientRect();
         if (menuRect.right > window.innerWidth) {
-            menu.style.left = `${window.innerWidth - menuRect.width - 10}px`;
+            menu.style.left = (window.innerWidth - menuRect.width - 10) + 'px';
         }
         if (menuRect.bottom > window.innerHeight) {
-            menu.style.top = `${rect.top + window.scrollY - menuRect.height - 5}px`;
+            menu.style.top = (rect.top + window.scrollY - menuRect.height - 5) + 'px';
         }
     };
 
@@ -486,7 +449,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Update UI Icon
-            const btn = document.querySelector(`#sc-item-${layerId} .sc-btn-toggle`);
+            const btn = document.querySelector('#sc-item-' + (layerId) + ' .sc-btn-toggle');
             if (btn) {
                 btn.textContent = log.visible ? '👁️' : '🚫';
                 btn.classList.toggle('hidden-layer', !log.visible);
@@ -509,7 +472,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Remove from Sidebar
-        const item = document.getElementById(`sc-item-${layerId}`);
+        const item = document.getElementById('sc-item-' + (layerId));
         if (item) item.remove();
 
         // Hide sidebar if empty
@@ -520,7 +483,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     shpInput.onchange = async (e) => {
         const files = Array.from(e.target.files);
-        console.log(`[Import] Selected ${files.length} files:`, files.map(f => f.name));
+        console.log('[Import] Selected ' + (files.length) + ' files:', files.map(f => f.name));
 
         if (files.length === 0) return;
 
@@ -530,7 +493,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return name.endsWith('.xlsx') || name.endsWith('.xls');
         });
 
-        console.log(`[Import] Detected ${excelFiles.length} Excel files.`);
+        console.log('[Import] Detected ' + (excelFiles.length) + ' Excel files.');
 
         if (excelFiles.length > 0) {
             // Check if multiple Excel files selected
@@ -557,7 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
             const json = XLSX.utils.sheet_to_json(sheet);
 
-            console.log(`[Excel] Parsed ${file.name}: ${json.length} rows`);
+            console.log('[Excel] Parsed ' + (file.name) + ': ' + (json.length) + ' rows');
 
             // Safe fallback for Projection
             if (!window.proj4.defs['EPSG:32629']) {
@@ -628,7 +591,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         calculatedEci = parseInt(foundCellId);
                     }
                 } else if (rnc && cid) {
-                    foundCellId = `${rnc}/${cid}`;
+                    foundCellId = (rnc) + '/' + (cid);
                 }
 
                 return {
@@ -663,18 +626,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
             return { points, customMetrics };
         } catch (e) {
-            console.error(`Error parsing ${file.name}`, e);
+            console.error('Error parsing ' + (file.name), e);
             throw e;
         }
     }
 
     async function handleExcelImport(file) {
-        fileStatus.textContent = `Parsing Excel: ${file.name}...`;
+        fileStatus.textContent = 'Parsing Excel: ' + (file.name) + '...';
         try {
             const { points, customMetrics } = await parseExcelFile(file);
 
             const fileName = file.name.split('.')[0];
-            const logId = `excel_${Date.now()}`;
+            const logId = 'excel_' + (Date.now());
 
             const newLog = {
                 id: logId,
@@ -690,7 +653,7 @@ document.addEventListener('DOMContentLoaded', () => {
             loadedLogs.push(newLog);
             updateLogsList();
             addSmartCareLayer(newLog);
-            fileStatus.textContent = `Loaded Excel: ${fileName}`;
+            fileStatus.textContent = 'Loaded Excel: ' + (fileName);
 
             // Auto-Zoom
             const latLngs = points.map(p => [p.lat, p.lng]);
@@ -702,13 +665,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (e) {
             console.error(e);
-            alert(`Failed to import ${file.name}`);
+            alert('Failed to import ' + (file.name));
             fileStatus.textContent = 'Import Failed';
         }
     }
 
     async function handleMergedExcelImport(files) {
-        fileStatus.textContent = `Merging ${files.length} Excel files...`;
+        fileStatus.textContent = 'Merging ' + (files.length) + ' Excel files...';
 
         // Map to store merged points: Key -> Point
         const mergedPointsMap = new Map();
@@ -718,7 +681,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                fileStatus.textContent = `Parsing ${i + 1}/${files.length}: ${file.name}...`;
+                fileStatus.textContent = 'Parsing ' + (i + 1) + '/' + (files.length) + ': ' + (file.name) + '...';
                 const result = await parseExcelFile(file);
 
                 nameList.push(file.name.split('.')[0]);
@@ -727,7 +690,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // MERGE LOGIC (Spatial Join)
                 result.points.forEach(p => {
                     // Precision for 50m grid (5 decimals is ~1m, adequate for aggregation)
-                    const key = `${p.lat.toFixed(5)}_${p.lng.toFixed(5)}`;
+                    const key = (p.lat.toFixed(5)) + '_' + (p.lng.toFixed(5));
 
                     if (mergedPointsMap.has(key)) {
                         const existing = mergedPointsMap.get(key);
@@ -767,8 +730,8 @@ document.addEventListener('DOMContentLoaded', () => {
             // Re-index IDs to ensure clean array connectivity
             pooledPoints.forEach((p, idx) => p.id = idx);
 
-            const fileName = nameList.length > 3 ? `${nameList[0]}_plus_${nameList.length - 1}_merged` : nameList.join('_');
-            const logId = `smartcare_merged_${Date.now()}`;
+            const fileName = nameList.length > 3 ? (nameList[0]) + '_plus_' + (nameList.length - 1) + '_merged' : nameList.join('_');
+            const logId = 'smartcare_merged_' + (Date.now());
 
             const newLog = {
                 id: logId,
@@ -784,7 +747,7 @@ document.addEventListener('DOMContentLoaded', () => {
             loadedLogs.push(newLog);
             updateLogsList();
             addSmartCareLayer(newLog);
-            fileStatus.textContent = `Merged ${files.length} files successfully.`;
+            fileStatus.textContent = 'Merged ' + (files.length) + ' files successfully.';
 
             // Auto-Zoom
             const latLngs = pooledPoints.map(p => [p.lat, p.lng]);
@@ -818,7 +781,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (relativePath.endsWith('channel.log')) channelLogs.push(zipEntry);
             });
 
-            console.log(`[TRP] Found ${channelLogs.length} channel logs.`);
+            console.log('[TRP] Found ' + (channelLogs.length) + ' channel logs.');
 
             let allPoints = [];
             let allSignaling = [];
@@ -838,16 +801,16 @@ document.addEventListener('DOMContentLoaded', () => {
                         // Use existing NMF parser
                         const parserResult = NMFParser.parse(text);
                         if (parserResult.points.length > 0 || parserResult.signaling.length > 0) {
-                            console.log(`[TRP] Parsed ${parserResult.points.length} points from ${logFile.name}`);
+                            console.log('[TRP] Parsed ' + (parserResult.points.length) + ' points from ' + (logFile.name));
                             allPoints = allPoints.concat(parserResult.points);
                             allSignaling = allSignaling.concat(parserResult.signaling);
                         }
                     } else {
-                        console.warn(`[TRP] Skipping binary log: ${logFile.name}`);
+                        console.warn('[TRP] Skipping binary log: ' + (logFile.name));
                         // Future: Implement binary parser or service.xml correlation if needed
                     }
                 } catch (err) {
-                    console.warn(`[TRP] Failed to parse ${logFile.name}:`, err);
+                    console.warn('[TRP] Failed to parse ' + (logFile.name) + ':', err);
                 }
             }
 
@@ -870,7 +833,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Create Log Object
-            const logId = `trp_${Date.now()}`;
+            const logId = 'trp_' + (Date.now());
             const newLog = {
                 id: logId,
                 name: file.name,
@@ -895,7 +858,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            fileStatus.textContent = `Loaded TRP: ${file.name}`;
+            fileStatus.textContent = 'Loaded TRP: ' + (file.name);
 
 
         } catch (e) {
@@ -941,7 +904,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         });
                     }
                 }
-                console.log(`[TRP Fallback] Parsed ${trackPoints.length} GPS points.`);
+                console.log('[TRP Fallback] Parsed ' + (trackPoints.length) + ' GPS points.');
             }
         } catch (e) {
             console.warn("[TRP Fallback] Error parsing wptrack.xml", e);
@@ -1014,14 +977,14 @@ document.addEventListener('DOMContentLoaded', () => {
                             lng: closestPt ? closestPt.lng : (trackPoints[0] ? trackPoints[0].lng : 0),
                             time: time,
                             type: 'SIGNALING',
-                            event: `${name} ${action}`, // e.g. "Voice Quality Stop"
-                            message: `Service: ${name}`,
-                            details: `Action: ${action}`,
+                            event: (name) + ' ' + (action), // e.g. "Voice Quality Stop"
+                            message: 'Service: ' + (name),
+                            details: 'Action: ' + (action),
                             direction: '-'
                         });
                     }
                 }
-                console.log(`[TRP Fallback] Parsed ${results.signaling.length} Service Events.`);
+                console.log('[TRP Fallback] Parsed ' + (results.signaling.length) + ' Service Events.');
             }
         } catch (e) {
             console.warn("[TRP Fallback] Error parsing services.xml", e);
@@ -1090,7 +1053,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const fileName = files[0].name.split('.')[0];
-            const logId = `shp_${Date.now()}`;
+            const logId = 'shp_' + (Date.now());
 
             // Convert GeoJSON Features to App Points
             const points = features.map((f, idx) => {
@@ -1168,7 +1131,7 @@ document.addEventListener('DOMContentLoaded', () => {
             loadedLogs.push(newLog);
             updateLogsList();
             addSmartCareLayer(newLog); // Pass full log object
-            fileStatus.textContent = `Loaded SHP: ${fileName}`;
+            fileStatus.textContent = 'Loaded SHP: ' + (fileName);
 
             // Auto-render level on map
             map.updateLayerMetric(logId, points, 'level');
@@ -1235,7 +1198,7 @@ document.addEventListener('DOMContentLoaded', () => {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${key}`
+                'Authorization': 'Bearer ' + (key)
             },
             body: JSON.stringify({
                 model: model,
@@ -1306,15 +1269,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (userMsg.includes('429') || userMsg.includes('insufficient_quota')) userMsg = 'Quota exceeded. Check your plan.';
 
             if (aiContent) {
-                aiContent.innerHTML = `<div style="color: #ef4444; text-align: center; padding: 20px;">
-                    <h3>Analysis Failed</h3>
-                    <p><strong>Error:</strong> ${userMsg}</p>
-                    <p style="font-size:12px; color:#aaa; margin-top:5px;">Check console for details.</p>
-                    <div style="display:flex; justify-content:center; gap:10px; margin-top:20px;">
-                         <button onclick="window.runAIAnalysis()" class="btn" style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); width: auto;">Retry</button>
-                         <button onclick="document.getElementById('aiApiKeySection').style.display='block'; document.getElementById('aiLoading').style.display='none'; document.getElementById('aiContent').innerHTML='';" class="btn" style="background:#555;">Back</button>
-                    </div>
-                </div>`;
+                aiContent.innerHTML = '<div style="color: #ef4444; text-align: center; padding: 20px;">\n                    <h3>Analysis Failed</h3>\n                    <p><strong>Error:</strong> ' + (userMsg) + '</p>\n                    <p style="font-size:12px; color:#aaa; margin-top:5px;">Check console for details.</p>\n                    <div style="display:flex; justify-content:center; gap:10px; margin-top:20px;">\n                         <button onclick="window.runAIAnalysis()" class="btn" style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); width: auto;">Retry</button>\n                         <button onclick="document.getElementById(\'aiApiKeySection\').style.display=\'block\'; document.getElementById(\'aiLoading\').style.display=\'none\'; document.getElementById(\'aiContent\').innerHTML=\'\';" class="btn" style="background:#555;">Back</button>\n                    </div>\n                </div>';
             }
         } finally {
             if (aiLoading) aiLoading.style.display = 'none';
@@ -1371,7 +1326,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const topCells = Object.entries(collectedCells)
             .sort((a, b) => b[1] - a[1])
             .slice(0, 5)
-            .map(([sc, count]) => `SC ${sc} (${((count / totalPoints) * 100).toFixed(1)}%)`)
+            .map(([sc, count]) => 'SC ' + (sc) + ' (' + (((count / totalPoints) * 100).toFixed(1)) + '%)')
             .join(', ');
 
         return {
@@ -1385,26 +1340,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function generateAIPrompt(metrics) {
-        return `You are an expert RF Optimization Engineer. Analyze the following drive test summary data:
-        
-        - Technologies Found: ${metrics.technologies}
-        - Total Samples: ${metrics.totalPoints}
-        - Average Signal Strength (RSCP/RSRP): ${metrics.avgRscp} dBm
-        - Average Quality (EcNo/RSRQ): ${metrics.avgEcno} dB
-        - Weak Coverage Samples (< -100dBm): ${metrics.weakSignalPct}%
-        - Top Serving Cells: ${metrics.topCells}
-
-        Provide a concise analysis in Markdown format:
-        1. **Overall Health**: Assess the network condition (Good, Fair, Poor).
-        2. **Key Issues**: Identify potential problems (e.g., coverage holes, interference, dominance).
-        3. **Recommended Actions**: Suggest 3 specific optimization actions (e.g., downtilt, power adjustment, neighbor checks).
-        
-        Keep it professional and technical.`;
+        return 'You are an expert RF Optimization Engineer. Analyze the following drive test summary data:\n        \n        - Technologies Found: ' + (metrics.technologies) + '\n        - Total Samples: ' + (metrics.totalPoints) + '\n        - Average Signal Strength (RSCP/RSRP): ' + (metrics.avgRscp) + ' dBm\n        - Average Quality (EcNo/RSRQ): ' + (metrics.avgEcno) + ' dB\n        - Weak Coverage Samples (< -100dBm): ' + (metrics.weakSignalPct) + '%\n        - Top Serving Cells: ' + (metrics.topCells) + '\n\n        Provide a concise analysis in Markdown format:\n        1. **Overall Health**: Assess the network condition (Good, Fair, Poor).\n        2. **Key Issues**: Identify potential problems (e.g., coverage holes, interference, dominance).\n        3. **Recommended Actions**: Suggest 3 specific optimization actions (e.g., downtilt, power adjustment, neighbor checks).\n        \n        Keep it professional and technical.';
     }
 
     async function callGeminiAPI(key, model, prompt) {
         // Use selected model
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+        const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + (model) + ':generateContent?key=' + (key);
 
         const response = await fetch(url, {
             method: 'POST',
@@ -1575,9 +1516,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // YES.
 
         // So I need to MOVE lines 118-408 OUT of openChartModal.
-        // But `openChartModal` starts at line 95.
-        // Does the Chart Logic use variables from top of `openChartModal`?
-        // `isDocked`, `container`, `log`, `param`.
+        // But 'openChartModal' starts at line 95.
+        // Does the Chart Logic use variables from top of 'openChartModal'?
+        // 'isDocked', 'container', 'log', 'param'.
         // Yes.
 
         // 1. Setup Container.
@@ -1617,7 +1558,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Always add point to prevent index mismatch (Chart Index must equal Log Index)
-            const label = p.time || `Pt ${i}`;
+            const label = p.time || 'Pt ' + (i);
             labels.push(label);
 
             // OPTIMIZATION: Push {x,y} objects
@@ -1651,36 +1592,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Header Buttons
         const dockBtn = isDocked
-            ? `<button onclick="window.undockChart()" style="background:#555; color:white; border:none; padding:5px 10px; cursor:pointer; font-size:11px;">Undock</button>`
-            : `<button onclick="window.dockChart()" style="background:#3b82f6; color:white; border:none; padding:5px 10px; cursor:pointer; font-size:11px;">Dock</button>`;
+            ? '<button onclick="window.undockChart()" style="background:#555; color:white; border:none; padding:5px 10px; cursor:pointer; font-size:11px;">Undock</button>'
+            : '<button onclick="window.dockChart()" style="background:#3b82f6; color:white; border:none; padding:5px 10px; cursor:pointer; font-size:11px;">Dock</button>';
 
         const closeBtn = isDocked
             ? ''
-            : `<button onclick="window.currentChartInstance=null;window.currentChartLogId=null;document.getElementById('chartModal').remove()" style="background:#ef4444; color:white; border:none; padding:5px 10px; cursor:pointer; pointer-events:auto;">Close</button>`;
+            : '<button onclick="window.currentChartInstance=null;window.currentChartLogId=null;document.getElementById(\'chartModal\').remove()" style="background:#ef4444; color:white; border:none; padding:5px 10px; cursor:pointer; pointer-events:auto;">Close</button>';
 
         const dragCursor = isDocked ? 'default' : 'move';
 
-        container.innerHTML = `
-                    <div id="${headerId}" style="padding:10px; background:#2d2d2d; border-bottom:1px solid #444; display:flex; justify-content:space-between; align-items:center; cursor:${dragCursor}; user-select:none;">
-                        <div style="display:flex; align-items:center; pointer-events:none;">
-                            <h3 style="margin:0; margin-right:20px; pointer-events:auto; font-size:14px;">${log.name} - ${isComposite ? 'RSCP & Neighbors' : param.toUpperCase()} (Snapshot)</h3>
-                            <button id="styleToggleBtn" style="background:#333; color:#ccc; border:1px solid #555; padding:5px 10px; cursor:pointer; pointer-events:auto; font-size:11px;">⚙️ Style</button>
-                        </div>
-                        <div style="pointer-events:auto; display:flex; gap:10px;">
-                            ${dockBtn}
-                            ${closeBtn}
-                        </div>
-                    </div>
-                    
-                    <!-- Settings Panel -->
-                    <div id="${controlsId}" style="display:none; background:#252525; padding:10px; border-bottom:1px solid #444; gap:15px; align-items:center; flex-wrap:wrap;">
-                        <!-- Serving Controls -->
-                        <div style="display:flex; flex-direction:column; gap:2px; border-right:1px solid #444; padding-right:10px;">
-                            <label style="color:#aaa; font-size:10px; font-weight:bold;">Serving</label>
-                             <input type="color" id="pickerServing" value="#3b82f6" style="border:none; width:30px; height:20px; cursor:pointer;">
-                        </div>
-
-                        ${isComposite ? `
+        container.innerHTML = '\n                    <div id="' + (headerId) + '" style="padding:10px; background:#2d2d2d; border-bottom:1px solid #444; display:flex; justify-content:space-between; align-items:center; cursor:' + (dragCursor) + '; user-select:none;">\n                        <div style="display:flex; align-items:center; pointer-events:none;">\n                            <h3 style="margin:0; margin-right:20px; pointer-events:auto; font-size:14px;">' + (log.name) + ' - ' + (isComposite ? 'RSCP & Neighbors' : param.toUpperCase()) + ' (Snapshot)</h3>\n                            <button id="styleToggleBtn" style="background:#333; color:#ccc; border:1px solid #555; padding:5px 10px; cursor:pointer; pointer-events:auto; font-size:11px;">⚙️ Style</button>\n                        </div>\n                        <div style="pointer-events:auto; display:flex; gap:10px;">\n                            ' + (dockBtn) + '\n                            ' + (closeBtn) + '\n                        </div>\n                    </div>\n                    \n                    <!-- Settings Panel -->\n                    <div id="' + (controlsId) + '" style="display:none; background:#252525; padding:10px; border-bottom:1px solid #444; gap:15px; align-items:center; flex-wrap:wrap;">\n                        <!-- Serving Controls -->\n                        <div style="display:flex; flex-direction:column; gap:2px; border-right:1px solid #444; padding-right:10px;">\n                            <label style="color:#aaa; font-size:10px; font-weight:bold;">Serving</label>\n                             <input type="color" id="pickerServing" value="#3b82f6" style="border:none; width:30px; height:20px; cursor:pointer;">\n                        </div>\n\n                        ${isComposite ? '
                         <div style="display:flex; flex-direction:column; gap:2px; padding-right:5px;">
                             <label style="color:#aaa; font-size:10px;">N1 Style</label>
                             <input type="color" id="pickerN1" value="#22c55e" style="border:none; width:30px; height:20px; cursor:pointer;">
@@ -1693,21 +1614,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <label style="color:#aaa; font-size:10px;">N3 Style</label>
                             <input type="color" id="pickerN3" value="#22c55e" style="border:none; width:30px; height:20px; cursor:pointer;">
                         </div>
-                        ` : ''}
-                    </div>
-
-                    <div style="flex:1; padding:10px; display:flex; gap:10px; height: 100%; min-height: 0;">
-                        <!-- Bar Chart Section (100%) -->
-                        <div id="barChartContainer" style="flex:1; position:relative; min-width:0;">
-                            <canvas id="barChartCanvas"></canvas>
-                             <div id="barOverlayInfo" style="position:absolute; top:10px; right:10px; color:white; background:rgba(0,0,0,0.7); padding:2px 5px; border-radius:4px; font-size:10px; pointer-events:none;">
-                                Snapshot
-                            </div>
-                        </div>
-                    </div>
-                    <!-- Resize handle visual cue (bottom right) -->
-                    <div style="position:absolute; bottom:2px; right:2px; width:10px; height:10px; cursor:nwse-resize;"></div>
-                `;
+                        ' : \'\'}\n                    </div>\n\n                    <div style="flex:1; padding:10px; display:flex; gap:10px; height: 100%; min-height: 0;">\n                        <!-- Bar Chart Section (100%) -->\n                        <div id="barChartContainer" style="flex:1; position:relative; min-width:0;">\n                            <canvas id="barChartCanvas"></canvas>\n                             <div id="barOverlayInfo" style="position:absolute; top:10px; right:10px; color:white; background:rgba(0,0,0,0.7); padding:2px 5px; border-radius:4px; font-size:10px; pointer-events:none;">\n                                Snapshot\n                            </div>\n                        </div>\n                    </div>\n                    <!-- Resize handle visual cue (bottom right) -->\n                    <div style="position:absolute; bottom:2px; right:2px; width:10px; height:10px; cursor:nwse-resize;"></div>\n                ';
 
         // Settings Toggle Logic
         document.getElementById('styleToggleBtn').onclick = () => {
@@ -1918,7 +1825,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const n3 = uniqueNeighbors.length > 2 ? uniqueNeighbors[2] : null;
 
                     // Helper for SC Label
-                    const lbl = (prefix, sc) => sc !== undefined && sc !== null ? `${prefix} (${sc})` : prefix;
+                    const lbl = (prefix, sc) => sc !== undefined && sc !== null ? (prefix) + ' (' + (sc) + ')' : prefix;
 
                     // Dynamic Data Construction
                     const candidates = [
@@ -2189,13 +2096,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (levelVal === null || levelVal === undefined) return;
 
                         let textLines = [];
-                        textLines.push(`${levelVal.toFixed(1)}`); // Level
+                        textLines.push((levelVal.toFixed(1))); // Level
 
                         if (index === 0) {
                             // Serving
                             const sc = p.sc ?? (p.parsed && p.parsed.serving ? p.parsed.serving.sc : '-');
                             const band = p.parsed && p.parsed.serving ? p.parsed.serving.band : '-';
-                            if (sc !== undefined) textLines.push(`SC: ${sc}`);
+                            if (sc !== undefined) textLines.push('SC: ' + (sc));
                             if (band) textLines.push(band);
                         } else {
                             // For others (A2, A3, N1...), use the SC included in the Axis Label
@@ -2203,7 +2110,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             const axisLabel = chart.data.labels[index];
                             const match = /\((\d+)\)/.exec(axisLabel);
                             if (match) {
-                                textLines.push(`SC: ${match[1]}`);
+                                textLines.push('SC: ' + (match[1]));
                             } else {
                                 // Fallback if no SC in label (e.g. empty or legacy)
                             }
@@ -2484,8 +2391,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 window.map.flyTo([lat, lng], 18, { animate: true, duration: 1.5 });
                 if (window.searchMarker) window.map.removeLayer(window.searchMarker);
                 window.searchMarker = L.marker([lat, lng]).addTo(window.map)
-                    .bindPopup(`<b>Search Location</b><br>Lat: ${lat}<br>Lng: ${lng}`).openPopup();
-                document.getElementById('fileStatus').textContent = `Zoomed to ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                    .bindPopup('<b>Search Location</b><br>Lat: ' + (lat) + '<br>Lng: ' + (lng)).openPopup();
+                document.getElementById('fileStatus').textContent = 'Zoomed to ' + (lat.toFixed(6)) + ', ' + (lng.toFixed(6));
                 return;
             }
         }
@@ -2534,9 +2441,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Highlight
                     if (best.cellId) window.mapRenderer.highlightCell(best.cellId);
 
-                    document.getElementById('fileStatus').textContent = `Found: ${best.cellName || best.name} (${best.cellId})`;
+                    document.getElementById('fileStatus').textContent = 'Found: ' + (best.cellName || best.name) + ' (' + (best.cellId) + ')';
                 } else {
-                    alert(`Site found but has no coordinates: ${best.cellName || best.name}`);
+                    alert('Site found but has no coordinates: ' + (best.cellName || best.name));
                 }
                 return;
             }
@@ -2666,9 +2573,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (type === 'max') t.max = val;
 
         // Auto-update Label
-        if (t.min !== undefined && t.max !== undefined) t.label = `${t.min} to ${t.max}`;
-        else if (t.min !== undefined) t.label = `> ${t.min}`;
-        else if (t.max !== undefined) t.label = `< ${t.max}`;
+        if (t.min !== undefined && t.max !== undefined) t.label = (t.min) + ' to ' + (t.max);
+        else if (t.min !== undefined) t.label = '> ' + (t.min);
+        else if (t.max !== undefined) t.label = '< ' + (t.max);
 
         // Trigger Update
         refreshThemeLayers(themeKey);
@@ -2721,25 +2628,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 rightPos = (window.innerWidth - rect.right) + 10;
             }
 
-            container.setAttribute('style', `
-                position: fixed;
-                top: ${topPos}px; 
-                right: ${rightPos}px;
-                width: 320px;
-                min-width: 250px;
-                max-width: 600px;
-                max-height: 80vh;
-                background-color: rgba(30, 30, 30, 0.95);
-                border: 2px solid #555;
-                border-radius: 6px;
-                color: #fff;
-                z-index: 10001; 
-                box-shadow: 0 4px 15px rgba(0,0,0,0.6);
-                display: flex;
-                flex-direction: column;
-                resize: both;
-                overflow: hidden;
-            `);
+            container.setAttribute('style', '\n                position: fixed;\n                top: ' + (topPos) + 'px; \n                right: ' + (rightPos) + 'px;\n                width: 320px;\n                min-width: 250px;\n                max-width: 600px;\n                max-height: 80vh;\n                background-color: rgba(30, 30, 30, 0.95);\n                border: 2px solid #555;\n                border-radius: 6px;\n                color: #fff;\n                z-index: 10001; \n                box-shadow: 0 4px 15px rgba(0,0,0,0.6);\n                display: flex;\n                flex-direction: column;\n                resize: both;\n                overflow: hidden;\n            ');
 
             // Disable Map Interactions passing through Legend
             if (typeof L !== 'undefined' && L.DomEvent) {
@@ -2749,25 +2638,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Global Header (Drag Handle)
             const mainHeader = document.createElement('div');
-            mainHeader.setAttribute('style', `
-                padding: 8px 10px;
-                background-color: #252525;
-                font-weight: bold;
-                font-size: 13px;
-                border-bottom: 1px solid #444;
-                cursor: grab;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                border-radius: 6px 6px 0 0;
-                flex-shrink: 0;
-            `);
-            mainHeader.innerHTML = `
-                <span>Legend</span>
-                <div style="display:flex; gap:8px; align-items:center;">
-                     <span onclick="this.closest('#draggable-legend').remove(); window.legendControl=null;" style="cursor:pointer; color:#aaa; font-size:18px; line-height:1;">&times;</span>
-                </div>
-            `;
+            mainHeader.setAttribute('style', '\n                padding: 8px 10px;\n                background-color: #252525;\n                font-weight: bold;\n                font-size: 13px;\n                border-bottom: 1px solid #444;\n                cursor: grab;\n                display: flex;\n                justify-content: space-between;\n                align-items: center;\n                border-radius: 6px 6px 0 0;\n                flex-shrink: 0;\n            ');
+            mainHeader.innerHTML = '\n                <span>Legend</span>\n                <div style="display:flex; gap:8px; align-items:center;">\n                     <span onclick="this.closest(\'#draggable-legend\').remove(); window.legendControl=null;" style="cursor:pointer; color:#aaa; font-size:18px; line-height:1;">&times;</span>\n                </div>\n            ';
             container.appendChild(mainHeader);
 
             // Scrollable Content Area
@@ -2804,7 +2676,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const visibleLogs = window.loadedLogs ? window.loadedLogs.filter(l => l.visible !== false) : [];
 
         if (visibleLogs.length === 0) {
-            scrollContent.innerHTML = `<div style="padding:10px; color:#888; text-align:center;">No visible layers.</div>`;
+            scrollContent.innerHTML = '<div style="padding:10px; color:#888; text-align:center;">No visible layers.</div>';
         } else {
             visibleLogs.forEach(log => {
                 const statsObj = renderer.layerStats ? renderer.layerStats[log.id] : null;
@@ -2819,7 +2691,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 section.setAttribute('style', 'margin-bottom: 10px; border: 1px solid #444; border-radius: 4px; overflow: hidden;');
 
                 const sectHeader = document.createElement('div');
-                sectHeader.innerHTML = `<span style="font-weight:bold; color:#eee;">${log.name}</span> <span style="font-size:10px; color:#aaa;">(${metric})</span>`;
+                sectHeader.innerHTML = '<span style="font-weight:bold; color:#eee;">' + (log.name) + '</span> <span style="font-size:10px; color:#aaa;">(' + (metric) + ')</span>';
                 sectHeader.setAttribute('style', 'background:#333; padding: 5px 8px; font-size:12px; border-bottom:1px solid #444;');
                 section.appendChild(sectHeader);
 
@@ -2830,7 +2702,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const ids = statsObj.activeMetricIds || [];
                     const sortedIds = ids.slice().sort((a, b) => (stats.get(b) || 0) - (stats.get(a) || 0));
                     if (sortedIds.length > 0) {
-                        let html = `<div style="display:flex; flex-direction:column; gap:4px;">`;
+                        let html = '<div style="display:flex; flex-direction:column; gap:4px;">';
                         sortedIds.slice(0, 50).forEach(id => {
                             const color = renderer.getDiscreteColor(id);
                             let name = id;
@@ -2839,14 +2711,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 if (site) name = site.cellName || site.name || id;
                             }
                             const count = stats.get(id) || 0;
-                            html += `<div class="legend-row">
-                                <div class="legend-swatch" style="background:${color};"></div>
-                                <span class="legend-label">${name}</span>
-                                <span class="legend-count">${count}</span>
-                            </div>`;
+                            html += '<div class="legend-row">\n                                <div class="legend-swatch" style="background:' + (color) + ';"></div>\n                                <span class="legend-label">' + (name) + '</span>\n                                <span class="legend-count">' + (count) + '</span>\n                            </div>';
                         });
-                        if (sortedIds.length > 50) html += `<div style="font-size:10px; color:#888; text-align:center; padding: 4px;">+ ${sortedIds.length - 50} more...</div>`;
-                        html += `</div>`;
+                        if (sortedIds.length > 50) html += '<div style="font-size:10px; color:#888; text-align:center; padding: 4px;">+ ' + (sortedIds.length - 50) + ' more...</div>';
+                        html += '</div>';
                         sectBody.innerHTML = html;
                     }
                 }
@@ -2854,21 +2722,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     const key = window.getThresholdKey ? window.getThresholdKey(metric) : metric;
                     const thresholds = (window.themeConfig && window.themeConfig.thresholds[key]) ? window.themeConfig.thresholds[key] : null;
                     if (thresholds) {
-                        let html = `<div style="display:flex; flex-direction:column; gap:6px;">`;
+                        let html = '<div style="display:flex; flex-direction:column; gap:6px;">';
                         thresholds.forEach((t, idx) => {
                             const count = stats.get(t.label) || 0;
                             const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0';
-                            const minVal = t.min !== undefined ? `<input type="number" value="${t.min}" class="legend-input" onchange="window.handleLegendThresholdChange('${key}', ${idx}, 'min', this.value)">` : '-∞';
-                            const maxVal = t.max !== undefined ? `<input type="number" value="${t.max}" class="legend-input" onchange="window.handleLegendThresholdChange('${key}', ${idx}, 'max', this.value)">` : '+∞';
-                            html += `<div class="legend-row">
-                                <input type="color" value="${t.color}" class="legend-color-input" onchange="window.handleLegendColorChange('${key}', ${idx}, this.value)">
-                                <div class="legend-label" style="display:flex; align-items:center; gap:4px;">
-                                    ${minVal} <span style="font-size:9px; color:#666;">to</span> ${maxVal}
-                                </div>
-                                <span class="legend-count">${count} (${pct}%)</span>
-                            </div>`;
+                            const minVal = t.min !== undefined ? '<input type="number" value="' + (t.min) + '" class="legend-input" onchange="window.handleLegendThresholdChange(\'' + (key) + '\', ' + (idx) + ', \'min\', this.value)">' : '-∞';
+                            const maxVal = t.max !== undefined ? '<input type="number" value="' + (t.max) + '" class="legend-input" onchange="window.handleLegendThresholdChange(\'' + (key) + '\', ' + (idx) + ', \'max\', this.value)">' : '+∞';
+                            html += '<div class="legend-row">\n                                <input type="color" value="' + (t.color) + '" class="legend-color-input" onchange="window.handleLegendColorChange(\'' + (key) + '\', ' + (idx) + ', this.value)">\n                                <div class="legend-label" style="display:flex; align-items:center; gap:4px;">\n                                    ' + (minVal) + ' <span style="font-size:9px; color:#666;">to</span> ' + (maxVal) + '\n                                </div>\n                                <span class="legend-count">' + (count) + ' (' + (pct) + '%)</span>\n                            </div>';
                         });
-                        html += `</div>`;
+                        html += '</div>';
                         sectBody.innerHTML = html;
                     }
                 }
@@ -2917,30 +2779,22 @@ document.addEventListener('DOMContentLoaded', () => {
             let inputs = '';
             // If it has Min, show Min Input
             if (t.min !== undefined) {
-                inputs += `<label style="font-size:10px; color:#aaa;">Min</label>
-                           <input type="number" class="thresh-min" data-idx="${idx}" value="${t.min}" style="width:50px; background:#333; border:1px solid #555; color:#fff; font-size:11px; padding:2px;">`;
+                inputs += '<label style="font-size:10px; color:#aaa;">Min</label>\n                           <input type="number" class="thresh-min" data-idx="' + (idx) + '" value="' + (t.min) + '" style="width:50px; background:#333; border:1px solid #555; color:#fff; font-size:11px; padding:2px;">';
             } else {
-                inputs += `<span style="font-size:10px; color:#aaa; width:50px; display:inline-block;">( -∞ )</span>`;
+                inputs += '<span style="font-size:10px; color:#aaa; width:50px; display:inline-block;">( -∞ )</span>';
             }
 
             // If it has Max, show Max Input
             if (t.max !== undefined) {
-                inputs += `<label style="font-size:10px; color:#aaa; margin-left:5px;">Max</label>
-                           <input type="number" class="thresh-max" data-idx="${idx}" value="${t.max}" style="width:50px; background:#333; border:1px solid #555; color:#fff; font-size:11px; padding:2px;">`;
+                inputs += '<label style="font-size:10px; color:#aaa; margin-left:5px;">Max</label>\n                           <input type="number" class="thresh-max" data-idx="' + (idx) + '" value="' + (t.max) + '" style="width:50px; background:#333; border:1px solid #555; color:#fff; font-size:11px; padding:2px;">';
             } else {
-                inputs += `<span style="font-size:10px; color:#aaa; width:50px; display:inline-block; margin-left:5px;">( +∞ )</span>`;
+                inputs += '<span style="font-size:10px; color:#aaa; width:50px; display:inline-block; margin-left:5px;">( +∞ )</span>';
             }
 
             // Remove Button
-            const removeBtn = `<button onclick="window.removeThreshold(${idx})" style="margin-left:auto; background:none; border:none; color:#ef4444; cursor:pointer;" title="Remove Range">✖</button>`;
+            const removeBtn = '<button onclick="window.removeThreshold(' + (idx) + ')" style="margin-left:auto; background:none; border:none; color:#ef4444; cursor:pointer;" title="Remove Range">✖</button>';
 
-            div.innerHTML = `
-                <div style="display:flex; align-items:center;">
-                    <input type="color" class="thresh-color" data-idx="${idx}" value="${t.color}" style="border:none; width:20px; height:20px; cursor:pointer; margin-right:5px;">
-                    ${inputs}
-                    ${removeBtn}
-                </div>
-            `;
+            div.innerHTML = '\n                <div style="display:flex; align-items:center;">\n                    <input type="color" class="thresh-color" data-idx="' + (idx) + '" value="' + (t.color) + '" style="border:none; width:20px; height:20px; cursor:pointer; margin-right:5px;">\n                    ' + (inputs) + '\n                    ' + (removeBtn) + '\n                </div>\n            ';
             thresholdsContainer.appendChild(div);
         });
 
@@ -2948,7 +2802,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const addDiv = document.createElement('div');
         addDiv.style.textAlign = 'center';
         addDiv.style.marginTop = '10px';
-        addDiv.innerHTML = `<button onclick="window.addThreshold()" style="background:#3b82f6; border:none; color:white; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer;">+ Add Range</button>`;
+        addDiv.innerHTML = '<button onclick="window.addThreshold()" style="background:#3b82f6; border:none; color:white; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer;">+ Add Range</button>';
         thresholdsContainer.appendChild(addDiv);
     }
 
@@ -2992,9 +2846,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Keep label? (Simple logic: recreate label on load or lose it)
                 // For now, lose custom label, rely on auto-label in legend
-                if (t.min !== undefined && t.max !== undefined) t.label = `${t.min} to ${t.max}`;
-                else if (t.min !== undefined) t.label = `> ${t.min}`;
-                else if (t.max !== undefined) t.label = `< ${t.max}`;
+                if (t.min !== undefined && t.max !== undefined) t.label = (t.min) + ' to ' + (t.max);
+                else if (t.min !== undefined) t.label = '> ' + (t.min);
+                else if (t.max !== undefined) t.label = '< ' + (t.max);
 
                 newThresholds.push(t);
             });
@@ -3039,7 +2893,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Update Title
             const titleEl = document.getElementById('gridTitle');
-            if (titleEl) titleEl.textContent = `Grid View: ${log.name}`;
+            if (titleEl) titleEl.textContent = 'Grid View: ' + (log.name);
 
             // Store ID for dragging context
             window.currentGridLogId = log.id;
@@ -3047,19 +2901,13 @@ document.addEventListener('DOMContentLoaded', () => {
             // Build Table
             // Build Table
             // Ensure headers are draggable for metric drop functionality
-            let tableHtml = `<table style="width:100%; border-collapse:collapse; color:#eee; font-size:12px;">
-                <thead style="position:sticky; top:0; background:#333; height:30px;">
-                    <tr>
-                        <th style="padding:4px 8px; text-align:left;">Time</th>
-                        <th style="padding:4px 8px; text-align:left;">Lat</th>
-                        <th style="padding:4px 8px; text-align:left;">Lng</th>
-                        <th draggable="true" ondragstart="window.handleHeaderDragStart(event)" data-param="cellId" style="padding:4px 8px; text-align:left; cursor:grab;">RNC/CID</th>`;
+            let tableHtml = '<table style="width:100%; border-collapse:collapse; color:#eee; font-size:12px;">\n                <thead style="position:sticky; top:0; background:#333; height:30px;">\n                    <tr>\n                        <th style="padding:4px 8px; text-align:left;">Time</th>\n                        <th style="padding:4px 8px; text-align:left;">Lat</th>\n                        <th style="padding:4px 8px; text-align:left;">Lng</th>\n                        <th draggable="true" ondragstart="window.handleHeaderDragStart(event)" data-param="cellId" style="padding:4px 8px; text-align:left; cursor:grab;">RNC/CID</th>';
 
             window.currentGridColumns.forEach(col => {
                 if (col === 'cellId') return; // Skip cellId as it is handled by RNC/CID column
-                tableHtml += `<th draggable="true" ondragstart="window.handleHeaderDragStart(event)" data-param="${col}" style="padding:4px 8px; text-align:left; text-transform:uppercase; cursor:grab;">${col}</th>`;
+                tableHtml += '<th draggable="true" ondragstart="window.handleHeaderDragStart(event)" data-param="' + (col) + '" style="padding:4px 8px; text-align:left; text-transform:uppercase; cursor:grab;">' + (col) + '</th>';
             });
-            tableHtml += `</tr></thead><tbody>`;
+            tableHtml += '</tr></thead><tbody>';
 
             let rowsHtml = '';
             const limit = 5000; // Limit for performance
@@ -3068,14 +2916,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Add ID and Click Handler
                 // RNC/CID Formatter
                 const rncCid = (p.rnc !== undefined && p.rnc !== null && p.cid !== undefined && p.cid !== null)
-                    ? `${p.rnc}/${p.cid}`
+                    ? (p.rnc) + '/' + (p.cid)
                     : (p.cellId || '-');
 
-                let row = `<tr id="grid-row-${i}" class="grid-row" onclick="window.globalSync('${log.id}', ${i}, 'grid')" style="cursor:pointer; transition: background 0.1s;">
-                <td style="padding:4px 8px; border-bottom:1px solid #333;">${p.time}</td>
-                <td style="padding:4px 8px; border-bottom:1px solid #333;">${p.lat.toFixed(5)}</td>
-                <td style="padding:4px 8px; border-bottom:1px solid #333;">${p.lng.toFixed(5)}</td>
-                <td style="padding:4px 8px; border-bottom:1px solid #333;">${rncCid}</td>`;
+                let row = '<tr id="grid-row-' + (i) + '" class="grid-row" onclick="window.globalSync(\'' + (log.id) + '\', ' + (i) + ', \'grid\')" style="cursor:pointer; transition: background 0.1s;">\n                <td style="padding:4px 8px; border-bottom:1px solid #333;">' + (p.time) + '</td>\n                <td style="padding:4px 8px; border-bottom:1px solid #333;">' + (p.lat.toFixed(5)) + '</td>\n                <td style="padding:4px 8px; border-bottom:1px solid #333;">' + (p.lng.toFixed(5)) + '</td>\n                <td style="padding:4px 8px; border-bottom:1px solid #333;">' + (rncCid) + '</td>';
 
                 window.currentGridColumns.forEach(col => {
                     if (col === 'cellId') return; // Skip cellId
@@ -3127,7 +2971,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Special formatting for Cell ID in Grid
                     if (col.toLowerCase() === 'cellid' && p.rnc !== null && p.rnc !== undefined) {
                         const cid = p.cid !== undefined && p.cid !== null ? p.cid : (p.cellId & 0xFFFF);
-                        val = `${p.rnc}/${cid}`;
+                        val = (p.rnc) + '/' + (cid);
                     }
 
                     // Format numbers
@@ -3136,9 +2980,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (String(val).includes('.')) val = val.toFixed(2); // Cleaner floats
                     }
 
-                    row += `<td style="padding:4px 8px; border-bottom:1px solid #333;">${val}</td>`;
+                    row += '<td style="padding:4px 8px; border-bottom:1px solid #333;">' + (val) + '</td>';
                 });
-                row += `</tr>`;
+                row += '</tr>';
                 rowsHtml += row;
             });
 
@@ -3528,12 +3372,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 // RNC/CID Formatting for Export (Moved outside to ensure it runs)
                 if (col.toLowerCase() === 'cellid' && (p.rnc !== null && p.rnc !== undefined)) {
                     const cid = p.cid !== undefined && p.cid !== null ? p.cid : (p.cellId & 0xFFFF);
-                    val = `${p.rnc}/${cid}`;
+                    val = (p.rnc) + '/' + (cid);
                 }
 
                 if (val === undefined || val === null) val = '';
                 // Escape commas for CSV
-                if (String(val).includes(',')) val = `"${val}"`;
+                if (String(val).includes(',')) val = '"' + (val) + '"';
                 rowData.push(val);
             });
             rows.push(rowData.join(','));
@@ -3543,7 +3387,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `grid_export_${log.name}.csv`);
+        link.setAttribute("download", 'grid_export_' + (log.name) + '.csv');
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -3643,7 +3487,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `${log.name}_optim_export.csv`);
+        link.setAttribute("download", (log.name) + '_optim_export.csv');
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -3676,7 +3520,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (s) {
                 // Fix: Align ID format with MapRenderer.getSiteColor (RNC/CID priority)
                 let finalId = s.cellId || s.calculatedEci || s.id;
-                if (s.rnc && s.cid) finalId = `${s.rnc}/${s.cid}`;
+                if (s.rnc && s.cid) finalId = (s.rnc) + '/' + (s.cid);
 
                 return {
                     name: s.cellName || s.name || s.siteName,
@@ -3778,1655 +3622,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 else displayVal = Number(v).toFixed(3).replace(/\.?0+$/, '');
             }
 
-            rawHtml += `<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">
-                <span style="color:#aaa; font-weight:500; margin-right: 10px;">${k}</span>
-                <span style="color:#fff; font-weight:bold; word-break: break-all; text-align: right;">${displayVal}</span>
-            </div>`;
+            rawHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">\n                <span style="color:#aaa; font-weight:500; margin-right: 10px;">' + (k) + '</span>\n                <span style="color:#fff; font-weight:bold; word-break: break-all; text-align: right;">' + (displayVal) + '</span>\n            </div>';
         });
 
-        let html = `
-            <div style="padding: 10px;">
-                <!-- Serving Cell Header (Fixed) -->
-                ${servingRes && servingRes.name ? `
+        let html = '\n            <div style="padding: 10px;">\n                <!-- Serving Cell Header (Fixed) -->\n                ${servingRes && servingRes.name ? '
                 <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid #444;">
                     <div style="font-size:14px; font-weight:bold; color:#22c55e;">${servingRes.name}</div>
                     <div style="font-size:11px; color:#888;">ID: ${servingRes.id || '-'}</div>
-                </div>` : ''}
-
-                <div style="display:flex; justify-content:space-between; margin-bottom:10px; border-bottom: 2px solid #555; padding-bottom:5px;">
-                    <span style="font-size:12px; color:#ccc;">${p.time || sourceObj.Time || 'No Time'}</span>
-                    <span style="font-size:12px; color:#ccc;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
-                </div>
-
-                <!-- Event Info (Highlight) -->
-                ${p.event ? `
+                </div>' : \'\'}\n\n                <div style="display:flex; justify-content:space-between; margin-bottom:10px; border-bottom: 2px solid #555; padding-bottom:5px;">\n                    <span style="font-size:12px; color:#ccc;">' + (p.time || sourceObj.Time || 'No Time') + '</span>\n                    <span style="font-size:12px; color:#ccc;">' + (p.lat.toFixed(5)) + ', ' + (p.lng.toFixed(5)) + '</span>\n                </div>\n\n                <!-- Event Info (Highlight) -->\n                ${p.event ? '
                     <div style="background:#451a1a; color:#f87171; padding:5px; border-radius:4px; margin-bottom:10px; font-weight:bold; text-align:center;">
                         ${p.event}
                     </div>
-                ` : ''}
-                
-                <div class="raw-data-container" style="max-height: 400px; overflow-y: auto;">
-                    ${rawHtml}
-                </div>
-                
-                <div style="display:flex; gap:10px; margin-top:10px;">
-                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>
-                    <button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>
-                </div>
-                    <!-- Hidden data stash for the analyzer -->
-                    <script type="application/json" id="point-data-stash">
-                    ${(() => {
-                // Robust Key Finder for Stash
-                const findKey = (obj, target) => {
-                    const t = target.toLowerCase().replace(/\s/g, '');
-                    for (let k of Object.keys(obj)) {
-                        if (k.toLowerCase().replace(/\s/g, '') === t) return obj[k];
-                    }
-                    return undefined;
-                };
-                const cellName = findKey(sourceObj, 'Cell Name') || findKey(sourceObj, 'CellName') || findKey(sourceObj, 'Site Name');
-                const cellId = findKey(sourceObj, 'Cell ID') || findKey(sourceObj, 'CellID') || findKey(sourceObj, 'CI');
-
-                return JSON.stringify({
-                    ...sourceObj,
-                    'Cell Identifier': servingRes && servingRes.name ? servingRes.name : (cellName || servingRes.id || cellId || 'Unknown'),
-                    'Cell Name': servingRes && servingRes.name ? servingRes.name : (cellName || 'Unknown'),
-                    'Tech': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? 'LTE' : 'UMTS')
-                });
-            })()}
-                    </script>
-                </div>
-            </div>
-        return { html, connectionTargets };
-    }
-
-    // --- STRICT MANAGEMENT SUMMARY IMPLEMENTATION (SECTION 0-15 Rules) ---
-    window.generateManagementSummary = (d) => {
-        // Helper: Extract Metric Safely
-        const getVal = (targetKeys) => {
-            if (!Array.isArray(targetKeys)) targetKeys = [targetKeys];
-            const rowKeys = Object.keys(d);
-            const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-            for (let t of targetKeys) {
-                const normT = normalize(t);
-                // Try Exact first
-                if (d[t] !== undefined) return d[t];
-                // Try Normalized Search
-                const match = rowKeys.find(k => normalize(k) === normT || normalize(k).includes(normT));
-                if (match && d[match] !== undefined) return d[match];
-            }
-            return null;
-        };
-
-        const val = (v) => (v === null || v === undefined || isNaN(parseFloat(v))) ? null : parseFloat(v);
-
-        // --- EXTRACT METRICS ---
-        const mrCount = val(getVal(['Dominant MR Count', 'MR Count', 'Sample Count']));
-        const rsrp = val(getVal(['Dominant RSRP', 'RSRP']));
-        const rsrq = val(getVal(['Dominant RSRQ', 'RSRQ']));
-        const cqi = val(getVal(['Average DL Wideband CQI', 'Wideband CQI']));
-        const dlLowTput = val(getVal(['DL Low-Throughput Ratio', 'DL Low Tput Ratio']));
-        const ulLowTput = val(getVal(['UL Low-Throughput Ratio', 'UL Low Tput Ratio']));
-        const dlRb = val(getVal(['Average DL RB Quantity', 'DL RB Quantity']));
-        const dlSpecEff = val(getVal(['DL Spectrum Efficiency', 'Spectrum Efficiency']));
-        const dlIbler = val(getVal(['DL IBLER', 'IBLER']));
-        const rank2 = val(getVal(['Rank 2 Percentage', 'Rank 2 %']));
-        const dl3cc = val(getVal(['DL 3CC Percentage', '3CC']));
-        const dl1cc = val(getVal(['DL 1CC Percentage', '1CC']));
-
-        let output = {};
-        let scoreBase = 0;
-        let bonus = 0;
-        let penalty = 0;
-
-        // --- SECTION 0: DATA CONFIDENCE & VALIDITY ---
-        if (mrCount !== null && mrCount >= 1000) { output.dataConf = "High"; scoreBase = 70; }
-        else if (mrCount !== null && mrCount >= 100) { output.dataConf = "Medium"; scoreBase = 55; }
-        else { output.dataConf = "Low"; scoreBase = 35; }
-
-        if (mrCount !== null && mrCount < 20) { output.limitation = "Indicative Only"; penalty += 20; }
-
-        // --- SECTION 1: COVERAGE STATUS ---
-        if (rsrp !== null) {
-            if (rsrp >= -90) output.coverage = "Good";
-            else if (rsrp > -100) output.coverage = "Fair";
-            else output.coverage = "Poor";
-        } else output.coverage = "N/A";
-
-        // --- SECTION 2: SIGNAL QUALITY ---
-        if (rsrq !== null) {
-            if (rsrq >= -9) output.quality = "Good";
-            else if (rsrq > -11) output.quality = "Degraded";
-            else output.quality = "Poor";
-        } else output.quality = "N/A";
-
-        // --- SECTION 3: CHANNEL QUALITY ---
-        if (cqi !== null) {
-            if (cqi < 6) output.cqi = "Poor";
-            else if (cqi < 9) output.cqi = "Moderate";
-            else output.cqi = "Good";
-        } else output.cqi = "N/A";
-
-        // --- SECTION 4: USER EXPERIENCE (DL) ---
-        if (dlLowTput !== null) {
-            if (dlLowTput >= 80) { output.dlExp = "Severely Degraded"; bonus += 10; }
-            else if (dlLowTput >= 25) output.dlExp = "Degraded";
-            else output.dlExp = "Acceptable";
-        } else output.dlExp = "N/A";
-
-        // --- SECTION 5: LOAD & CONGESTION ---
-        if (dlRb !== null) {
-            if (dlRb <= 10) output.load = "Very Low Load";
-            else if (dlRb < 70) output.load = "Moderate Load";
-            else output.load = "Congested";
-        } else output.load = "N/A";
-
-        // --- SECTION 6: SPECTRUM EFFICIENCY ---
-        if (dlSpecEff !== null) {
-            if (dlSpecEff < 1000) { output.specEff = "Very Low"; bonus += 10; }
-            else if (dlSpecEff < 2000) output.specEff = "Low";
-            else output.specEff = "Normal";
-        } else output.specEff = "N/A";
-
-        // --- SECTION 7: LINK STABILITY ---
-        // (Skipped as per verification output requirements)
-
-        // --- SECTION 8: MIMO UTILIZATION ---
-        if (rank2 !== null) {
-            if (rank2 >= 30) output.mimo = "Good";
-            else if (rank2 >= 15) output.mimo = "Limited";
-            else output.mimo = "Poor";
-        } else output.mimo = "N/A";
-
-        // --- SECTION 9: CA EFFECTIVENESS ---
-        output.ca = "N/A";
-        if (dl3cc !== null && dl3cc === 100 && output.specEff !== "Normal" && output.specEff !== "N/A") {
-            output.ca = "Active but Ineffective";
-            bonus += 10;
-        } else if (dl1cc !== null && dl1cc >= 60) {
-            output.ca = "Underutilized";
-        }
-
-        // --- SECTION 10: INTERPRETATION (WHY) ---
-        let interpretation = null;
-        if (output.coverage !== "Poor" && output.coverage !== "N/A" &&
-            output.quality === "Poor" &&
-            output.cqi !== "Poor" && output.cqi !== "N/A") {
-            interpretation = "Signal power is present but radio quality is degraded by interference.";
-        }
-        if (output.dlExp !== "Acceptable" && output.dlExp !== "N/A" &&
-            ulLowTput !== null && ulLowTput === 0) {
-            interpretation = "Downlink-only degradation indicates interference or overlap issues.";
-        }
-        if (output.ca === "Active but Ineffective") {
-            interpretation = "Carrier Aggregation is enabled but limited by poor SINR.";
-        }
-        if (interpretation) bonus += 10;
-
-        // --- SECTION 11: EXPERT DIAGNOSIS (WHAT) ---
-        let diagnosis = "N/A";
-        if (output.quality === "Poor" &&
-            (output.specEff === "Low" || output.specEff === "Very Low") &&
-            (output.load === "Very Low Load" || output.load === "Moderate Load")) {
-            diagnosis = "Interference-Limited Cell";
-        } else if (output.coverage === "Poor" && output.cqi !== "Good" && output.cqi !== "N/A") {
-            diagnosis = "Coverage-Limited Cell";
-        } else if (output.load === "Congested") {
-            diagnosis = "Capacity-Limited Cell";
-        }
-
-        // --- SECTION 12: OPTIMIZATION ACTIONS ---
-        let actions = [];
-        if (diagnosis === "Interference-Limited Cell") {
-            actions.push("Increase electrical downtilt (1–2°)", "Review overshooting neighbors", "Reduce DL power if overlap confirmed", "Audit PCI and neighbor relations");
-        }
-        if (output.mimo === "Limited" || output.mimo === "Poor") {
-            actions.push("Verify antenna cross-polar isolation", "Check RF paths and connectors");
-        }
-        if (output.ca === "Active but Ineffective") {
-            actions.push("Improve secondary carrier SINR", "Align antenna configuration across bands", "Adjust CA activation thresholds");
-        }
-        if (actions.length === 0) actions.push("Monitor performance.");
-
-        // --- SECTION 13: CONFIDENCE SCORING ---
-        let rawScore = scoreBase + bonus - penalty;
-        let finalScore = Math.max(20, Math.min(95, rawScore));
-
-        // --- SECTION 14: CONFIDENCE LEVEL ---
-        let confLevel = "Low";
-        if (finalScore >= 85) confLevel = "Very High";
-        else if (finalScore >= 70) confLevel = "High";
-        else if (finalScore >= 50) confLevel = "Medium";
-
-        // --- GENERATE HTML OUTPUT ---
-        const getCls = (val) => {
-            if (!val || val === "N/A") return "";
-            const v = val.toLowerCase();
-            if (v === "good" || v === "normal" || v === "stable" || v === "very high" || v === "high" || v === "acceptable") return "status-ok";
-            if (v === "poor" || v === "very low" || v === "severe" || v === "congested" || v === "unstable" || v === "low") return "status-bad";
-            if (v === "fair" || v === "degraded" || v === "limited" || v === "underutilized" || v === "moderate") return "status-warn";
-            return "";
-        };
-
-        const row = (label, val) => {
-            return '<div style="display:flex; justify-content:space-between; margin-bottom:4px; padding-bottom:4px; border-bottom:1px solid #333;">' +
-                '<span style="color:#aaa;">' + label + '</span>' +
-                '<span class="' + getCls(val) + '" style="font-weight:600;">' + (val || 'N/A') + '</span>' +
-                '</div>';
-        };
-
-        let html = '<div class="report-block">' +
-            '<h4 class="report-header">EXPERT ANALYSIS</h4>' +
-            row('Confidence Level', confLevel) +
-            row('Confidence Score', finalScore + '%') +
-            row('Data Confidence', output.dataConf) +
-            '<br>' +
-            row('Coverage Status', output.coverage) +
-            row('Signal Quality', output.quality) +
-            row('Channel Quality', output.cqi) +
-            row('DL User Exp', output.dlExp) +
-            row('Cell Load', output.load) +
-            row('Spectral Perf', output.specEff) +
-            row('MIMO Utilization', output.mimo) +
-            row('CA Effectiveness', output.ca) +
-            '</div>';
-
-        html += '<div class="report-block">' +
-            '<h4 class="report-header">DIAGNOSIS & ACTIONS</h4>' +
-            '<div style="margin-bottom:8px;">' +
-            '<div style="color:#888; font-size:10px; text-transform:uppercase;">Expert Diagnosis</div>' +
-            '<div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">' + diagnosis + '</div>' +
-            '</div>' +
-
-            (interpretation ?
-                '<div style="margin-bottom:8px;">' +
-                '<div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>' +
-                '<div style="color:#ddd; font-style:italic; margin-top:2px;">"' + interpretation + '"</div>' +
-                '</div>' : '') +
-
-            '<div style="margin-top:10px;">' +
-            '<div style="color:#888; font-size:10px; text-transform:uppercase;">Optimization Actions</div>' +
-            '<ul style="margin:5px 0 0 15px; padding:0; color:#cbd5e1;">' +
-            actions.map(a => '<li>' + a + '</li>').join('') +
-            '</ul>' +
-            '</div>' +
-            '</div>';
-
-        return html;
-    };
-
-    // --- ANALYSIS ENGINE ---
-
-    window.analyzePoint = (btn) => {
-        try {
-            // Retrieve data from stash or passed argument
-            // FIX: Stash might be sibling or global due to layout changes
-            let script = document.getElementById('point-data-stash');
-
-            // Fallback scope check if needed (though ID should be unique in panel)
-            if (!script && btn) {
-                const container = btn.parentNode.parentNode; // Check grandparent
-                if (container) script = container.querySelector('#point-data-stash');
-            }
-
-            if (!script) {
-                console.error("No point data found for analysis.");
-                alert("Error: Analysis data missing from panel.");
-                return;
-            }
-            const data = JSON.parse(script.textContent);
-
-            // -------------------------------------------------------------
-            // ANALYSIS LOGIC
-            // -------------------------------------------------------------
-
-            // Helper: Run Analysis for a SINGLE data object
-            const runAnalysisForData = (d) => {
-                // Scoped Key Finder
-                const getVal = (targetName) => {
-                    const normTarget = targetName.toLowerCase().replace(/[\s\-_]/g, '');
-                    for (let k in d) {
-                        const normKey = k.toLowerCase().replace(/[\s\-_]/g, '');
-                        if (normKey === normTarget) return parseFloat(d[k]);
-                        if (normKey.includes(normTarget)) return parseFloat(d[k]);
-                    }
-                    return null;
-                };
-
-                // Get Strings for Context
-                const time = d['Time'] || d['time'] || d['timestamp'] || 'N/A';
-                const tech = d['Tech'] || d['Technology'] || d['rat'] || 'LTE'; // Default LTE as per template if unknown
-                const cellId = d['Cell Identifier'] || d['Cell ID'] || d['cellid'] || d['ci'] || d['Serving SC/PCI'] || 'Unknown';
-                const lat = d['Latitude'] || d['lat'] || 'Unknown';
-                const lng = d['Longitude'] || d['lng'] || 'Unknown';
-
-                const rsrp = getVal('rsrp') ?? getVal('level');
-                const rsrq = getVal('rsrq');
-                const cqi = getVal('cqi') ?? getVal('averagedlwidebandcqi') ?? getVal('dlwidebandcqi');
-                const dlLowThptRatio = getVal('dllowthroughputratio') ?? getVal('lowthpt') ?? 0;
-                const dlSpecEff = getVal('dlspectrumefficiency') ?? getVal('dlspectrumeff') ?? getVal('se');
-                const dlRbQty = getVal('averagedlrbquantity') ?? getVal('dlrbquantity') ?? getVal('rbutil');
-
-                const dbUtil = getVal('prbutil') ?? getVal('rbutil');
-                const dlIbler = getVal('dlibler') ?? getVal('bler');
-                const rank2Pct = getVal('rank2percentage') ?? getVal('rank2');
-                const ca1ccPct = getVal('dl1ccpercentage') ?? getVal('ca1cc');
-
-                // --- EVALUATION ---
-                let coverageStatus = 'Unknown';
-                let coverageInterp = 'insufficient signal strength';
-                if (rsrp !== null) {
-                    if (rsrp >= -90) { coverageStatus = 'Good'; coverageInterp = 'strong signal strength'; }
-                    else if (rsrp > -100) { coverageStatus = 'Fair'; coverageInterp = 'adequate signal strength'; }
-                    else { coverageStatus = 'Poor'; coverageInterp = 'weak signal strength at cell edge'; }
-                }
-
-                let interferenceLevel = 'Unknown';
-                if (rsrq !== null) {
-                    if (rsrq >= -8) interferenceLevel = 'Low';
-                    else if (rsrq > -11) interferenceLevel = 'Moderate';
-                    else interferenceLevel = 'High';
-                }
-
-                let channelQuality = 'Unknown';
-                if (cqi !== null) {
-                    if (cqi < 6) channelQuality = 'Poor';
-                    else if (cqi < 9) channelQuality = 'Keep';
-                    else channelQuality = 'Good';
-                }
-
-                let dlUserExp = 'Unknown';
-                if (dlLowThptRatio !== null) {
-                    if (dlLowThptRatio >= 25) dlUserExp = 'Degraded';
-                    else dlUserExp = 'Acceptable'; // Assuming metric is %
-                    if (dlLowThptRatio < 1 && dlLowThptRatio > 0 && dlLowThptRatio >= 0.25) dlUserExp = 'Degraded';
-                }
-
-                let dlSpecPerf = 'Unknown';
-                if (dlSpecEff !== null) {
-                    if (dlSpecEff < 2000) dlSpecPerf = 'Low';
-                    else if (dlSpecEff < 3500) dlSpecPerf = 'Moderate';
-                    else dlSpecPerf = 'High';
-                }
-
-                let cellLoad = 'Unknown';
-                let congestionInterp = 'not related';
-                if (dbUtil !== null) {
-                    if (dbUtil >= 80) { cellLoad = 'Congested'; congestionInterp = 'related'; }
-                    else if (dbUtil < 70) cellLoad = 'Not Congested';
-                    else cellLoad = 'Moderate';
-                } else if (dlRbQty !== null) {
-                    if (dlRbQty <= 100 && dlRbQty >= 0) {
-                        if (dlRbQty >= 80) { cellLoad = 'Congested'; congestionInterp = 'related'; }
-                        else if (dlRbQty < 70) cellLoad = 'Not Congested';
-                    }
-                }
-
-                let mimoUtil = 'Unknown';
-                if (rank2Pct !== null) {
-                    if (rank2Pct >= 30) mimoUtil = 'Good';
-                    else if (rank2Pct < 20) mimoUtil = 'Poor';
-                    else mimoUtil = 'Moderate';
-                }
-
-                let caUtil = 'Unknown';
-                let caInterp = 'limited';
-                if (ca1ccPct !== null) {
-                    if (ca1ccPct >= 60) { caUtil = 'Underutilized'; caInterp = 'limited'; }
-                    else if (ca1ccPct < 50) { caUtil = 'Well Utilized'; caInterp = 'effective'; }
-                    else { caUtil = 'Moderate'; caInterp = 'moderate'; }
-                }
-
-                // Root Cause Logic
-                let rootCauses = [];
-                if (coverageStatus !== 'Poor' && coverageStatus !== 'Unknown' && interferenceLevel === 'High') rootCauses.push('Interference-Limited');
-                else if (coverageStatus === 'Poor') rootCauses.push('Coverage-Limited');
-
-                if (cellLoad === 'Congested') rootCauses.push('Capacity / Congestion-Limited');
-                if (caUtil === 'Underutilized' && channelQuality === 'Good') rootCauses.push('Carrier Aggregation Limited');
-
-                if (rootCauses.length === 0 && (coverageStatus !== 'Unknown' || interferenceLevel !== 'Unknown')) rootCauses.push('No Specific Root Cause Identified');
-
-                // Recommendations Logic
-                let actionsHigh = [];
-                let actionsMed = [];
-
-                if (rootCauses.includes('Interference-Limited')) {
-                    actionsHigh.push('Review Physical Optimization (Tilt/Azimuth)');
-                    actionsHigh.push('Check for External Interference Sources');
-                }
-                if (rootCauses.includes('Coverage-Limited')) {
-                    actionsHigh.push('Optimize Antenna Downtilt (Uptilt if feasible)');
-                    actionsMed.push('Verify Power Settings');
-                }
-                if (rootCauses.includes('Capacity / Congestion-Limited')) {
-                    actionsHigh.push('Evaluate Load Balancing Features');
-                    actionsMed.push('Plan for Capacity Expansion (Carrier Add/Split)');
-                }
-                if (rootCauses.includes('Carrier Aggregation Limited')) {
-                    actionsMed.push('Verify CA Configuration Parameters');
-                    actionsMed.push('Check Secondary Carrier Availability');
-                }
-
-                // Fallbacks if empty
-                if (actionsHigh.length === 0) actionsHigh.push('Monitor KPI Trend for degradation');
-                if (actionsMed.length === 0) actionsMed.push('Perform drive test for further detail');
-
-                return {
-                    metrics: {
-                        coverageStatus, coverageInterp,
-                        interferenceLevel,
-                        channelQuality,
-                        dlUserExp, dlLowThptRatio, dlSpecEff,
-                        dlSpecPerf,
-                        cellLoad, congestionInterp,
-                        mimoUtil, caUtil, caInterp
-                    },
-                    context: { time, tech, cellId, lat, lng },
-                    rootCauses,
-                    recommendations: { high: actionsHigh, med: actionsMed }
-                };
-            }; // End runAnalysisForData
-
-            // -------------------------------------------------------------
-            // REPORT GENERATION
-            // -------------------------------------------------------------
-
-            const dataList = Array.isArray(data) ? data : [{ name: '', data: data }];
-
-            let combinedHtml = '';
-
-            dataList.forEach((item, idx) => {
-                const { metrics, context, rootCauses, recommendations } = runAnalysisForData(item.data);
-
-                // Styles for specific keywords
-                const colorize = (txt) => {
-                    if (!txt) return '';
-                    const t = txt.toLowerCase();
-                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return '<span class="status-good">' + txt + '</span>';
-                    if (t === 'fair' || t === 'moderate' || t === 'keep') return '<span class="status-fair">' + txt + '</span>';
-                    return '<span class="status-poor">' + txt + '</span>';
-                };
-
-                combinedHtml += '<div class="report-section" style="' + (idx > 0 ? 'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;' : '') + '">' +
-                    (item.name ? '<h2 style="margin: 0 0 20px 0; color: #60a5fa; border-bottom: 1px solid #444; padding-bottom: 10px; font-size: 18px;">' + item.name + ' Analysis</h2>' : '') +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">1. Cell Context</h3>' +
-                    '<ul class="report-list">' +
-                    '<li><strong>Technology:</strong> ' + context.tech + '</li>' +
-                    '<li><strong>Cell Identifier:</strong> ' + context.cellId + '</li>' +
-                    '<li><strong>Location:</strong> ' + context.lat + ', ' + context.lng + '</li>' +
-                    '<li><strong>Data Confidence:</strong> High (based on MR Count)</li>' +
-                    '</ul>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">2. Coverage & Radio Conditions</h3>' +
-                    '<p>Coverage in the analyzed grid is classified as <strong>' + colorize(metrics.coverageStatus) + '</strong>.</p>' +
-                    '<p>Dominant RSRP indicates <strong>' + metrics.coverageInterp + '</strong>. ' +
-                    'Signal quality assessment shows <strong>' + colorize(metrics.interferenceLevel) + '</strong> interference conditions, ' +
-                    'based on Dominant RSRQ and CQI behavior.</p>' +
-                    '<p>Overall radio conditions are assessed as <strong>' + colorize(metrics.channelQuality) + '</strong>.</p>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">3. Throughput & User Experience</h3>' +
-                    '<p>Downlink user experience is classified as <strong>' + colorize(metrics.dlUserExp) + '</strong>.</p>' +
-                    '<p>This is supported by:</p>' +
-                    '<ul class="report-list">' +
-                    '<li>Average DL Throughput behavior</li>' +
-                    '<li>DL Low-Throughput Ratio (' + (metrics.dlLowThptRatio !== 0 ? metrics.dlLowThptRatio : 'N/A') + ')</li>' +
-                    '<li>Spectrum Efficiency classification</li>' +
-                    '</ul>' +
-                    '<p>Uplink performance is <strong>acceptable / secondary</strong>, based on UL KPIs.</p>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">4. Spectrum Efficiency & Resource Utilization</h3>' +
-                    '<p>Downlink spectrum efficiency is classified as <strong>' + colorize(metrics.dlSpecPerf) + '</strong>.</p>' +
-                    '<p>Average DL RB usage indicates the cell is <strong>' + colorize(metrics.cellLoad) + '</strong>, ' +
-                    'confirming that performance limitations are <strong>' + metrics.congestionInterp + '</strong> to congestion.</p>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">5. MIMO & Carrier Aggregation Performance</h3>' +
-                    '<p>MIMO utilization is assessed as <strong>' + colorize(metrics.mimoUtil) + '</strong>, based on rank distribution statistics.</p>' +
-                    '<p>Carrier Aggregation utilization is <strong>' + colorize(metrics.caUtil) + '</strong>, indicating <strong>' + metrics.caInterp + '</strong> use of multi-carrier capabilities.</p>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">6. Traffic Profile & Service Impact</h3>' +
-                    '<p>Traffic composition is dominated by:</p>' +
-                    '<ul class="report-list">' +
-                    '<li>QCI 9 (Internet / Default)</li>' +
-                    '</ul>' +
-                    '<p>This traffic profile is sensitive to:</p>' +
-                    '<ul class="report-list">' +
-                    '<li>Throughput stability</li>' +
-                    '<li>Spectrum efficiency</li>' +
-                    '<li>Interference conditions</li>' +
-                    '</ul>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">7. Root Cause Analysis</h3>' +
-                    '<p>Based on rule evaluation, the primary performance limitation(s) are:</p>' +
-                    '<ul class="report-list" style="color: #ef4444; font-weight: bold;">' +
-                    rootCauses.map(rc => '<li>' + rc + '</li>').join('') +
-                    '</ul>' +
-                    '<p>These limitations explain the observed throughput behavior despite the current load level.</p>' +
-                    '</div>' +
-
-                    '<div class="report-block">' +
-                    '<h3 class="report-header">8. Optimization Recommendations</h3>' +
-
-                    '<h4 style="color:#fbbf24; margin:10px 0 5px 0;">High Priority Actions:</h4>' +
-                    '<ul class="report-list">' +
-                    recommendations.high.map(a => '<li>' + a + '</li>').join('') +
-                    '</ul>' +
-
-                    '<h4 style="color:#94a3b8; margin:10px 0 5px 0;">Medium Priority Actions:</h4>' +
-                    '<ul class="report-list">' +
-                    recommendations.med.map(a => '<li>' + a + '</li>').join('') +
-                    '</ul>' +
-
-                    '<p style="margin-top:10px; font-style:italic; font-size:11px; color:#888;">Each recommended action is directly linked to the identified root cause(s) and observed KPI behavior.</p>' +
-                    '</div>' +
-
-                    '<div class="report-summary">' +
-                    '<h3 class="report-header" style="color:#fff;">EXECUTIVE SUMMARY</h3>' +
-                    '<p>The analyzed LTE cell is primarily <strong>' + rootCauses[0] + '</strong>, resulting in <strong>' + metrics.dlUserExp + ' User Experience</strong>. Targeted RF and feature optimization is required to improve spectrum efficiency.</p>' +
-                    '</div>' +
-
-                    '</div>';
-            });
-
-            // CSS For Report
-            const style = '<style>' +
-                '.report-block { margin-bottom: 20px; }' +
-                '.report-header { color: #aaa; border-bottom: 1px solid #444; padding-bottom: 4px; margin-bottom: 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }' +
-                '.report-list { padding-left: 20px; color: #ddd; font-size: 13px; line-height: 1.6; }' +
-                '.report-section p { font-size: 13px; color: #eee; line-height: 1.6; margin-bottom: 8px; }' +
-                '.status-good { color: #4ade80; font-weight: bold; }' +
-                '.status-fair { color: #facc15; font-weight: bold; }' +
-                '.status-poor { color: #f87171; font-weight: bold; }' +
-                '.report-summary { background: #1f2937; padding: 15px; border-left: 4px solid #3b82f6; margin-top: 30px; }' +
-                '</style>';
-
-            const modalHtml = '<div class="analysis-modal-overlay" onclick="const m=document.querySelector(\'.analysis-modal-overlay\'); if(event.target===m) m.remove()">' +
-                '<div class="analysis-modal" style="width: 800px; max-width: 90vw;">' +
-                '<div class="analysis-header">' +
-                '<h3>Cell Performance Analysis Report</h3>' +
-                '<button class="analysis-close-btn" onclick="document.querySelector(\'.analysis-modal-overlay\').remove()">×</button>' +
-                '</div>' +
-                '<div class="analysis-content" style="padding: 30px;">' +
-                style +
-                combinedHtml +
-                '</div>' +
-                '</div>' +
-                '</div>';
-
-            // Append to body
-            const div = document.createElement('div');
-            div.innerHTML = modalHtml;
-            document.body.appendChild(div.firstElementChild);
-
-        } catch (e) {
-            console.error("Analysis Error:", e);
-            alert("Error running analysis: " + e.message);
-        }
-    };
-
-    // Global function to update the Floating Info Panel (Single Point)
-    window.updateFloatingInfoPanel = (p, logColor) => {
-        try {
-            const panel = document.getElementById('floatingInfoPanel');
-            const content = document.getElementById('infoPanelContent');
-            const headerDom = document.getElementById('infoPanelHeader'); // GET HEADER
-
-            if (!panel || !content) return;
-
-            if (panel.style.display !== 'block') panel.style.display = 'block';
-
-            // 1. Set Stash for Toggle Re-render compatibility (Treat single as one-item array)
-            // This ensures window.togglePointDetailsMode() works because it calls updateFloatingInfoPanelMulti(lastMultiHits)
-            window.lastMultiHits = [p];
-
-            // 2. Inject Toggle Button if missing
-            let toggleBtn = document.getElementById('toggleViewBtn');
-            if (headerDom && !toggleBtn) {
-                const closeBtn = headerDom.querySelector('.info-panel-close');
-                toggleBtn = document.createElement('span');
-                toggleBtn.id = 'toggleViewBtn';
-                toggleBtn.className = 'toggle-view-btn';
-                toggleBtn.innerHTML = '⚙️ View';
-                toggleBtn.title = 'Switch View Mode';
-                toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };
-                toggleBtn.style.marginRight = '10px';
-                toggleBtn.style.fontSize = '12px';
-                toggleBtn.style.cursor = 'pointer';
-                toggleBtn.style.color = '#ccc';
-
-                if (closeBtn) headerDom.insertBefore(toggleBtn, closeBtn);
-                else headerDom.appendChild(toggleBtn);
-            }
-
-            // 3. Select Generator based on Mode
-            const mode = window.pointDetailsMode || 'log'; // Default to log if undefined
-            const generator = mode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
-
-            // 4. Generate
-            // Note: generatePointInfoHTMLLog takes (p, logColor)
-            // Note: generatePointInfoHTML takes (p, logColor) - now updated to use it
-            const { html, connectionTargets } = generator(p, logColor);
-
-            content.innerHTML = html;
-
-            // Update Connections
-            if (window.mapRenderer && !window.isSpiderMode) {
-                let startPt = { lat: p.lat, lng: p.lng };
-                window.mapRenderer.drawConnections(startPt, connectionTargets);
-            }
-        } catch (e) {
-            console.error("Error updating Info Panel:", e);
-        }
-    };
-
-    // NEW: Multi-Layer Info Panel
-    // --- NEW: Toggle Logic ---
-    window.pointDetailsMode = 'log'; // 'simple' or 'log'
-
-    window.togglePointDetailsMode = () => {
-        window.pointDetailsMode = window.pointDetailsMode === 'simple' ? 'log' : 'simple';
-        // Re-render currently stashed hits if available (UI refresh)
-        const stashMeta = document.getElementById('point-data-stash-meta');
-        if (stashMeta && stashMeta.textContent) {
-            try {
-                const meta = JSON.parse(stashMeta.textContent);
-                // We need to re-call updateFloatingInfoPanelMulti with the ORIGINAL hits.
-                // But hits are not fully serialized.
-                // We can just rely on the user clicking again or, better, we store the last hits globally?
-                if (window.lastMultiHits) {
-                    window.updateFloatingInfoPanelMulti(window.lastMultiHits);
-                }
-            } catch (e) { console.error(e); }
-        }
-    };
-
-    // --- NEW: Log View Generator ---
-    function generatePointInfoHTMLLog(p, logColor) {
-        // Extract Serving
-        let sName = 'Unknown', sSC = '-', sRSCP = '-', sEcNo = '-', sFreq = '-', sRnc = null, sCid = null, sLac = null;
-        let isLTE = false;
-
-        // Explicit Name Resolution (Matches Map Logic)
-        let servingRes = null;
-        if (window.resolveSmartSite) {
-            servingRes = window.resolveSmartSite(p);
-            if (servingRes && servingRes.name) sName = servingRes.name;
-        }
-
-        const connectionTargets = [];
-        if (servingRes && servingRes.lat && servingRes.lng) {
-            connectionTargets.push({
-                lat: servingRes.lat, lng: servingRes.lng, color: '#3b82f6', weight: 8, cellId: servingRes.id
-            });
-        }
-
-        if (p.parsed && p.parsed.serving) {
-            const s = p.parsed.serving;
-            if (sName === 'Unknown') sName = s.cellName || s.name || p.cellName || sName;
-            sSC = s.sc !== undefined ? s.sc : sSC;
-
-            // Flexible Level Extraction
-            sRSCP = s.rscp !== undefined ? s.rscp : (s.rsrp !== undefined ? s.rsrp : (s.level !== undefined ? s.level : sRSCP));
-            sEcNo = s.ecno !== undefined ? s.ecno : (s.rsrq !== undefined ? s.rsrq : sEcNo);
-
-            sFreq = s.freq !== undefined ? s.freq : sFreq;
-            sRnc = s.rnc || p.rnc;
-            sCid = s.cid || p.cid;
-            sLac = s.lac || p.lac;
-            isLTE = s.rsrp !== undefined;
-        } else {
-            // Flat fallback
-            if (sName === 'Unknown') sName = p.cellName || p.siteName || sName;
-            sSC = p.sc !== undefined ? p.sc : sSC;
-            sRSCP = p.rscp !== undefined ? p.rscp : (p.rsrp !== undefined ? p.rsrp : (p.level !== undefined ? p.level : sRSCP));
-            sEcNo = p.ecno !== undefined ? p.ecno : (p.qual !== undefined ? p.qual : sEcNo);
-            sFreq = p.freq !== undefined ? p.freq : sFreq;
-            sRnc = p.rnc;
-            sCid = p.cid;
-            sLac = p.lac;
-            isLTE = p.Tech === 'LTE';
-        }
-
-        // DATABASE FALLBACK: If RNC/CID are still missing but we resolved a site, use its IDs
-        if ((sRnc === null || sRnc === undefined) && servingRes && servingRes.rnc) {
-            sRnc = servingRes.rnc;
-            sCid = servingRes.cid;
-            if (sName === 'Unknown') sName = servingRes.name || sName;
-        }
-
-        const levelHeader = isLTE ? 'RSRP' : 'RSCP';
-        const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
-
-        // Determine Identity Label
-        let identityLabel = sSC + ' / ' + sFreq; // Default
-        if (servingRes && servingRes.id) {
-            identityLabel = servingRes.id;
-        } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
-            identityLabel = sRnc + '/' + sCid; // UMTS RNC/CID
-        } else if (p.cellId && p.cellId !== 'N/A') {
-            identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
-        }
-
-        // Neighbors
-        let rawNeighbors = [];
-        const resolveN = (sc, freq, cellName) => {
-            if (window.resolveSmartSite && (sc !== undefined || freq !== undefined)) {
-                // Try with current LAC first
-                let nRes = window.resolveSmartSite({
-                    sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng, lac: sLac
-                });
-
-                // Fallback: Try without LAC (neighbors are often on different LACs)
-                if ((!nRes || nRes.name === 'Unknown') && sLac) {
-                    nRes = window.resolveSmartSite({
-                        sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng
-                    });
-                }
-
-                if (nRes && nRes.name && nRes.name !== 'Unknown') {
-                    return { name: nRes.name, rnc: nRes.rnc, cid: nRes.cid, id: nRes.id, lat: nRes.lat, lng: nRes.lng };
-                }
-            }
-            return { name: cellName || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null };
-        };
-
-        if (p.parsed && p.parsed.neighbors) {
-            p.parsed.neighbors.forEach(n => {
-                const sc = n.pci !== undefined ? n.pci : (n.sc !== undefined ? n.sc : undefined);
-                const freq = n.freq !== undefined ? n.freq : undefined;
-
-                // FILTER: Skip if this neighbor matches the serving cell
-                if (sc == sSC && freq == sFreq) return;
-
-                rawNeighbors.push({
-                    sc: sc !== undefined ? sc : '-',
-                    rscp: n.rscp !== undefined ? n.rscp : -140, // Default low for sort
-                    ecno: n.ecno !== undefined ? n.ecno : '-',
-                    freq: n.freq !== undefined ? n.freq : '-',
-                    cellName: n.cellName
-                });
-            });
-        }
-        // Fallback Flat Neighbors (N1..N3)
-        if (rawNeighbors.length === 0) {
-            if (p.n1_sc !== undefined && (p.n1_sc != sSC)) rawNeighbors.push({ sc: p.n1_sc, rscp: p.n1_rscp || -140, ecno: p.n1_ecno, freq: sFreq });
-            if (p.n2_sc !== undefined && (p.n2_sc != sSC)) rawNeighbors.push({ sc: p.n2_sc, rscp: p.n2_rscp || -140, ecno: p.n2_ecno, freq: sFreq });
-            if (p.n3_sc !== undefined && (p.n3_sc != sSC)) rawNeighbors.push({ sc: p.n3_sc, rscp: p.n3_rscp || -140, ecno: p.n3_ecno, freq: sFreq });
-        }
-
-        // Sort by RSCP Descending
-        rawNeighbors.sort((a, b) => {
-            const valA = parseFloat(a.rscp);
-            const valB = parseFloat(b.rscp);
-            if (isNaN(valA)) return 1;
-            if (isNaN(valB)) return -1;
-            return valB - valA;
-        });
-
-        const neighbors = rawNeighbors.map((n, i) => {
-            const resolved = resolveN(n.sc, n.freq, n.cellName);
-            return {
-                type: 'N' + (i + 1),
-                name: resolved.name,
-                rnc: resolved.rnc,
-                cid: resolved.cid,
-                id: resolved.id, // Pass ID
-                lat: resolved.lat,
-                lng: resolved.lng,
-                sc: n.sc,
-                rscp: n.rscp === -140 ? '-' : n.rscp,
-                ecno: n.ecno,
-                freq: n.freq
-            };
-        });
-
-        // Build HTML
-        let rows = '';
-
-        // Serving Click Logic
-        let sClickAction = '';
-        /* FIX: Use highlightAndPan */
-        if (servingRes && servingRes.lat && servingRes.lng) {
-            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? servingRes.rnc + '/' + servingRes.cid : '');
-            sClickAction = 'onclick="window.highlightAndPan(' + servingRes.lat + ', ' + servingRes.lng + ', \'' + safeId + '\', \'serving\')" style="cursor:pointer; color:#fff;"';
-        }
-
-        // Serving Row
-        rows += '<tr class="log-row serving-row">' +
-            '<td class="log-cell-type">Serving</td>' +
-            '<td class="log-cell-name"><span class="log-header-serving" ' + sClickAction + '>' + sName + '</span> <span style="color:#666; font-size:10px;">(' + identityLabel + ')</span></td>' +
-            '<td class="log-cell-val">' + sSC + '</td>' +
-            '<td class="log-cell-val">' + sRSCP + '</td>' +
-            '<td class="log-cell-val">' + sEcNo + '</td>' +
-            '<td class="log-cell-val">' + sFreq + '</td>' +
-            '</tr>';
-
-        neighbors.forEach(n => {
-            let nIdLabel = n.sc + '/' + n.freq;
-            if (n.rnc && n.cid) nIdLabel = n.rnc + '/' + n.cid;
-
-            let nClickAction = '';
-            /* FIX: Use highlightAndPan */
-            if (n.lat && n.lng) {
-                const safeId = n.id || (n.rnc && n.cid ? n.rnc + '/' + n.cid : '');
-                nClickAction = 'onclick="window.highlightAndPan(' + n.lat + ', ' + n.lng + ', \'' + safeId + '\', \'neighbor\')" style="cursor:pointer;"';
-            }
-
-            rows += '<tr class="log-row">' +
-                '<td class="log-cell-type">' + n.type + '</td>' +
-                '<td class="log-cell-name"><span ' + nClickAction + '>' + n.name + '</span> <span style="color:#666; font-size:10px;">(' + nIdLabel + ')</span></td>' +
-                '<td class="log-cell-val">' + n.sc + '</td>' +
-                '<td class="log-cell-val">' + n.rscp + '</td>' +
-                '<td class="log-cell-val">' + n.ecno + '</td>' +
-                '<td class="log-cell-val">' + n.freq + '</td>' +
-                '</tr>';
-        });
-
-        // ----------------------------------------------------
-        // EXTRACT OTHER METRICS
-        // ----------------------------------------------------
-
-let extraMetricsHtml = '';
-const sourceObj = p.properties ? p.properties : p;
-const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
-    'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual',
-    'rnc', 'cid', 'lac', 'freq', 'earfcn', 'uarfcn', 'band', 'tech', 'technology',
-    'cellid', 'cell_id', 'sitename', 'cellname', 'name',
-    'n1_sc', 'n1_rscp', 'n1_ecno', 'n2_sc', 'n2_rscp', 'n2_ecno', 'n3_sc', 'n3_rscp', 'n3_ecno',
-    'a2_sc', 'a2_rscp', 'a3_sc', 'a3_rscp'];
-
-const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
-
-    Object.entries(sourceObj).forEach(([k, v]) => {
-        const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
-        if (isNeighborKey(k.toLowerCase())) return;
-        if (typeof v === 'object') return; // Skip nested objects for now
-        if (v === undefined || v === null || v === '') return;
-
-        // Format numeric
-        let val = v;
-        if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
-
-        extraMetricsHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">' +
-            '<span style="color:#aaa; margin-right: 10px;">' + k + '</span>' +
-            '<span style="color:#fff; font-weight:bold; text-align: right;">' + val + '</span>' +
-            '</div>';
-    });
-
-    let extraMetricsSection = '';
-    if (extraMetricsHtml) {
-        extraMetricsSection = '<div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">' +
-            '<div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>' +
-            '<div style="max-height: 200px; overflow-y: auto;">' +
-            extraMetricsHtml +
-            '</div>' +
-            '</div>';
-    }
-
-    const html = '<div class="log-view-container">' +
-        '<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">' +
-        '<div>' +
-        '<div class="log-header-serving" style="font-size:14px; margin-bottom:2px;">' + sName + '</div>' +
-        '<div style="color:#aaa; font-size:11px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
-        '</div>' +
-        '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
-        '</div>' +
-
-        '<table class="log-details-table">' +
-        '<thead>' +
-        '<tr>' +
-        '<th style="width:10%">Type</th>' +
-        '<th style="width:40%">Cell Name</th>' +
-        '<th>SC</th>' +
-        '<th>' + levelHeader + '</th>' +
-        '<th>' + qualHeader + '</th>' +
-        '<th>Freq</th>' +
-        '</tr>' +
-        '</thead>' +
-        '<tbody>' +
-        rows +
-        '</tbody>' +
-        '</table>' +
-
-        extraMetricsSection +
-
-        '<div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
-        '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>' +
-        '<button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>' +
-        '</div>' +
-
-        '<!-- Hidden data stash for the analyzer -->' +
-        '<script type="application/json" id="point-data-stash">' +
-        JSON.stringify({
-            ...(p.properties || p),
-            'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
-            'Cell Name': sName,
-            'Tech': isLTE ? 'LTE' : 'UMTS'
-        }) +
-        '</script>' +
-        '</div>' +
-        '</div>';
-
-
-// Add connection targets for top 3 neighbors if they resolve
-neighbors.slice(0, 3).forEach(n => {
-    if (window.resolveSmartSite) {
-        const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
-        if (nRes && nRes.lat && nRes.lng) {
-            connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: '#ef4444', weight: 4, cellId: nRes.id });
-        }
-    }
-});
-
-return { html, connectionTargets };
-    }
-
-
-window.updateFloatingInfoPanelMulti = (hits) => {
-    try {
-        window.lastMultiHits = hits; // Store for toggle re-render
-
-        const panel = document.getElementById('floatingInfoPanel');
-        const content = document.getElementById('infoPanelContent');
-        const headerDom = document.getElementById('infoPanelHeader');
-
-        if (!panel || !content) return;
-
-        if (panel.style.display !== 'block') panel.style.display = 'block';
-        content.innerHTML = ''; // Clear
-
-        // Inject Toggle Button into Header if not present
-        let toggleBtn = document.getElementById('toggleViewBtn');
-        if (!toggleBtn && headerDom) {
-            // Remove existing title text to replace with flex container if needed, or just append
-            // Let's repurpose the header content slightly
-            const closeBtn = headerDom.querySelector('.info-panel-close');
-
-            toggleBtn = document.createElement('span');
-            toggleBtn.id = 'toggleViewBtn';
-            toggleBtn.className = 'toggle-view-btn';
-            toggleBtn.innerHTML = '⚙️ View';
-            toggleBtn.title = 'Switch View Mode';
-            toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };
-
-            // Insert before close button
-            headerDom.insertBefore(toggleBtn, closeBtn);
-        }
-
-        let allConnectionTargets = [];
-        let aggregatedData = [];
-
-        hits.forEach((hit, idx) => {
-            const { log, point } = hit;
-
-            // Collect Data for Unified Analysis
-            aggregatedData.push({
-                name: 'Layer: ' + log.name,
-                data: point.properties ? point.properties : point
-            });
-
-            // Header for this Log Layer
-            const header = document.createElement('div');
-            header.style.cssText = 'background:#ef4444; color:#fff; padding:5px; font-weight:bold; font-size:12px; margin-top:' + (idx > 0 ? '10px' : '0') + '; border-radius:4px 4px 0 0;';
-            header.textContent = 'Layer: ' + log.name;
-            content.appendChild(header);
-
-            // Body Selection
-            // Use new Log Generator if mode is 'log', else default
-            const generator = window.pointDetailsMode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
-            const { html, connectionTargets } = generator(point, log.color, false);
-
-            const body = document.createElement('div');
-            body.innerHTML = html;
-            content.appendChild(body);
-
-            // Aggregate connections
-            if (connectionTargets) allConnectionTargets = allConnectionTargets.concat(connectionTargets);
-        });
-
-        // Update Connections (Draw ALL lines from ALL layers)
-        if (window.mapRenderer && !window.isSpiderMode && hits.length > 0) {
-            const primary = hits[0].point;
-            window.mapRenderer.drawConnections({ lat: primary.lat, lng: primary.lng }, allConnectionTargets);
-        }
-
-        // UNIFIED ANALYZE BUTTON
-        const btnContainer = document.createElement('div');
-        btnContainer.style.cssText = "margin-top: 15px; text-align: center; border-top: 1px solid #555; padding-top: 10px;";
-        btnContainer.innerHTML = '<button onclick="window.analyzePoint(this)" ' +
-            'style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; width: 100%;">' +
-            'Analyze All Layers' +
-            '</button>' +
-            '<script type="application/json" id="point-data-stash">' + JSON.stringify(aggregatedData) + '</script>' +
-            '<script type="application/json" id="point-data-stash-meta">{"hits":true}</script>';
-
-        content.appendChild(btnContainer);
-
-    } catch (e) {
-        console.error("Error updating Multi-Info Panel:", e);
-    }
-};
-
-window.syncMarker = null; // Global marker for current sync point
-
-
-window.globalSync = (logId, index, source, skipPanel = false) => {
-    const log = loadedLogs.find(l => l.id === logId);
-    if (!log || !log.points[index]) return;
-
-    const point = log.points[index];
-
-    // 1. Update Map (Marker & View)
-    // 1. Update Map (Marker & View)
-    // Always update marker, even if source is map (to show selection highlight)
-    if (!window.syncMarker) {
-        window.syncMarker = L.circleMarker([point.lat, point.lng], {
-            radius: 18, // Larger radius to surround the point
-            color: '#ffff00', // Yellow
-            weight: 4,
-            fillColor: 'transparent',
-            fillOpacity: 0
-        }).addTo(window.map);
-    } else {
-        window.syncMarker.setLatLng([point.lat, point.lng]);
-        // Ensure style is consistent (in case it was overwritten or different)
-        window.syncMarker.setStyle({
-            radius: 18,
-            color: '#ffff00',
-            weight: 4,
-            fillColor: 'transparent',
-            fillOpacity: 0
-        });
-    }
-
-    // View Navigation (Zoom/Pan) - User Request: Zoom in on click
-    // UPDATED: Keep current zoom, just pan.
-    // AB: User requested to NOT move map when clicking ON the map.
-    if (source !== 'chart_scrub' && source !== 'map') {
-        // const targetZoom = Math.max(window.map.getZoom(), 17); // Previous logic
-        // window.map.flyTo([point.lat, point.lng], targetZoom, { animate: true, duration: 0.5 });
-
-        // New Logic: Pan only, preserve zoom
-        window.map.panTo([point.lat, point.lng], { animate: true, duration: 0.5 });
-    }
-
-    // 2. Update Charts
-    if (source !== 'chart' && source !== 'chart_scrub') {
-        if (window.currentChartLogId === logId && window.updateDualCharts) {
-            // We need to update the chart's active index WITHOUT triggering a loop
-            // updateDualCharts draws the chart.
-            // We simply set the index and draw.
-            window.updateDualCharts(index, true); // true = skipSync to avoid loop
-
-            // AUTO ZOOM if requested (User Request: Zoom on Click)
-            if (window.zoomChartToActive) {
-                window.zoomChartToActive();
-            }
-        }
-    }
-
-    // 3. Update Floating Panel
-    if (window.updateFloatingInfoPanel && !skipPanel) {
-        window.updateFloatingInfoPanel(point, log.color);
-    }
-
-    // 4. Update Grid
-    if (window.currentGridLogId === logId) {
-        const row = document.getElementById('grid-row-' + index);
-        if (row) {
-            document.querySelectorAll('.grid-row').forEach(r => r.classList.remove('selected-row'));
-            row.classList.add('selected-row');
-
-            if (source !== 'grid') {
-                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-        }
-    }
-
-    // 5. Update Signaling
-    if (source !== 'signaling') {
-        // Find closest signaling row by time logic (reuised from highlightPoint)
-        const targetTime = point.time;
-        const parseTime = (t) => {
-            const [h, m, s] = t.split(':');
-            return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;
-        };
-        const tTarget = parseTime(targetTime);
-        let bestIdx = null;
-        let minDiff = Infinity;
-        const rows = document.querySelectorAll('#signalingTableBody tr');
-        rows.forEach((row) => {
-            if (!row.pointData) return;
-            row.classList.remove('selected-row');
-            const t = parseTime(row.pointData.time);
-            const diff = Math.abs(t - tTarget);
-            if (diff < minDiff) {
-                minDiff = diff;
-                bestIdx = row;
-            }
-        });
-        if (bestIdx && minDiff < 5000) {
-            bestIdx.classList.add('selected-row');
-            bestIdx.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-    }
-};
-
-// Global Listener for Custom Legend Color Changes
-window.addEventListener('metric-color-changed', (e) => {
-    const { id, color } = e.detail;
-    console.log('[App] Color overridden for ' + id + ' -> ' + color);
-
-    // Re-render ALL logs currently showing Discrete Metrics (CellId or CID)
-    loadedLogs.forEach(log => {
-        if (log.currentParam === 'cellId' || log.currentParam === 'cid') {
-            window.mapRenderer.addLogLayer(log.id, log.points, log.currentParam);
-        }
-    });
-});
-
-// Global Sync Listener (Legacy Adapatation)
-// Global Sync Listener (Aligning with User Logic: Coordinator Pattern)
-window.addEventListener('map-point-clicked', (e) => {
-    const { logId, point, source } = e.detail;
-
-    const log = loadedLogs.find(l => l.id === logId);
-    if (log) {
-        // Prioritize ID match
-        let index = -1;
-        if (point.id !== undefined) {
-            index = log.points.findIndex(p => p.id === point.id);
-        }
-        // Fallback to Time
-        if (index === -1 && point.time) {
-            index = log.points.findIndex(p => p.time === point.time);
-        }
-        // Fallback to Coord (Tolerance 1e-5 for roughly 1m)
-        if (index === -1) {
-            index = log.points.findIndex(p => Math.abs(p.lat - point.lat) < 0.00001 && Math.abs(p.lng - point.lng) < 0.00001);
-        }
-
-        if (index !== -1) {
-            // The Coordinator: globalSync
-            // Logic: catches map-point-clicked and calls window.globalSync(). 
-            // It specifically invokes window.updateFloatingInfoPanel(point) (via skipPanel=false default)
-            window.globalSync(logId, index, source || 'map');
-        } else {
-            console.warn("[App] Sync Index not found for clicked point.");
-            // Fallback: If we can't sync index, just update the panel directly
-            if (window.updateFloatingInfoPanel) {
-                window.updateFloatingInfoPanel(point);
-            }
-        }
-    }
-});
-
-// SPIDER OPTION: Sector Click Listener
-window.addEventListener('site-sector-clicked', (e) => {
-    // GATED: Only run if Spider Mode is ON
-    if (!window.isSpiderMode) return;
-
-    const sector = e.detail;
-    if (!sector || !window.mapRenderer) return;
-
-    console.log("[Spider] Sector Clicked:", sector);
-
-    // Find all points served by this sector
-    const targetPoints = [];
-
-    // Calculate "Tip Top" (Outer Edge Center) based on Azimuth
-    // Use range from the event (current rendering range)
-    const range = sector.range || 200;
-    const rad = Math.PI / 180;
-    const azRad = (sector.azimuth || 0) * rad;
-    const latRad = sector.lat * rad;
-
-    const dy = Math.cos(azRad) * range;
-    const dx = Math.sin(azRad) * range;
-    const dLat = dy / 111111;
-    const dLng = dx / (111111 * Math.cos(latRad));
-
-    const startPt = {
-        lat: sector.lat + dLat,
-        lng: sector.lng + dLng
-    };
-
-    const norm = (v) => v !== undefined && v !== null ? String(v).trim() : '';
-    const isValid = (v) => v !== undefined && v !== null && v !== 'N/A' && v !== '';
-
-    loadedLogs.forEach(log => {
-        log.points.forEach(p => {
-            let isMatch = false;
-
-            // 1. Strict RNC/CID Match (Highest Priority)
-            if (isValid(sector.rnc) && isValid(sector.cid) && isValid(p.rnc) && isValid(p.cellId)) {
-                if (norm(sector.rnc) === norm(p.rnc) && norm(sector.cid) === norm(p.cellId)) {
-                    isMatch = true;
-                }
-            }
-
-            // 2. Generic CellID Match (Fallback)
-            if (!isMatch && sector.cellId && isValid(p.cellId)) {
-                if (norm(sector.cellId) === norm(p.cellId)) {
-                    isMatch = true;
-                }
-                // Support "RNC/CID" format in sector.cellId
-                else if (String(sector.cellId).includes('/')) {
-                    const parts = String(sector.cellId).split('/');
-                    const cid = parts[parts.length - 1];
-                    const rnc = parts.length > 1 ? parts[parts.length - 2] : null;
-
-                    if (rnc && isValid(p.rnc) && norm(p.rnc) === norm(rnc) && norm(p.cellId) === norm(cid)) {
-                        isMatch = true;
-                    } else if (norm(p.cellId) === norm(cid) && !isValid(p.rnc)) {
-                        isMatch = true;
-                    }
-                }
-            }
-
-            // 3. SC Match (Secondary Fallback)
-            if (!isMatch && sector.sc !== undefined && isValid(p.sc)) {
-                if (p.sc == sector.sc) {
-                    isMatch = true;
-                    // Refine with LAC if available
-                    if (sector.lac && isValid(p.lac) && norm(sector.lac) !== norm(p.lac)) {
-                        isMatch = false;
-                    }
-                }
-            }
-
-            if (isMatch) {
-                targetPoints.push({
-                    lat: p.lat,
-                    lng: p.lng,
-                    color: '#ffff00', // Yellow lines
-                    weight: 2,
-                    dashArray: '4, 4'
-                });
-            }
-        });
-    });
-
-    if (targetPoints.length > 0) {
-        console.log('[Spider] Found ' + targetPoints.length + ' points.');
-        window.mapRenderer.drawConnections(startPt, targetPoints);
-        fileStatus.textContent = 'Spider: Showing ' + targetPoints.length + ' points for ' + (sector.cellId || sector.sc);
-    } else {
-        console.warn("[Spider] No matching points found.");
-        fileStatus.textContent = 'Spider: No points found for ' + (sector.cellId || sector.sc);
-        window.mapRenderer.clearConnections();
-    }
-});
-
-fileInput.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    fileStatus.textContent = 'Loading ' + file.name + '...';
-
-
-    // TRP Zip Import
-    if (file.name.toLowerCase().endsWith('.trp')) {
-        handleTRPImport(file);
-        return;
-    }
-
-    // NMFS Binary Check
-    if (file.name.toLowerCase().endsWith('.nmfs')) {
-        const headerReader = new FileReader();
-        headerReader.onload = (event) => {
-            const arr = new Uint8Array(event.target.result);
-            // ASCII for NMFS is 78 77 70 83 (0x4e 0x4d 0x46 0x53)
-            // Check if starts with NMFS
-            let isNMFS = false;
-            if (arr.length >= 4) {
-                if (arr[0] === 0x4e && arr[1] === 0x4d && arr[2] === 0x46 && arr[3] === 0x53) {
-                    isNMFS = true;
-                }
-            }
-
-            if (isNMFS) {
-                alert("⚠️ SECURE FILE DETECTED\n\nThis is a proprietary Keysight Nemo 'Secure' Binary file (.nmfs).\n\nThis application can only parse TEXT log files (.nmf or .csv).\n\nPlease open this file in Nemo Outdoor/Analyze and export it as 'Nemo File Format (Text)'.");
-                fileStatus.textContent = 'Error: Encrypted NMFS file.';
-                e.target.value = ''; // Reset
-                return;
-            } else {
-                // Fallback: Maybe it's a text file named .nmfs? Try parsing as text.
-                console.warn("File named .nmfs but missing signature. Attempting text parse...");
-                parseTextLog(file);
-            }
-        };
-        headerReader.readAsArrayBuffer(file.slice(0, 10));
-        return;
-    }
-
-    // Excel / CSV Detection (Binary Read)
-    if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            try {
-                fileStatus.textContent = 'Parsing Excel...';
-                const data = event.target.result;
-                const result = ExcelParser.parse(data);
-
-                handleParsedResult(result, file.name);
-
-            } catch (err) {
-                console.error('Excel Parse Error:', err);
-                fileStatus.textContent = 'Error parsing Excel: ' + err.message;
-            }
-        };
-        reader.readAsArrayBuffer(file);
-        e.target.value = '';
-        return;
-    }
-
-    // Standard Text Log
-    parseTextLog(file);
-
-    function parseTextLog(f) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const content = event.target.result;
-            fileStatus.textContent = 'Parsing...';
-
-            setTimeout(() => {
-                try {
-                    const result = NMFParser.parse(content);
-                    handleParsedResult(result, f.name);
-                } catch (err) {
-                    console.error('Parser Error:', err);
-                    fileStatus.textContent = 'Error parsing file: ' + err.message;
-                }
-            }, 100);
-        };
-        reader.readAsText(f);
-        e.target.value = '';
-    }
-
-    function getRandomColor() {
-        const letters = '0123456789ABCDEF';
-        let color = '#';
-        for (let i = 0; i < 6; i++) {
-            color += letters[Math.floor(Math.random() * 16)];
-        }
-        return color;
-    }
-
-    function handleParsedResult(result, fileName) {
-        // Handle new parser return format (object vs array)
-        const parsedData = Array.isArray(result) ? result : result.points;
-        const technology = Array.isArray(result) ? 'Unknown' : result.tech;
-        const signalingData = !Array.isArray(result) ? result.signaling : [];
-        const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel
-
-        console.log(`Parsed ${parsedData.length} measurement points and ${signalingData ? signalingData.length : 0} signaling messages.Tech: ${technology}`);
-
-        if (parsedData.length > 0 || (signalingData && signalingData.length > 0)) {
-            const id = Date.now().toString();
-            const name = fileName.replace(/\.[^/.]+$/, "");
-
-            // Add to Logs
-            loadedLogs.push({
-                id: id,
-                name: name,
-                points: parsedData,
-                signaling: signalingData,
-                tech: technology,
-                customMetrics: customMetrics,
-                color: getRandomColor(),
-                visible: true,
-                currentParam: 'level'
-            });
-
-            // Update UI
-            updateLogsList();
-
-            if (parsedData.length > 0) {
-                console.log('[App] Debug First Point:', parsedData[0]);
-                map.addLogLayer(id, parsedData, 'level');
-                const first = parsedData[0];
-                map.setView(first.lat, first.lng);
-            }
-
-            // Add Events Layer (HO Fail, Drop, etc.)
-            if (signalingData && signalingData.length > 0) {
-                map.addEventsLayer(id, signalingData);
-            }
-
-            fileStatus.textContent = `Loaded: ${name}(${parsedData.length} pts)`;
-
-
-        } else {
-            fileStatus.textContent = 'No valid data found.';
-        }
-    }
-});
-
-// Site Import Logic
-const siteInput = document.getElementById('siteInput');
-if (siteInput) {
-    siteInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        fileStatus.textContent = `Importing Sites...`;
-
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            try {
-                const data = new Uint8Array(event.target.result);
-                const workbook = XLSX.read(data, { type: 'array' });
-                const firstSheetName = workbook.SheetNames[0];
-                const worksheet = workbook.Sheets[firstSheetName];
-                const json = XLSX.utils.sheet_to_json(worksheet);
-
-                console.log('Imported Rows:', json.length);
-
-                if (json.length === 0) {
-                    fileStatus.textContent = 'No rows found in Excel.';
-                    return;
-                }
-
-                // Parse Sectors
-                // Try to match common headers
-                // Map needs: lat, lng, azimuth, name, cellId, tech, color
-                const sectors = json.map(row => {
-                    // Normalize helper: lowercase, remove ALL non-alphanumeric chars
-                    const normalize = (str) => String(str).toLowerCase().replace(/[^a-z0-9]/g, '');
-                    const rowKeys = Object.keys(row);
-
-                    const getVal = (possibleNames) => {
-                        for (let name of possibleNames) {
-                            const target = normalize(name);
-                            // Check exact match of normalized keys
-                            const foundKey = rowKeys.find(k => normalize(k) === target);
-                            if (foundKey) return row[foundKey];
-                        }
-                        return undefined;
-                    };
-
-                    const lat = parseFloat(getVal(['lat', 'latitude', 'lat_decimal']));
-                    const lng = parseFloat(getVal(['long', 'lng', 'longitude', 'lon', 'long_decimal']));
-                    // Extended Azimuth keywords (including 'azimut' for French)
-                    const azimuth = parseFloat(getVal(['azimuth', 'azimut', 'dir', 'bearing', 'az']));
-                    const name = getVal(['nodeb name', 'nodeb_name', 'nodebname', 'site', 'sitename', 'site_name', 'name', 'site name']);
-                    const cellId = getVal(['cell', 'cellid', 'ci', 'cell_name', 'cell id', 'cell_id']);
-
-                    // New Fields for Strict Matching
-                    const lac = getVal(['lac', 'location area code']);
-                    const pci = getVal(['psc', 'sc', 'pci', 'physical cell id', 'physcial cell id', 'scrambling code', 'physicalcellid']);
-                    const freq = getVal(['downlink uarfcn', 'dl uarfcn', 'uarfcn', 'freq', 'frequency', 'dl freq', 'downlink earfcn', 'dl earfcn', 'earfcn', 'downlinkearfcn']);
-                    const band = getVal(['band', 'band name', 'freq band']);
-
-                    // Specific Request: eNodeB ID-Cell ID
-                    const enodebCellIdRaw = getVal(['enodeb id-cell id', 'enodebid-cellid', 'enodebidcellid']);
-
-                    let rnc = parseInt(getVal(['rnc', 'rncid', 'rnc_id', 'enodeb', 'enodebid', 'enodeb id', 'enodeb_id']));
-                    let cid = parseInt(getVal(['cid', 'c_id', 'ci', 'cell id', 'cell_id', 'cellid']));
-
-                    let calculatedEci = null;
-                    if (enodebCellIdRaw) {
-                        const parts = String(enodebCellIdRaw).split('-');
-                        if (parts.length === 2) {
-                            const enb = parseInt(parts[0]);
-                            const c = parseInt(parts[1]);
-                            if (!isNaN(enb) && !isNaN(c)) {
-                                // Standard LTE ECI Calculation: eNodeB * 256 + CellID
-                                calculatedEci = (enb * 256) + c;
-
-                                // Fallback: If RNC/CID columns were missing, use these
-                                if (isNaN(rnc)) rnc = enb;
-                                if (isNaN(cid)) cid = c;
-                            }
-                        }
-                    }
-
-                    let tech = getVal(['tech', 'technology', 'system', 'rat']);
-                    const cellName = getVal(['cell name', 'cellname']) || '';
-
-                    // Infer Tech from Name if missing
-                    if (!tech) {
-                        const combinedName = (name + ' ' + cellName).toLowerCase();
-                        if (combinedName.includes('4g') || combinedName.includes('lte') || combinedName.includes('earfcn')) tech = '4G';
-                        else if (combinedName.includes('3g') || combinedName.includes('umts') || combinedName.includes('wcdma')) tech = '3G';
-                        else if (combinedName.includes('2g') || combinedName.includes('gsm')) tech = '2G';
-                        else if (combinedName.includes('5g') || combinedName.includes('nr')) tech = '5G';
-                    }
-
-                    // Robust Fallback: Attempt to extract RNC from CellID or RawID if still missing
-                    if (isNaN(rnc) || !rnc) {
-                        const candidates = [String(enodebCellIdRaw), String(cellId), String(name)];
-                        for (let c of candidates) {
-                            if (c) {
-                                // Check if it's a Big Int (RNC+CID)
-                                const val = parseInt(c);
-                                if (!isNaN(val) && val > 65535) {
-                                    rnc = val >> 16;
-                                    cid = val & 0xFFFF;
-                                    break;
-                                }
-
-                                if (c.includes('-') || c.includes('/')) {
-                                    const parts = c.split(/[-/]/);
-                                    if (parts.length === 2) {
-                                        const p1 = parseInt(parts[0]);
-                                        if (!isNaN(p1) && p1 > 0 && p1 < 65535) {
-                                            rnc = p1;
-                                            // Also recover CID if missing
-                                            if (isNaN(cid)) cid = parseInt(parts[1]);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Determine Color
-                    let color = '#3b82f6';
-                    if (tech) {
-                        const t = tech.toString().toLowerCase();
-                        if (t.includes('3g') || t.includes('umts')) color = '#eab308'; // Yellow/Orange
-                        if (t.includes('4g') || t.includes('lte')) color = '#3b82f6'; // Blue
-                        if (t.includes('2g') || t.includes('gsm')) color = '#ef4444'; // Red
-                        if (t.includes('5g') || t.includes('nr')) color = '#a855f7'; // Purple
-                    }
-
-                    return {
-                        ...row, // Preserve ALL original columns
-                        lat, lng, azimuth: isNaN(azimuth) ? 0 : azimuth,
-                        name, siteName: name, // Ensure siteName is present
-                        cellName,
-                        cellId,
-                        lac,
-                        lac,
-                        pci: parseInt(pci), sc: parseInt(pci),
-                        freq: parseInt(freq),
-                        band,
-                        tech,
-                        color,
-                        rawEnodebCellId: enodebCellIdRaw,
-                        calculatedEci: calculatedEci,
-                        rnc: isNaN(rnc) ? undefined : rnc,
-                        cid: isNaN(cid) ? undefined : cid
-                    };
-                })
-                // Filter out invalid
-                const validSectors = sectors.filter(s => s && s.lat && s.lng);
-
-                if (validSectors.length > 0) {
-                    const id = Date.now().toString();
-                    const name = file.name.replace(/\.[^/.]+$/, "");
-
-                    console.log(`[Sites] Importing ${validSectors.length} sites as layer: ${name}`);
-
-                    // Add Layer
-                    try {
-                        if (window.mapRenderer) {
-                            console.log('[Sites] Calling mapRenderer.addSiteLayer...');
-                            window.mapRenderer.addSiteLayer(id, name, validSectors, false); // DO NOT FIT BOUNDS
-                            console.log('[Sites] addSiteLayer successful. Adding sidebar item...');
-                            addSiteLayerToSidebar(id, name, validSectors.length);
-                            console.log('[Sites] Sidebar item added.');
-                        } else {
-                            throw new Error("MapRenderer not initialized");
-                        }
-                        fileStatus.textContent = `Sites Imported: ${validSectors.length}(${name})`;
-                    } catch (innerErr) {
-                        console.error('[Sites] CRITICAL ERROR adding layer:', innerErr);
-                        alert(`Error adding site layer: ${innerErr.message}`);
-                        fileStatus.textContent = 'Error adding layer: ' + innerErr.message;
-                    }
-                } else {
-                    fileStatus.textContent = 'No valid site data found (check Lat/Lng)';
-                }
-                e.target.value = ''; // Reset input
-            } catch (err) {
-                console.error('Site Import Error:', err);
-                fileStatus.textContent = 'Error parsing sites: ' + err.message;
-            }
-        };
-        reader.readAsArrayBuffer(file);
-    });
-}
-
-// --- Site Layer Management UI ---
-window.siteLayersList = []; // Track UI state locally if needed, but renderer is source of truth
-
-function addSiteLayerToSidebar(id, name, count) {
-    const container = document.getElementById('sites-layer-list');
-    if (!container) {
-        console.error('[Sites] CRITICAL: Sidebar container #sites-layer-list NOT FOUND in DOM.');
-        return;
-    }
-
-    // AUTO-SHOW SIDEBAR
-    const sidebar = document.getElementById('smartcare-sidebar');
-    if (sidebar) {
-        sidebar.style.display = 'flex';
-    }
-
-    const item = document.createElement('div');
-    item.className = 'layer-item';
-    item.id = `site - layer - ${id}`;
-
-    item.innerHTML = `
+                ' : \'\'}\n                \n                <div class="raw-data-container" style="max-height: 400px; overflow-y: auto;">\n                    ' + (rawHtml) + '\n                </div>\n                \n                <div style="display:flex; gap:10px; margin-top:10px;">\n                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>\n                    <button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>\n                </div>\n                    <!-- Hidden data stash for the analyzer -->\n                    <script type="application/json" id="point-data-stash">\n                    ' + ((() => {\n                // Robust Key Finder for Stash\n                const findKey = (obj, target) => {\n                    const t = target.toLowerCase().replace(/\s/g, '');\n                    for (let k of Object.keys(obj)) {\n                        if (k.toLowerCase().replace(/\s/g, '') === t) return obj[k];\n                    ) + '\n                    return undefined;\n                };\n                const cellName = findKey(sourceObj, \'Cell Name\') || findKey(sourceObj, \'CellName\') || findKey(sourceObj, \'Site Name\');\n                const cellId = findKey(sourceObj, \'Cell ID\') || findKey(sourceObj, \'CellID\') || findKey(sourceObj, \'CI\');\n\n                return JSON.stringify({\n                    ...sourceObj,\n                    \'Cell Identifier\': servingRes && servingRes.name ? servingRes.name : (cellName || servingRes.id || cellId || \'Unknown\'),\n                    \'Cell Name\': servingRes && servingRes.name ? servingRes.name : (cellName || \'Unknown\'),\n                    \'Tech\': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? \'LTE\' : \'UMTS\')\n                });\n            })()}\n                    </script>\n                </div>\n            </div>\n        return { html, connectionTargets };\n    }\n\n    // --- STRICT MANAGEMENT SUMMARY IMPLEMENTATION (SECTION 0-15 Rules) ---\n    window.generateManagementSummary = (d) => {\n        // Helper: Extract Metric Safely\n        const getVal = (targetKeys) => {\n            if (!Array.isArray(targetKeys)) targetKeys = [targetKeys];\n            const rowKeys = Object.keys(d);\n            const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, \'\');\n            for (let t of targetKeys) {\n                const normT = normalize(t);\n                // Try Exact first\n                if (d[t] !== undefined) return d[t];\n                // Try Normalized Search\n                const match = rowKeys.find(k => normalize(k) === normT || normalize(k).includes(normT));\n                if (match && d[match] !== undefined) return d[match];\n            }\n            return null;\n        };\n\n        const val = (v) => (v === null || v === undefined || isNaN(parseFloat(v))) ? null : parseFloat(v);\n\n        // --- EXTRACT METRICS ---\n        const mrCount = val(getVal([\'Dominant MR Count\', \'MR Count\', \'Sample Count\']));\n        const rsrp = val(getVal([\'Dominant RSRP\', \'RSRP\']));\n        const rsrq = val(getVal([\'Dominant RSRQ\', \'RSRQ\']));\n        const cqi = val(getVal([\'Average DL Wideband CQI\', \'Wideband CQI\']));\n        const dlLowTput = val(getVal([\'DL Low-Throughput Ratio\', \'DL Low Tput Ratio\']));\n        const ulLowTput = val(getVal([\'UL Low-Throughput Ratio\', \'UL Low Tput Ratio\']));\n        const dlRb = val(getVal([\'Average DL RB Quantity\', \'DL RB Quantity\']));\n        const dlSpecEff = val(getVal([\'DL Spectrum Efficiency\', \'Spectrum Efficiency\']));\n        const dlIbler = val(getVal([\'DL IBLER\', \'IBLER\']));\n        const rank2 = val(getVal([\'Rank 2 Percentage\', \'Rank 2 %\']));\n        const dl3cc = val(getVal([\'DL 3CC Percentage\', \'3CC\']));\n        const dl1cc = val(getVal([\'DL 1CC Percentage\', \'1CC\']));\n\n        let output = {};\n        let scoreBase = 0;\n        let bonus = 0;\n        let penalty = 0;\n\n        // --- SECTION 0: DATA CONFIDENCE & VALIDITY ---\n        if (mrCount !== null && mrCount >= 1000) { output.dataConf = "High"; scoreBase = 70; }\n        else if (mrCount !== null && mrCount >= 100) { output.dataConf = "Medium"; scoreBase = 55; }\n        else { output.dataConf = "Low"; scoreBase = 35; }\n\n        if (mrCount !== null && mrCount < 20) { output.limitation = "Indicative Only"; penalty += 20; }\n\n        // --- SECTION 1: COVERAGE STATUS ---\n        if (rsrp !== null) {\n            if (rsrp >= -90) output.coverage = "Good";\n            else if (rsrp > -100) output.coverage = "Fair";\n            else output.coverage = "Poor";\n        } else output.coverage = "N/A";\n\n        // --- SECTION 2: SIGNAL QUALITY ---\n        if (rsrq !== null) {\n            if (rsrq >= -9) output.quality = "Good";\n            else if (rsrq > -11) output.quality = "Degraded";\n            else output.quality = "Poor";\n        } else output.quality = "N/A";\n\n        // --- SECTION 3: CHANNEL QUALITY ---\n        if (cqi !== null) {\n            if (cqi < 6) output.cqi = "Poor";\n            else if (cqi < 9) output.cqi = "Moderate";\n            else output.cqi = "Good";\n        } else output.cqi = "N/A";\n\n        // --- SECTION 4: USER EXPERIENCE (DL) ---\n        if (dlLowTput !== null) {\n            if (dlLowTput >= 80) { output.dlExp = "Severely Degraded"; bonus += 10; }\n            else if (dlLowTput >= 25) output.dlExp = "Degraded";\n            else output.dlExp = "Acceptable";\n        } else output.dlExp = "N/A";\n\n        // --- SECTION 5: LOAD & CONGESTION ---\n        if (dlRb !== null) {\n            if (dlRb <= 10) output.load = "Very Low Load";\n            else if (dlRb < 70) output.load = "Moderate Load";\n            else output.load = "Congested";\n        } else output.load = "N/A";\n\n        // --- SECTION 6: SPECTRUM EFFICIENCY ---\n        if (dlSpecEff !== null) {\n            if (dlSpecEff < 1000) { output.specEff = "Very Low"; bonus += 10; }\n            else if (dlSpecEff < 2000) output.specEff = "Low";\n            else output.specEff = "Normal";\n        } else output.specEff = "N/A";\n\n        // --- SECTION 7: LINK STABILITY ---\n        // (Skipped as per verification output requirements)\n\n        // --- SECTION 8: MIMO UTILIZATION ---\n        if (rank2 !== null) {\n            if (rank2 >= 30) output.mimo = "Good";\n            else if (rank2 >= 15) output.mimo = "Limited";\n            else output.mimo = "Poor";\n        } else output.mimo = "N/A";\n\n        // --- SECTION 9: CA EFFECTIVENESS ---\n        output.ca = "N/A";\n        if (dl3cc !== null && dl3cc === 100 && output.specEff !== "Normal" && output.specEff !== "N/A") {\n            output.ca = "Active but Ineffective";\n            bonus += 10;\n        } else if (dl1cc !== null && dl1cc >= 60) {\n            output.ca = "Underutilized";\n        }\n\n        // --- SECTION 10: INTERPRETATION (WHY) ---\n        let interpretation = null;\n        if (output.coverage !== "Poor" && output.coverage !== "N/A" &&\n            output.quality === "Poor" &&\n            output.cqi !== "Poor" && output.cqi !== "N/A") {\n            interpretation = "Signal power is present but radio quality is degraded by interference.";\n        }\n        if (output.dlExp !== "Acceptable" && output.dlExp !== "N/A" &&\n            ulLowTput !== null && ulLowTput === 0) {\n            interpretation = "Downlink-only degradation indicates interference or overlap issues.";\n        }\n        if (output.ca === "Active but Ineffective") {\n            interpretation = "Carrier Aggregation is enabled but limited by poor SINR.";\n        }\n        if (interpretation) bonus += 10;\n\n        // --- SECTION 11: EXPERT DIAGNOSIS (WHAT) ---\n        let diagnosis = "N/A";\n        if (output.quality === "Poor" &&\n            (output.specEff === "Low" || output.specEff === "Very Low") &&\n            (output.load === "Very Low Load" || output.load === "Moderate Load")) {\n            diagnosis = "Interference-Limited Cell";\n        } else if (output.coverage === "Poor" && output.cqi !== "Good" && output.cqi !== "N/A") {\n            diagnosis = "Coverage-Limited Cell";\n        } else if (output.load === "Congested") {\n            diagnosis = "Capacity-Limited Cell";\n        }\n\n        // --- SECTION 12: OPTIMIZATION ACTIONS ---\n        let actions = [];\n        if (diagnosis === "Interference-Limited Cell") {\n            actions.push("Increase electrical downtilt (1–2°)", "Review overshooting neighbors", "Reduce DL power if overlap confirmed", "Audit PCI and neighbor relations");\n        }\n        if (output.mimo === "Limited" || output.mimo === "Poor") {\n            actions.push("Verify antenna cross-polar isolation", "Check RF paths and connectors");\n        }\n        if (output.ca === "Active but Ineffective") {\n            actions.push("Improve secondary carrier SINR", "Align antenna configuration across bands", "Adjust CA activation thresholds");\n        }\n        if (actions.length === 0) actions.push("Monitor performance.");\n\n        // --- SECTION 13: CONFIDENCE SCORING ---\n        let rawScore = scoreBase + bonus - penalty;\n        let finalScore = Math.max(20, Math.min(95, rawScore));\n\n        // --- SECTION 14: CONFIDENCE LEVEL ---\n        let confLevel = "Low";\n        if (finalScore >= 85) confLevel = "Very High";\n        else if (finalScore >= 70) confLevel = "High";\n        else if (finalScore >= 50) confLevel = "Medium";\n\n        // --- GENERATE HTML OUTPUT ---\n        const getCls = (val) => {\n            if (!val || val === "N/A") return "";\n            const v = val.toLowerCase();\n            if (v === "good" || v === "normal" || v === "stable" || v === "very high" || v === "high" || v === "acceptable") return "status-ok";\n            if (v === "poor" || v === "very low" || v === "severe" || v === "congested" || v === "unstable" || v === "low") return "status-bad";\n            if (v === "fair" || v === "degraded" || v === "limited" || v === "underutilized" || v === "moderate") return "status-warn";\n            return "";\n        };\n\n        const row = (label, val) => {\n            return \'<div style="display:flex; justify-content:space-between; margin-bottom:4px; padding-bottom:4px; border-bottom:1px solid #333;">\' +\n                \'<span style="color:#aaa;">\' + label + \'</span>\' +\n                \'<span class="\' + getCls(val) + \'" style="font-weight:600;">\' + (val || \'N/A\') + \'</span>\' +\n                \'</div>\';\n        };\n\n        let html = \'<div class="report-block">\' +\n            \'<h4 class="report-header">EXPERT ANALYSIS</h4>\' +\n            row(\'Confidence Level\', confLevel) +\n            row(\'Confidence Score\', finalScore + \'%\') +\n            row(\'Data Confidence\', output.dataConf) +\n            \'<br>\' +\n            row(\'Coverage Status\', output.coverage) +\n            row(\'Signal Quality\', output.quality) +\n            row(\'Channel Quality\', output.cqi) +\n            row(\'DL User Exp\', output.dlExp) +\n            row(\'Cell Load\', output.load) +\n            row(\'Spectral Perf\', output.specEff) +\n            row(\'MIMO Utilization\', output.mimo) +\n            row(\'CA Effectiveness\', output.ca) +\n            \'</div>\';\n\n        html += \'<div class="report-block">\' +\n            \'<h4 class="report-header">DIAGNOSIS & ACTIONS</h4>\' +\n            \'<div style="margin-bottom:8px;">\' +\n            \'<div style="color:#888; font-size:10px; text-transform:uppercase;">Expert Diagnosis</div>\' +\n            \'<div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">\' + diagnosis + \'</div>\' +\n            \'</div>\' +\n\n            (interpretation ?\n                \'<div style="margin-bottom:8px;">\' +\n                \'<div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>\' +\n                \'<div style="color:#ddd; font-style:italic; margin-top:2px;">"\' + interpretation + \'"</div>\' +\n                \'</div>\' : \'\') +\n\n            \'<div style="margin-top:10px;">\' +\n            \'<div style="color:#888; font-size:10px; text-transform:uppercase;">Optimization Actions</div>\' +\n            \'<ul style="margin:5px 0 0 15px; padding:0; color:#cbd5e1;">\' +\n            actions.map(a => \'<li>\' + a + \'</li>\').join(\'\') +\n            \'</ul>\' +\n            \'</div>\' +\n            \'</div>\';\n\n        return html;\n    };\n\n    // --- ANALYSIS ENGINE ---\n\n    window.analyzePoint = (btn) => {\n        try {\n            // Retrieve data from stash or passed argument\n            // FIX: Stash might be sibling or global due to layout changes\n            let script = document.getElementById(\'point-data-stash\');\n\n            // Fallback scope check if needed (though ID should be unique in panel)\n            if (!script && btn) {\n                const container = btn.parentNode.parentNode; // Check grandparent\n                if (container) script = container.querySelector(\'#point-data-stash\');\n            }\n\n            if (!script) {\n                console.error("No point data found for analysis.");\n                alert("Error: Analysis data missing from panel.");\n                return;\n            }\n            const data = JSON.parse(script.textContent);\n\n            // -------------------------------------------------------------\n            // ANALYSIS LOGIC\n            // -------------------------------------------------------------\n\n            // Helper: Run Analysis for a SINGLE data object\n            const runAnalysisForData = (d) => {\n                // Scoped Key Finder\n                const getVal = (targetName) => {\n                    const normTarget = targetName.toLowerCase().replace(/[\s\-_]/g, \'\');\n                    for (let k in d) {\n                        const normKey = k.toLowerCase().replace(/[\s\-_]/g, \'\');\n                        if (normKey === normTarget) return parseFloat(d[k]);\n                        if (normKey.includes(normTarget)) return parseFloat(d[k]);\n                    }\n                    return null;\n                };\n\n                // Get Strings for Context\n                const time = d[\'Time\'] || d[\'time\'] || d[\'timestamp\'] || \'N/A\';\n                const tech = d[\'Tech\'] || d[\'Technology\'] || d[\'rat\'] || \'LTE\'; // Default LTE as per template if unknown\n                const cellId = d[\'Cell Identifier\'] || d[\'Cell ID\'] || d[\'cellid\'] || d[\'ci\'] || d[\'Serving SC/PCI\'] || \'Unknown\';\n                const lat = d[\'Latitude\'] || d[\'lat\'] || \'Unknown\';\n                const lng = d[\'Longitude\'] || d[\'lng\'] || \'Unknown\';\n\n                const rsrp = getVal(\'rsrp\') ?? getVal(\'level\');\n                const rsrq = getVal(\'rsrq\');\n                const cqi = getVal(\'cqi\') ?? getVal(\'averagedlwidebandcqi\') ?? getVal(\'dlwidebandcqi\');\n                const dlLowThptRatio = getVal(\'dllowthroughputratio\') ?? getVal(\'lowthpt\') ?? 0;\n                const dlSpecEff = getVal(\'dlspectrumefficiency\') ?? getVal(\'dlspectrumeff\') ?? getVal(\'se\');\n                const dlRbQty = getVal(\'averagedlrbquantity\') ?? getVal(\'dlrbquantity\') ?? getVal(\'rbutil\');\n\n                const dbUtil = getVal(\'prbutil\') ?? getVal(\'rbutil\');\n                const dlIbler = getVal(\'dlibler\') ?? getVal(\'bler\');\n                const rank2Pct = getVal(\'rank2percentage\') ?? getVal(\'rank2\');\n                const ca1ccPct = getVal(\'dl1ccpercentage\') ?? getVal(\'ca1cc\');\n\n                // --- EVALUATION ---\n                let coverageStatus = \'Unknown\';\n                let coverageInterp = \'insufficient signal strength\';\n                if (rsrp !== null) {\n                    if (rsrp >= -90) { coverageStatus = \'Good\'; coverageInterp = \'strong signal strength\'; }\n                    else if (rsrp > -100) { coverageStatus = \'Fair\'; coverageInterp = \'adequate signal strength\'; }\n                    else { coverageStatus = \'Poor\'; coverageInterp = \'weak signal strength at cell edge\'; }\n                }\n\n                let interferenceLevel = \'Unknown\';\n                if (rsrq !== null) {\n                    if (rsrq >= -8) interferenceLevel = \'Low\';\n                    else if (rsrq > -11) interferenceLevel = \'Moderate\';\n                    else interferenceLevel = \'High\';\n                }\n\n                let channelQuality = \'Unknown\';\n                if (cqi !== null) {\n                    if (cqi < 6) channelQuality = \'Poor\';\n                    else if (cqi < 9) channelQuality = \'Keep\';\n                    else channelQuality = \'Good\';\n                }\n\n                let dlUserExp = \'Unknown\';\n                if (dlLowThptRatio !== null) {\n                    if (dlLowThptRatio >= 25) dlUserExp = \'Degraded\';\n                    else dlUserExp = \'Acceptable\'; // Assuming metric is %\n                    if (dlLowThptRatio < 1 && dlLowThptRatio > 0 && dlLowThptRatio >= 0.25) dlUserExp = \'Degraded\';\n                }\n\n                let dlSpecPerf = \'Unknown\';\n                if (dlSpecEff !== null) {\n                    if (dlSpecEff < 2000) dlSpecPerf = \'Low\';\n                    else if (dlSpecEff < 3500) dlSpecPerf = \'Moderate\';\n                    else dlSpecPerf = \'High\';\n                }\n\n                let cellLoad = \'Unknown\';\n                let congestionInterp = \'not related\';\n                if (dbUtil !== null) {\n                    if (dbUtil >= 80) { cellLoad = \'Congested\'; congestionInterp = \'related\'; }\n                    else if (dbUtil < 70) cellLoad = \'Not Congested\';\n                    else cellLoad = \'Moderate\';\n                } else if (dlRbQty !== null) {\n                    if (dlRbQty <= 100 && dlRbQty >= 0) {\n                        if (dlRbQty >= 80) { cellLoad = \'Congested\'; congestionInterp = \'related\'; }\n                        else if (dlRbQty < 70) cellLoad = \'Not Congested\';\n                    }\n                }\n\n                let mimoUtil = \'Unknown\';\n                if (rank2Pct !== null) {\n                    if (rank2Pct >= 30) mimoUtil = \'Good\';\n                    else if (rank2Pct < 20) mimoUtil = \'Poor\';\n                    else mimoUtil = \'Moderate\';\n                }\n\n                let caUtil = \'Unknown\';\n                let caInterp = \'limited\';\n                if (ca1ccPct !== null) {\n                    if (ca1ccPct >= 60) { caUtil = \'Underutilized\'; caInterp = \'limited\'; }\n                    else if (ca1ccPct < 50) { caUtil = \'Well Utilized\'; caInterp = \'effective\'; }\n                    else { caUtil = \'Moderate\'; caInterp = \'moderate\'; }\n                }\n\n                // Root Cause Logic\n                let rootCauses = [];\n                if (coverageStatus !== \'Poor\' && coverageStatus !== \'Unknown\' && interferenceLevel === \'High\') rootCauses.push(\'Interference-Limited\');\n                else if (coverageStatus === \'Poor\') rootCauses.push(\'Coverage-Limited\');\n\n                if (cellLoad === \'Congested\') rootCauses.push(\'Capacity / Congestion-Limited\');\n                if (caUtil === \'Underutilized\' && channelQuality === \'Good\') rootCauses.push(\'Carrier Aggregation Limited\');\n\n                if (rootCauses.length === 0 && (coverageStatus !== \'Unknown\' || interferenceLevel !== \'Unknown\')) rootCauses.push(\'No Specific Root Cause Identified\');\n\n                // Recommendations Logic\n                let actionsHigh = [];\n                let actionsMed = [];\n\n                if (rootCauses.includes(\'Interference-Limited\')) {\n                    actionsHigh.push(\'Review Physical Optimization (Tilt/Azimuth)\');\n                    actionsHigh.push(\'Check for External Interference Sources\');\n                }\n                if (rootCauses.includes(\'Coverage-Limited\')) {\n                    actionsHigh.push(\'Optimize Antenna Downtilt (Uptilt if feasible)\');\n                    actionsMed.push(\'Verify Power Settings\');\n                }\n                if (rootCauses.includes(\'Capacity / Congestion-Limited\')) {\n                    actionsHigh.push(\'Evaluate Load Balancing Features\');\n                    actionsMed.push(\'Plan for Capacity Expansion (Carrier Add/Split)\');\n                }\n                if (rootCauses.includes(\'Carrier Aggregation Limited\')) {\n                    actionsMed.push(\'Verify CA Configuration Parameters\');\n                    actionsMed.push(\'Check Secondary Carrier Availability\');\n                }\n\n                // Fallbacks if empty\n                if (actionsHigh.length === 0) actionsHigh.push(\'Monitor KPI Trend for degradation\');\n                if (actionsMed.length === 0) actionsMed.push(\'Perform drive test for further detail\');\n\n                return {\n                    metrics: {\n                        coverageStatus, coverageInterp,\n                        interferenceLevel,\n                        channelQuality,\n                        dlUserExp, dlLowThptRatio, dlSpecEff,\n                        dlSpecPerf,\n                        cellLoad, congestionInterp,\n                        mimoUtil, caUtil, caInterp\n                    },\n                    context: { time, tech, cellId, lat, lng },\n                    rootCauses,\n                    recommendations: { high: actionsHigh, med: actionsMed }\n                };\n            }; // End runAnalysisForData\n\n            // -------------------------------------------------------------\n            // REPORT GENERATION\n            // -------------------------------------------------------------\n\n            const dataList = Array.isArray(data) ? data : [{ name: \'\', data: data }];\n\n            let combinedHtml = \'\';\n\n            dataList.forEach((item, idx) => {\n                const { metrics, context, rootCauses, recommendations } = runAnalysisForData(item.data);\n\n                // Styles for specific keywords\n                const colorize = (txt) => {\n                    if (!txt) return \'\';\n                    const t = txt.toLowerCase();\n                    if (t === \'good\' || t === \'low\' || t === \'stable\' || t === \'acceptable\' || t === \'not congested\' || t === \'well utilized\' || t === \'effective\') return \'<span class="status-good">\' + txt + \'</span>\';\n                    if (t === \'fair\' || t === \'moderate\' || t === \'keep\') return \'<span class="status-fair">\' + txt + \'</span>\';\n                    return \'<span class="status-poor">\' + txt + \'</span>\';\n                };\n\n                combinedHtml += \'<div class="report-section" style="\' + (idx > 0 ? \'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;\' : \'\') + \'">\' +\n                    (item.name ? \'<h2 style="margin: 0 0 20px 0; color: #60a5fa; border-bottom: 1px solid #444; padding-bottom: 10px; font-size: 18px;">\' + item.name + \' Analysis</h2>\' : \'\') +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">1. Cell Context</h3>\' +\n                    \'<ul class="report-list">\' +\n                    \'<li><strong>Technology:</strong> \' + context.tech + \'</li>\' +\n                    \'<li><strong>Cell Identifier:</strong> \' + context.cellId + \'</li>\' +\n                    \'<li><strong>Location:</strong> \' + context.lat + \', \' + context.lng + \'</li>\' +\n                    \'<li><strong>Data Confidence:</strong> High (based on MR Count)</li>\' +\n                    \'</ul>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">2. Coverage & Radio Conditions</h3>\' +\n                    \'<p>Coverage in the analyzed grid is classified as <strong>\' + colorize(metrics.coverageStatus) + \'</strong>.</p>\' +\n                    \'<p>Dominant RSRP indicates <strong>\' + metrics.coverageInterp + \'</strong>. \' +\n                    \'Signal quality assessment shows <strong>\' + colorize(metrics.interferenceLevel) + \'</strong> interference conditions, \' +\n                    \'based on Dominant RSRQ and CQI behavior.</p>\' +\n                    \'<p>Overall radio conditions are assessed as <strong>\' + colorize(metrics.channelQuality) + \'</strong>.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">3. Throughput & User Experience</h3>\' +\n                    \'<p>Downlink user experience is classified as <strong>\' + colorize(metrics.dlUserExp) + \'</strong>.</p>\' +\n                    \'<p>This is supported by:</p>\' +\n                    \'<ul class="report-list">\' +\n                    \'<li>Average DL Throughput behavior</li>\' +\n                    \'<li>DL Low-Throughput Ratio (\' + (metrics.dlLowThptRatio !== 0 ? metrics.dlLowThptRatio : \'N/A\') + \')</li>\' +\n                    \'<li>Spectrum Efficiency classification</li>\' +\n                    \'</ul>\' +\n                    \'<p>Uplink performance is <strong>acceptable / secondary</strong>, based on UL KPIs.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">4. Spectrum Efficiency & Resource Utilization</h3>\' +\n                    \'<p>Downlink spectrum efficiency is classified as <strong>\' + colorize(metrics.dlSpecPerf) + \'</strong>.</p>\' +\n                    \'<p>Average DL RB usage indicates the cell is <strong>\' + colorize(metrics.cellLoad) + \'</strong>, \' +\n                    \'confirming that performance limitations are <strong>\' + metrics.congestionInterp + \'</strong> to congestion.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">5. MIMO & Carrier Aggregation Performance</h3>\' +\n                    \'<p>MIMO utilization is assessed as <strong>\' + colorize(metrics.mimoUtil) + \'</strong>, based on rank distribution statistics.</p>\' +\n                    \'<p>Carrier Aggregation utilization is <strong>\' + colorize(metrics.caUtil) + \'</strong>, indicating <strong>\' + metrics.caInterp + \'</strong> use of multi-carrier capabilities.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">6. Traffic Profile & Service Impact</h3>\' +\n                    \'<p>Traffic composition is dominated by:</p>\' +\n                    \'<ul class="report-list">\' +\n                    \'<li>QCI 9 (Internet / Default)</li>\' +\n                    \'</ul>\' +\n                    \'<p>This traffic profile is sensitive to:</p>\' +\n                    \'<ul class="report-list">\' +\n                    \'<li>Throughput stability</li>\' +\n                    \'<li>Spectrum efficiency</li>\' +\n                    \'<li>Interference conditions</li>\' +\n                    \'</ul>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">7. Root Cause Analysis</h3>\' +\n                    \'<p>Based on rule evaluation, the primary performance limitation(s) are:</p>\' +\n                    \'<ul class="report-list" style="color: #ef4444; font-weight: bold;">\' +\n                    rootCauses.map(rc => \'<li>\' + rc + \'</li>\').join(\'\') +\n                    \'</ul>\' +\n                    \'<p>These limitations explain the observed throughput behavior despite the current load level.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-block">\' +\n                    \'<h3 class="report-header">8. Optimization Recommendations</h3>\' +\n\n                    \'<h4 style="color:#fbbf24; margin:10px 0 5px 0;">High Priority Actions:</h4>\' +\n                    \'<ul class="report-list">\' +\n                    recommendations.high.map(a => \'<li>\' + a + \'</li>\').join(\'\') +\n                    \'</ul>\' +\n\n                    \'<h4 style="color:#94a3b8; margin:10px 0 5px 0;">Medium Priority Actions:</h4>\' +\n                    \'<ul class="report-list">\' +\n                    recommendations.med.map(a => \'<li>\' + a + \'</li>\').join(\'\') +\n                    \'</ul>\' +\n\n                    \'<p style="margin-top:10px; font-style:italic; font-size:11px; color:#888;">Each recommended action is directly linked to the identified root cause(s) and observed KPI behavior.</p>\' +\n                    \'</div>\' +\n\n                    \'<div class="report-summary">\' +\n                    \'<h3 class="report-header" style="color:#fff;">EXECUTIVE SUMMARY</h3>\' +\n                    \'<p>The analyzed LTE cell is primarily <strong>\' + rootCauses[0] + \'</strong>, resulting in <strong>\' + metrics.dlUserExp + \' User Experience</strong>. Targeted RF and feature optimization is required to improve spectrum efficiency.</p>\' +\n                    \'</div>\' +\n\n                    \'</div>\';\n            });\n\n            // CSS For Report\n            const style = \'<style>\' +\n                \'.report-block { margin-bottom: 20px; }\' +\n                \'.report-header { color: #aaa; border-bottom: 1px solid #444; padding-bottom: 4px; margin-bottom: 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }\' +\n                \'.report-list { padding-left: 20px; color: #ddd; font-size: 13px; line-height: 1.6; }\' +\n                \'.report-section p { font-size: 13px; color: #eee; line-height: 1.6; margin-bottom: 8px; }\' +\n                \'.status-good { color: #4ade80; font-weight: bold; }\' +\n                \'.status-fair { color: #facc15; font-weight: bold; }\' +\n                \'.status-poor { color: #f87171; font-weight: bold; }\' +\n                \'.report-summary { background: #1f2937; padding: 15px; border-left: 4px solid #3b82f6; margin-top: 30px; }\' +\n                \'</style>\';\n\n            const modalHtml = \'<div class="analysis-modal-overlay" onclick="const m=document.querySelector(\\'.analysis-modal-overlay\\'); if(event.target===m) m.remove()">\' +\n                \'<div class="analysis-modal" style="width: 800px; max-width: 90vw;">\' +\n                \'<div class="analysis-header">\' +\n                \'<h3>Cell Performance Analysis Report</h3>\' +\n                \'<button class="analysis-close-btn" onclick="document.querySelector(\\'.analysis-modal-overlay\\').remove()">×</button>\' +\n                \'</div>\' +\n                \'<div class="analysis-content" style="padding: 30px;">\' +\n                style +\n                combinedHtml +\n                \'</div>\' +\n                \'</div>\' +\n                \'</div>\';\n\n            // Append to body\n            const div = document.createElement(\'div\');\n            div.innerHTML = modalHtml;\n            document.body.appendChild(div.firstElementChild);\n\n        } catch (e) {\n            console.error("Analysis Error:", e);\n            alert("Error running analysis: " + e.message);\n        }\n    };\n\n    // Global function to update the Floating Info Panel (Single Point)\n    window.updateFloatingInfoPanel = (p, logColor) => {\n        try {\n            const panel = document.getElementById(\'floatingInfoPanel\');\n            const content = document.getElementById(\'infoPanelContent\');\n            const headerDom = document.getElementById(\'infoPanelHeader\'); // GET HEADER\n\n            if (!panel || !content) return;\n\n            if (panel.style.display !== \'block\') panel.style.display = \'block\';\n\n            // 1. Set Stash for Toggle Re-render compatibility (Treat single as one-item array)\n            // This ensures window.togglePointDetailsMode() works because it calls updateFloatingInfoPanelMulti(lastMultiHits)\n            window.lastMultiHits = [p];\n\n            // 2. Inject Toggle Button if missing\n            let toggleBtn = document.getElementById(\'toggleViewBtn\');\n            if (headerDom && !toggleBtn) {\n                const closeBtn = headerDom.querySelector(\'.info-panel-close\');\n                toggleBtn = document.createElement(\'span\');\n                toggleBtn.id = \'toggleViewBtn\';\n                toggleBtn.className = \'toggle-view-btn\';\n                toggleBtn.innerHTML = \'⚙️ View\';\n                toggleBtn.title = \'Switch View Mode\';\n                toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };\n                toggleBtn.style.marginRight = \'10px\';\n                toggleBtn.style.fontSize = \'12px\';\n                toggleBtn.style.cursor = \'pointer\';\n                toggleBtn.style.color = \'#ccc\';\n\n                if (closeBtn) headerDom.insertBefore(toggleBtn, closeBtn);\n                else headerDom.appendChild(toggleBtn);\n            }\n\n            // 3. Select Generator based on Mode\n            const mode = window.pointDetailsMode || \'log\'; // Default to log if undefined\n            const generator = mode === \'log\' ? generatePointInfoHTMLLog : generatePointInfoHTML;\n\n            // 4. Generate\n            // Note: generatePointInfoHTMLLog takes (p, logColor)\n            // Note: generatePointInfoHTML takes (p, logColor) - now updated to use it\n            const { html, connectionTargets } = generator(p, logColor);\n\n            content.innerHTML = html;\n\n            // Update Connections\n            if (window.mapRenderer && !window.isSpiderMode) {\n                let startPt = { lat: p.lat, lng: p.lng };\n                window.mapRenderer.drawConnections(startPt, connectionTargets);\n            }\n        } catch (e) {\n            console.error("Error updating Info Panel:", e);\n        }\n    };\n\n    // NEW: Multi-Layer Info Panel\n    // --- NEW: Toggle Logic ---\n    window.pointDetailsMode = \'log\'; // \'simple\' or \'log\'\n\n    window.togglePointDetailsMode = () => {\n        window.pointDetailsMode = window.pointDetailsMode === \'simple\' ? \'log\' : \'simple\';\n        // Re-render currently stashed hits if available (UI refresh)\n        const stashMeta = document.getElementById(\'point-data-stash-meta\');\n        if (stashMeta && stashMeta.textContent) {\n            try {\n                const meta = JSON.parse(stashMeta.textContent);\n                // We need to re-call updateFloatingInfoPanelMulti with the ORIGINAL hits.\n                // But hits are not fully serialized.\n                // We can just rely on the user clicking again or, better, we store the last hits globally?\n                if (window.lastMultiHits) {\n                    window.updateFloatingInfoPanelMulti(window.lastMultiHits);\n                }\n            } catch (e) { console.error(e); }\n        }\n    };\n\n    // --- NEW: Log View Generator ---\n    function generatePointInfoHTMLLog(p, logColor) {\n        // Extract Serving\n        let sName = \'Unknown\', sSC = \'-\', sRSCP = \'-\', sEcNo = \'-\', sFreq = \'-\', sRnc = null, sCid = null, sLac = null;\n        let isLTE = false;\n\n        // Explicit Name Resolution (Matches Map Logic)\n        let servingRes = null;\n        if (window.resolveSmartSite) {\n            servingRes = window.resolveSmartSite(p);\n            if (servingRes && servingRes.name) sName = servingRes.name;\n        }\n\n        const connectionTargets = [];\n        if (servingRes && servingRes.lat && servingRes.lng) {\n            connectionTargets.push({\n                lat: servingRes.lat, lng: servingRes.lng, color: \'#3b82f6\', weight: 8, cellId: servingRes.id\n            });\n        }\n\n        if (p.parsed && p.parsed.serving) {\n            const s = p.parsed.serving;\n            if (sName === \'Unknown\') sName = s.cellName || s.name || p.cellName || sName;\n            sSC = s.sc !== undefined ? s.sc : sSC;\n\n            // Flexible Level Extraction\n            sRSCP = s.rscp !== undefined ? s.rscp : (s.rsrp !== undefined ? s.rsrp : (s.level !== undefined ? s.level : sRSCP));\n            sEcNo = s.ecno !== undefined ? s.ecno : (s.rsrq !== undefined ? s.rsrq : sEcNo);\n\n            sFreq = s.freq !== undefined ? s.freq : sFreq;\n            sRnc = s.rnc || p.rnc;\n            sCid = s.cid || p.cid;\n            sLac = s.lac || p.lac;\n            isLTE = s.rsrp !== undefined;\n        } else {\n            // Flat fallback\n            if (sName === \'Unknown\') sName = p.cellName || p.siteName || sName;\n            sSC = p.sc !== undefined ? p.sc : sSC;\n            sRSCP = p.rscp !== undefined ? p.rscp : (p.rsrp !== undefined ? p.rsrp : (p.level !== undefined ? p.level : sRSCP));\n            sEcNo = p.ecno !== undefined ? p.ecno : (p.qual !== undefined ? p.qual : sEcNo);\n            sFreq = p.freq !== undefined ? p.freq : sFreq;\n            sRnc = p.rnc;\n            sCid = p.cid;\n            sLac = p.lac;\n            isLTE = p.Tech === \'LTE\';\n        }\n\n        // DATABASE FALLBACK: If RNC/CID are still missing but we resolved a site, use its IDs\n        if ((sRnc === null || sRnc === undefined) && servingRes && servingRes.rnc) {\n            sRnc = servingRes.rnc;\n            sCid = servingRes.cid;\n            if (sName === \'Unknown\') sName = servingRes.name || sName;\n        }\n\n        const levelHeader = isLTE ? \'RSRP\' : \'RSCP\';\n        const qualHeader = isLTE ? \'RSRQ\' : \'EcNo\';\n\n        // Determine Identity Label\n        let identityLabel = sSC + \' / \' + sFreq; // Default\n        if (servingRes && servingRes.id) {\n            identityLabel = servingRes.id;\n        } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {\n            identityLabel = sRnc + \'/\' + sCid; // UMTS RNC/CID\n        } else if (p.cellId && p.cellId !== \'N/A\') {\n            identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID\n        }\n\n        // Neighbors\n        let rawNeighbors = [];\n        const resolveN = (sc, freq, cellName) => {\n            if (window.resolveSmartSite && (sc !== undefined || freq !== undefined)) {\n                // Try with current LAC first\n                let nRes = window.resolveSmartSite({\n                    sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng, lac: sLac\n                });\n\n                // Fallback: Try without LAC (neighbors are often on different LACs)\n                if ((!nRes || nRes.name === \'Unknown\') && sLac) {\n                    nRes = window.resolveSmartSite({\n                        sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng\n                    });\n                }\n\n                if (nRes && nRes.name && nRes.name !== \'Unknown\') {\n                    return { name: nRes.name, rnc: nRes.rnc, cid: nRes.cid, id: nRes.id, lat: nRes.lat, lng: nRes.lng };\n                }\n            }\n            return { name: cellName || \'Unknown\', rnc: null, cid: null, id: null, lat: null, lng: null };\n        };\n\n        if (p.parsed && p.parsed.neighbors) {\n            p.parsed.neighbors.forEach(n => {\n                const sc = n.pci !== undefined ? n.pci : (n.sc !== undefined ? n.sc : undefined);\n                const freq = n.freq !== undefined ? n.freq : undefined;\n\n                // FILTER: Skip if this neighbor matches the serving cell\n                if (sc == sSC && freq == sFreq) return;\n\n                rawNeighbors.push({\n                    sc: sc !== undefined ? sc : \'-\',\n                    rscp: n.rscp !== undefined ? n.rscp : -140, // Default low for sort\n                    ecno: n.ecno !== undefined ? n.ecno : \'-\',\n                    freq: n.freq !== undefined ? n.freq : \'-\',\n                    cellName: n.cellName\n                });\n            });\n        }\n        // Fallback Flat Neighbors (N1..N3)\n        if (rawNeighbors.length === 0) {\n            if (p.n1_sc !== undefined && (p.n1_sc != sSC)) rawNeighbors.push({ sc: p.n1_sc, rscp: p.n1_rscp || -140, ecno: p.n1_ecno, freq: sFreq });\n            if (p.n2_sc !== undefined && (p.n2_sc != sSC)) rawNeighbors.push({ sc: p.n2_sc, rscp: p.n2_rscp || -140, ecno: p.n2_ecno, freq: sFreq });\n            if (p.n3_sc !== undefined && (p.n3_sc != sSC)) rawNeighbors.push({ sc: p.n3_sc, rscp: p.n3_rscp || -140, ecno: p.n3_ecno, freq: sFreq });\n        }\n\n        // Sort by RSCP Descending\n        rawNeighbors.sort((a, b) => {\n            const valA = parseFloat(a.rscp);\n            const valB = parseFloat(b.rscp);\n            if (isNaN(valA)) return 1;\n            if (isNaN(valB)) return -1;\n            return valB - valA;\n        });\n\n        const neighbors = rawNeighbors.map((n, i) => {\n            const resolved = resolveN(n.sc, n.freq, n.cellName);\n            return {\n                type: \'N\' + (i + 1),\n                name: resolved.name,\n                rnc: resolved.rnc,\n                cid: resolved.cid,\n                id: resolved.id, // Pass ID\n                lat: resolved.lat,\n                lng: resolved.lng,\n                sc: n.sc,\n                rscp: n.rscp === -140 ? \'-\' : n.rscp,\n                ecno: n.ecno,\n                freq: n.freq\n            };\n        });\n\n        // Build HTML\n        let rows = \'\';\n\n        // Serving Click Logic\n        let sClickAction = \'\';\n        /* FIX: Use highlightAndPan */\n        if (servingRes && servingRes.lat && servingRes.lng) {\n            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? servingRes.rnc + \'/\' + servingRes.cid : \'\');\n            sClickAction = \'onclick="window.highlightAndPan(\' + servingRes.lat + \', \' + servingRes.lng + \', \\'\' + safeId + \'\\', \\'serving\\')" style="cursor:pointer; color:#fff;"\';\n        }\n\n        // Serving Row\n        rows += \'<tr class="log-row serving-row">\' +\n            \'<td class="log-cell-type">Serving</td>\' +\n            \'<td class="log-cell-name"><span class="log-header-serving" \' + sClickAction + \'>\' + sName + \'</span> <span style="color:#666; font-size:10px;">(\' + identityLabel + \')</span></td>\' +\n            \'<td class="log-cell-val">\' + sSC + \'</td>\' +\n            \'<td class="log-cell-val">\' + sRSCP + \'</td>\' +\n            \'<td class="log-cell-val">\' + sEcNo + \'</td>\' +\n            \'<td class="log-cell-val">\' + sFreq + \'</td>\' +\n            \'</tr>\';\n\n        neighbors.forEach(n => {\n            let nIdLabel = n.sc + \'/\' + n.freq;\n            if (n.rnc && n.cid) nIdLabel = n.rnc + \'/\' + n.cid;\n\n            let nClickAction = \'\';\n            /* FIX: Use highlightAndPan */\n            if (n.lat && n.lng) {\n                const safeId = n.id || (n.rnc && n.cid ? n.rnc + \'/\' + n.cid : \'\');\n                nClickAction = \'onclick="window.highlightAndPan(\' + n.lat + \', \' + n.lng + \', \\'\' + safeId + \'\\', \\'neighbor\\')" style="cursor:pointer;"\';\n            }\n\n            rows += \'<tr class="log-row">\' +\n                \'<td class="log-cell-type">\' + n.type + \'</td>\' +\n                \'<td class="log-cell-name"><span \' + nClickAction + \'>\' + n.name + \'</span> <span style="color:#666; font-size:10px;">(\' + nIdLabel + \')</span></td>\' +\n                \'<td class="log-cell-val">\' + n.sc + \'</td>\' +\n                \'<td class="log-cell-val">\' + n.rscp + \'</td>\' +\n                \'<td class="log-cell-val">\' + n.ecno + \'</td>\' +\n                \'<td class="log-cell-val">\' + n.freq + \'</td>\' +\n                \'</tr>\';\n        });\n\n        // ----------------------------------------------------\n        // EXTRACT OTHER METRICS\n        // ----------------------------------------------------\n\nlet extraMetricsHtml = \'\';\nconst sourceObj = p.properties ? p.properties : p;\nconst knownKeys = [\'lat\', \'lng\', \'time\', \'id\', \'geometry\', \'properties\', \'parsed\',\n    \'sc\', \'pci\', \'rscp\', \'rsrp\', \'level\', \'ecno\', \'rsrq\', \'qual\',\n    \'rnc\', \'cid\', \'lac\', \'freq\', \'earfcn\', \'uarfcn\', \'band\', \'tech\', \'technology\',\n    \'cellid\', \'cell_id\', \'sitename\', \'cellname\', \'name\',\n    \'n1_sc\', \'n1_rscp\', \'n1_ecno\', \'n2_sc\', \'n2_rscp\', \'n2_ecno\', \'n3_sc\', \'n3_rscp\', \'n3_ecno\',\n    \'a2_sc\', \'a2_rscp\', \'a3_sc\', \'a3_rscp\'];\n\nconst isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);\n\n    Object.entries(sourceObj).forEach(([k, v]) => {\n        const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, \'\');\n        if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;\n        if (isNeighborKey(k.toLowerCase())) return;\n        if (typeof v === \'object\') return; // Skip nested objects for now\n        if (v === undefined || v === null || v === \'\') return;\n\n        // Format numeric\n        let val = v;\n        if (typeof v === \'number\' && !Number.isInteger(v)) val = v.toFixed(3);\n\n        extraMetricsHtml += \'<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">\' +\n            \'<span style="color:#aaa; margin-right: 10px;">\' + k + \'</span>\' +\n            \'<span style="color:#fff; font-weight:bold; text-align: right;">\' + val + \'</span>\' +\n            \'</div>\';\n    });\n\n    let extraMetricsSection = \'\';\n    if (extraMetricsHtml) {\n        extraMetricsSection = \'<div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">\' +\n            \'<div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>\' +\n            \'<div style="max-height: 200px; overflow-y: auto;">\' +\n            extraMetricsHtml +\n            \'</div>\' +\n            \'</div>\';\n    }\n\n    const html = \'<div class="log-view-container">\' +\n        \'<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">\' +\n        \'<div>\' +\n        \'<div class="log-header-serving" style="font-size:14px; margin-bottom:2px;">\' + sName + \'</div>\' +\n        \'<div style="color:#aaa; font-size:11px;">Lat: \' + p.lat.toFixed(6) + \'  Lng: \' + p.lng.toFixed(6) + \'</div>\' +\n        \'</div>\' +\n        \'<div style="color:#aaa; font-size:11px;">\' + (p.time || \'\') + \'</div>\' +\n        \'</div>\' +\n\n        \'<table class="log-details-table">\' +\n        \'<thead>\' +\n        \'<tr>\' +\n        \'<th style="width:10%">Type</th>\' +\n        \'<th style="width:40%">Cell Name</th>\' +\n        \'<th>SC</th>\' +\n        \'<th>\' + levelHeader + \'</th>\' +\n        \'<th>\' + qualHeader + \'</th>\' +\n        \'<th>Freq</th>\' +\n        \'</tr>\' +\n        \'</thead>\' +\n        \'<tbody>\' +\n        rows +\n        \'</tbody>\' +\n        \'</table>\' +\n\n        extraMetricsSection +\n\n        \'<div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">\' +\n        \'<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center;">Analyze Point</button>\' +\n        \'<button class="btn btn-purple" onclick="window.generateManagementSummary()" style="flex:1; justify-content: center;">MANAGEMENT SUMMARY</button>\' +\n        \'</div>\' +\n\n        \'<!-- Hidden data stash for the analyzer -->\' +\n        \'<script type="application/json" id="point-data-stash">\' +\n        JSON.stringify({\n            ...(p.properties || p),\n            \'Cell Identifier\': sName !== \'Unknown\' ? sName : identityLabel,\n            \'Cell Name\': sName,\n            \'Tech\': isLTE ? \'LTE\' : \'UMTS\'\n        }) +\n        \'</script>\' +\n        \'</div>\' +\n        \'</div>\';\n\n\n// Add connection targets for top 3 neighbors if they resolve\nneighbors.slice(0, 3).forEach(n => {\n    if (window.resolveSmartSite) {\n        const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });\n        if (nRes && nRes.lat && nRes.lng) {\n            connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: \'#ef4444\', weight: 4, cellId: nRes.id });\n        }\n    }\n});\n\nreturn { html, connectionTargets };\n    }\n\n\nwindow.updateFloatingInfoPanelMulti = (hits) => {\n    try {\n        window.lastMultiHits = hits; // Store for toggle re-render\n\n        const panel = document.getElementById(\'floatingInfoPanel\');\n        const content = document.getElementById(\'infoPanelContent\');\n        const headerDom = document.getElementById(\'infoPanelHeader\');\n\n        if (!panel || !content) return;\n\n        if (panel.style.display !== \'block\') panel.style.display = \'block\';\n        content.innerHTML = \'\'; // Clear\n\n        // Inject Toggle Button into Header if not present\n        let toggleBtn = document.getElementById(\'toggleViewBtn\');\n        if (!toggleBtn && headerDom) {\n            // Remove existing title text to replace with flex container if needed, or just append\n            // Let\'s repurpose the header content slightly\n            const closeBtn = headerDom.querySelector(\'.info-panel-close\');\n\n            toggleBtn = document.createElement(\'span\');\n            toggleBtn.id = \'toggleViewBtn\';\n            toggleBtn.className = \'toggle-view-btn\';\n            toggleBtn.innerHTML = \'⚙️ View\';\n            toggleBtn.title = \'Switch View Mode\';\n            toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };\n\n            // Insert before close button\n            headerDom.insertBefore(toggleBtn, closeBtn);\n        }\n\n        let allConnectionTargets = [];\n        let aggregatedData = [];\n\n        hits.forEach((hit, idx) => {\n            const { log, point } = hit;\n\n            // Collect Data for Unified Analysis\n            aggregatedData.push({\n                name: \'Layer: \' + log.name,\n                data: point.properties ? point.properties : point\n            });\n\n            // Header for this Log Layer\n            const header = document.createElement(\'div\');\n            header.style.cssText = \'background:#ef4444; color:#fff; padding:5px; font-weight:bold; font-size:12px; margin-top:\' + (idx > 0 ? \'10px\' : \'0\') + \'; border-radius:4px 4px 0 0;\';\n            header.textContent = \'Layer: \' + log.name;\n            content.appendChild(header);\n\n            // Body Selection\n            // Use new Log Generator if mode is \'log\', else default\n            const generator = window.pointDetailsMode === \'log\' ? generatePointInfoHTMLLog : generatePointInfoHTML;\n            const { html, connectionTargets } = generator(point, log.color, false);\n\n            const body = document.createElement(\'div\');\n            body.innerHTML = html;\n            content.appendChild(body);\n\n            // Aggregate connections\n            if (connectionTargets) allConnectionTargets = allConnectionTargets.concat(connectionTargets);\n        });\n\n        // Update Connections (Draw ALL lines from ALL layers)\n        if (window.mapRenderer && !window.isSpiderMode && hits.length > 0) {\n            const primary = hits[0].point;\n            window.mapRenderer.drawConnections({ lat: primary.lat, lng: primary.lng }, allConnectionTargets);\n        }\n\n        // UNIFIED ANALYZE BUTTON\n        const btnContainer = document.createElement(\'div\');\n        btnContainer.style.cssText = "margin-top: 15px; text-align: center; border-top: 1px solid #555; padding-top: 10px;";\n        btnContainer.innerHTML = \'<button onclick="window.analyzePoint(this)" \' +\n            \'style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; width: 100%;">\' +\n            \'Analyze All Layers\' +\n            \'</button>\' +\n            \'<script type="application/json" id="point-data-stash">\' + JSON.stringify(aggregatedData) + \'</script>\' +\n            \'<script type="application/json" id="point-data-stash-meta">{"hits":true}</script>\';\n\n        content.appendChild(btnContainer);\n\n    } catch (e) {\n        console.error("Error updating Multi-Info Panel:", e);\n    }\n};\n\nwindow.syncMarker = null; // Global marker for current sync point\n\n\nwindow.globalSync = (logId, index, source, skipPanel = false) => {\n    const log = loadedLogs.find(l => l.id === logId);\n    if (!log || !log.points[index]) return;\n\n    const point = log.points[index];\n\n    // 1. Update Map (Marker & View)\n    // 1. Update Map (Marker & View)\n    // Always update marker, even if source is map (to show selection highlight)\n    if (!window.syncMarker) {\n        window.syncMarker = L.circleMarker([point.lat, point.lng], {\n            radius: 18, // Larger radius to surround the point\n            color: \'#ffff00\', // Yellow\n            weight: 4,\n            fillColor: \'transparent\',\n            fillOpacity: 0\n        }).addTo(window.map);\n    } else {\n        window.syncMarker.setLatLng([point.lat, point.lng]);\n        // Ensure style is consistent (in case it was overwritten or different)\n        window.syncMarker.setStyle({\n            radius: 18,\n            color: \'#ffff00\',\n            weight: 4,\n            fillColor: \'transparent\',\n            fillOpacity: 0\n        });\n    }\n\n    // View Navigation (Zoom/Pan) - User Request: Zoom in on click\n    // UPDATED: Keep current zoom, just pan.\n    // AB: User requested to NOT move map when clicking ON the map.\n    if (source !== \'chart_scrub\' && source !== \'map\') {\n        // const targetZoom = Math.max(window.map.getZoom(), 17); // Previous logic\n        // window.map.flyTo([point.lat, point.lng], targetZoom, { animate: true, duration: 0.5 });\n\n        // New Logic: Pan only, preserve zoom\n        window.map.panTo([point.lat, point.lng], { animate: true, duration: 0.5 });\n    }\n\n    // 2. Update Charts\n    if (source !== \'chart\' && source !== \'chart_scrub\') {\n        if (window.currentChartLogId === logId && window.updateDualCharts) {\n            // We need to update the chart\'s active index WITHOUT triggering a loop\n            // updateDualCharts draws the chart.\n            // We simply set the index and draw.\n            window.updateDualCharts(index, true); // true = skipSync to avoid loop\n\n            // AUTO ZOOM if requested (User Request: Zoom on Click)\n            if (window.zoomChartToActive) {\n                window.zoomChartToActive();\n            }\n        }\n    }\n\n    // 3. Update Floating Panel\n    if (window.updateFloatingInfoPanel && !skipPanel) {\n        window.updateFloatingInfoPanel(point, log.color);\n    }\n\n    // 4. Update Grid\n    if (window.currentGridLogId === logId) {\n        const row = document.getElementById(\'grid-row-\' + index);\n        if (row) {\n            document.querySelectorAll(\'.grid-row\').forEach(r => r.classList.remove(\'selected-row\'));\n            row.classList.add(\'selected-row\');\n\n            if (source !== \'grid\') {\n                row.scrollIntoView({ behavior: \'smooth\', block: \'center\' });\n            }\n        }\n    }\n\n    // 5. Update Signaling\n    if (source !== \'signaling\') {\n        // Find closest signaling row by time logic (reuised from highlightPoint)\n        const targetTime = point.time;\n        const parseTime = (t) => {\n            const [h, m, s] = t.split(\':\');\n            return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;\n        };\n        const tTarget = parseTime(targetTime);\n        let bestIdx = null;\n        let minDiff = Infinity;\n        const rows = document.querySelectorAll(\'#signalingTableBody tr\');\n        rows.forEach((row) => {\n            if (!row.pointData) return;\n            row.classList.remove(\'selected-row\');\n            const t = parseTime(row.pointData.time);\n            const diff = Math.abs(t - tTarget);\n            if (diff < minDiff) {\n                minDiff = diff;\n                bestIdx = row;\n            }\n        });\n        if (bestIdx && minDiff < 5000) {\n            bestIdx.classList.add(\'selected-row\');\n            bestIdx.scrollIntoView({ behavior: \'smooth\', block: \'center\' });\n        }\n    }\n};\n\n// Global Listener for Custom Legend Color Changes\nwindow.addEventListener(\'metric-color-changed\', (e) => {\n    const { id, color } = e.detail;\n    console.log(\'[App] Color overridden for \' + id + \' -> \' + color);\n\n    // Re-render ALL logs currently showing Discrete Metrics (CellId or CID)\n    loadedLogs.forEach(log => {\n        if (log.currentParam === \'cellId\' || log.currentParam === \'cid\') {\n            window.mapRenderer.addLogLayer(log.id, log.points, log.currentParam);\n        }\n    });\n});\n\n// Global Sync Listener (Legacy Adapatation)\n// Global Sync Listener (Aligning with User Logic: Coordinator Pattern)\nwindow.addEventListener(\'map-point-clicked\', (e) => {\n    const { logId, point, source } = e.detail;\n\n    const log = loadedLogs.find(l => l.id === logId);\n    if (log) {\n        // Prioritize ID match\n        let index = -1;\n        if (point.id !== undefined) {\n            index = log.points.findIndex(p => p.id === point.id);\n        }\n        // Fallback to Time\n        if (index === -1 && point.time) {\n            index = log.points.findIndex(p => p.time === point.time);\n        }\n        // Fallback to Coord (Tolerance 1e-5 for roughly 1m)\n        if (index === -1) {\n            index = log.points.findIndex(p => Math.abs(p.lat - point.lat) < 0.00001 && Math.abs(p.lng - point.lng) < 0.00001);\n        }\n\n        if (index !== -1) {\n            // The Coordinator: globalSync\n            // Logic: catches map-point-clicked and calls window.globalSync(). \n            // It specifically invokes window.updateFloatingInfoPanel(point) (via skipPanel=false default)\n            window.globalSync(logId, index, source || \'map\');\n        } else {\n            console.warn("[App] Sync Index not found for clicked point.");\n            // Fallback: If we can\'t sync index, just update the panel directly\n            if (window.updateFloatingInfoPanel) {\n                window.updateFloatingInfoPanel(point);\n            }\n        }\n    }\n});\n\n// SPIDER OPTION: Sector Click Listener\nwindow.addEventListener(\'site-sector-clicked\', (e) => {\n    // GATED: Only run if Spider Mode is ON\n    if (!window.isSpiderMode) return;\n\n    const sector = e.detail;\n    if (!sector || !window.mapRenderer) return;\n\n    console.log("[Spider] Sector Clicked:", sector);\n\n    // Find all points served by this sector\n    const targetPoints = [];\n\n    // Calculate "Tip Top" (Outer Edge Center) based on Azimuth\n    // Use range from the event (current rendering range)\n    const range = sector.range || 200;\n    const rad = Math.PI / 180;\n    const azRad = (sector.azimuth || 0) * rad;\n    const latRad = sector.lat * rad;\n\n    const dy = Math.cos(azRad) * range;\n    const dx = Math.sin(azRad) * range;\n    const dLat = dy / 111111;\n    const dLng = dx / (111111 * Math.cos(latRad));\n\n    const startPt = {\n        lat: sector.lat + dLat,\n        lng: sector.lng + dLng\n    };\n\n    const norm = (v) => v !== undefined && v !== null ? String(v).trim() : \'\';\n    const isValid = (v) => v !== undefined && v !== null && v !== \'N/A\' && v !== \'\';\n\n    loadedLogs.forEach(log => {\n        log.points.forEach(p => {\n            let isMatch = false;\n\n            // 1. Strict RNC/CID Match (Highest Priority)\n            if (isValid(sector.rnc) && isValid(sector.cid) && isValid(p.rnc) && isValid(p.cellId)) {\n                if (norm(sector.rnc) === norm(p.rnc) && norm(sector.cid) === norm(p.cellId)) {\n                    isMatch = true;\n                }\n            }\n\n            // 2. Generic CellID Match (Fallback)\n            if (!isMatch && sector.cellId && isValid(p.cellId)) {\n                if (norm(sector.cellId) === norm(p.cellId)) {\n                    isMatch = true;\n                }\n                // Support "RNC/CID" format in sector.cellId\n                else if (String(sector.cellId).includes(\'/\')) {\n                    const parts = String(sector.cellId).split(\'/\');\n                    const cid = parts[parts.length - 1];\n                    const rnc = parts.length > 1 ? parts[parts.length - 2] : null;\n\n                    if (rnc && isValid(p.rnc) && norm(p.rnc) === norm(rnc) && norm(p.cellId) === norm(cid)) {\n                        isMatch = true;\n                    } else if (norm(p.cellId) === norm(cid) && !isValid(p.rnc)) {\n                        isMatch = true;\n                    }\n                }\n            }\n\n            // 3. SC Match (Secondary Fallback)\n            if (!isMatch && sector.sc !== undefined && isValid(p.sc)) {\n                if (p.sc == sector.sc) {\n                    isMatch = true;\n                    // Refine with LAC if available\n                    if (sector.lac && isValid(p.lac) && norm(sector.lac) !== norm(p.lac)) {\n                        isMatch = false;\n                    }\n                }\n            }\n\n            if (isMatch) {\n                targetPoints.push({\n                    lat: p.lat,\n                    lng: p.lng,\n                    color: \'#ffff00\', // Yellow lines\n                    weight: 2,\n                    dashArray: \'4, 4\'\n                });\n            }\n        });\n    });\n\n    if (targetPoints.length > 0) {\n        console.log(\'[Spider] Found \' + targetPoints.length + \' points.\');\n        window.mapRenderer.drawConnections(startPt, targetPoints);\n        fileStatus.textContent = \'Spider: Showing \' + targetPoints.length + \' points for \' + (sector.cellId || sector.sc);\n    } else {\n        console.warn("[Spider] No matching points found.");\n        fileStatus.textContent = \'Spider: No points found for \' + (sector.cellId || sector.sc);\n        window.mapRenderer.clearConnections();\n    }\n});\n\nfileInput.addEventListener(\'change\', (e) => {\n    const file = e.target.files[0];\n    if (!file) return;\n\n    fileStatus.textContent = \'Loading \' + file.name + \'...\';\n\n\n    // TRP Zip Import\n    if (file.name.toLowerCase().endsWith(\'.trp\')) {\n        handleTRPImport(file);\n        return;\n    }\n\n    // NMFS Binary Check\n    if (file.name.toLowerCase().endsWith(\'.nmfs\')) {\n        const headerReader = new FileReader();\n        headerReader.onload = (event) => {\n            const arr = new Uint8Array(event.target.result);\n            // ASCII for NMFS is 78 77 70 83 (0x4e 0x4d 0x46 0x53)\n            // Check if starts with NMFS\n            let isNMFS = false;\n            if (arr.length >= 4) {\n                if (arr[0] === 0x4e && arr[1] === 0x4d && arr[2] === 0x46 && arr[3] === 0x53) {\n                    isNMFS = true;\n                }\n            }\n\n            if (isNMFS) {\n                alert("⚠️ SECURE FILE DETECTED\n\nThis is a proprietary Keysight Nemo \'Secure\' Binary file (.nmfs).\n\nThis application can only parse TEXT log files (.nmf or .csv).\n\nPlease open this file in Nemo Outdoor/Analyze and export it as \'Nemo File Format (Text)\'.");\n                fileStatus.textContent = \'Error: Encrypted NMFS file.\';\n                e.target.value = \'\'; // Reset\n                return;\n            } else {\n                // Fallback: Maybe it\'s a text file named .nmfs? Try parsing as text.\n                console.warn("File named .nmfs but missing signature. Attempting text parse...");\n                parseTextLog(file);\n            }\n        };\n        headerReader.readAsArrayBuffer(file.slice(0, 10));\n        return;\n    }\n\n    // Excel / CSV Detection (Binary Read)\n    if (file.name.toLowerCase().endsWith(\'.xlsx\') || file.name.toLowerCase().endsWith(\'.xls\')) {\n        const reader = new FileReader();\n        reader.onload = (event) => {\n            try {\n                fileStatus.textContent = \'Parsing Excel...\';\n                const data = event.target.result;\n                const result = ExcelParser.parse(data);\n\n                handleParsedResult(result, file.name);\n\n            } catch (err) {\n                console.error(\'Excel Parse Error:\', err);\n                fileStatus.textContent = \'Error parsing Excel: \' + err.message;\n            }\n        };\n        reader.readAsArrayBuffer(file);\n        e.target.value = \'\';\n        return;\n    }\n\n    // Standard Text Log\n    parseTextLog(file);\n\n    function parseTextLog(f) {\n        const reader = new FileReader();\n        reader.onload = (event) => {\n            const content = event.target.result;\n            fileStatus.textContent = \'Parsing...\';\n\n            setTimeout(() => {\n                try {\n                    const result = NMFParser.parse(content);\n                    handleParsedResult(result, f.name);\n                } catch (err) {\n                    console.error(\'Parser Error:\', err);\n                    fileStatus.textContent = \'Error parsing file: \' + err.message;\n                }\n            }, 100);\n        };\n        reader.readAsText(f);\n        e.target.value = \'\';\n    }\n\n    function getRandomColor() {\n        const letters = \'0123456789ABCDEF\';\n        let color = \'#\';\n        for (let i = 0; i < 6; i++) {\n            color += letters[Math.floor(Math.random() * 16)];\n        }\n        return color;\n    }\n\n    function handleParsedResult(result, fileName) {\n        // Handle new parser return format (object vs array)\n        const parsedData = Array.isArray(result) ? result : result.points;\n        const technology = Array.isArray(result) ? \'Unknown\' : result.tech;\n        const signalingData = !Array.isArray(result) ? result.signaling : [];\n        const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel\n\n        console.log('Parsed ${parsedData.length} measurement points and ${signalingData ? signalingData.length : 0} signaling messages.Tech: ${technology}');\n\n        if (parsedData.length > 0 || (signalingData && signalingData.length > 0)) {\n            const id = Date.now().toString();\n            const name = fileName.replace(/\.[^/.]+$/, "");\n\n            // Add to Logs\n            loadedLogs.push({\n                id: id,\n                name: name,\n                points: parsedData,\n                signaling: signalingData,\n                tech: technology,\n                customMetrics: customMetrics,\n                color: getRandomColor(),\n                visible: true,\n                currentParam: \'level\'\n            });\n\n            // Update UI\n            updateLogsList();\n\n            if (parsedData.length > 0) {\n                console.log(\'[App] Debug First Point:\', parsedData[0]);\n                map.addLogLayer(id, parsedData, \'level\');\n                const first = parsedData[0];\n                map.setView(first.lat, first.lng);\n            }\n\n            // Add Events Layer (HO Fail, Drop, etc.)\n            if (signalingData && signalingData.length > 0) {\n                map.addEventsLayer(id, signalingData);\n            }\n\n            fileStatus.textContent = 'Loaded: ${name}(${parsedData.length} pts)';\n\n\n        } else {\n            fileStatus.textContent = \'No valid data found.\';\n        }\n    }\n});\n\n// Site Import Logic\nconst siteInput = document.getElementById(\'siteInput\');\nif (siteInput) {\n    siteInput.addEventListener(\'change\', (e) => {\n        const file = e.target.files[0];\n        if (!file) return;\n\n        fileStatus.textContent = 'Importing Sites...';\n\n        const reader = new FileReader();\n        reader.onload = (event) => {\n            try {\n                const data = new Uint8Array(event.target.result);\n                const workbook = XLSX.read(data, { type: \'array\' });\n                const firstSheetName = workbook.SheetNames[0];\n                const worksheet = workbook.Sheets[firstSheetName];\n                const json = XLSX.utils.sheet_to_json(worksheet);\n\n                console.log(\'Imported Rows:\', json.length);\n\n                if (json.length === 0) {\n                    fileStatus.textContent = \'No rows found in Excel.\';\n                    return;\n                }\n\n                // Parse Sectors\n                // Try to match common headers\n                // Map needs: lat, lng, azimuth, name, cellId, tech, color\n                const sectors = json.map(row => {\n                    // Normalize helper: lowercase, remove ALL non-alphanumeric chars\n                    const normalize = (str) => String(str).toLowerCase().replace(/[^a-z0-9]/g, \'\');\n                    const rowKeys = Object.keys(row);\n\n                    const getVal = (possibleNames) => {\n                        for (let name of possibleNames) {\n                            const target = normalize(name);\n                            // Check exact match of normalized keys\n                            const foundKey = rowKeys.find(k => normalize(k) === target);\n                            if (foundKey) return row[foundKey];\n                        }\n                        return undefined;\n                    };\n\n                    const lat = parseFloat(getVal([\'lat\', \'latitude\', \'lat_decimal\']));\n                    const lng = parseFloat(getVal([\'long\', \'lng\', \'longitude\', \'lon\', \'long_decimal\']));\n                    // Extended Azimuth keywords (including \'azimut\' for French)\n                    const azimuth = parseFloat(getVal([\'azimuth\', \'azimut\', \'dir\', \'bearing\', \'az\']));\n                    const name = getVal([\'nodeb name\', \'nodeb_name\', \'nodebname\', \'site\', \'sitename\', \'site_name\', \'name\', \'site name\']);\n                    const cellId = getVal([\'cell\', \'cellid\', \'ci\', \'cell_name\', \'cell id\', \'cell_id\']);\n\n                    // New Fields for Strict Matching\n                    const lac = getVal([\'lac\', \'location area code\']);\n                    const pci = getVal([\'psc\', \'sc\', \'pci\', \'physical cell id\', \'physcial cell id\', \'scrambling code\', \'physicalcellid\']);\n                    const freq = getVal([\'downlink uarfcn\', \'dl uarfcn\', \'uarfcn\', \'freq\', \'frequency\', \'dl freq\', \'downlink earfcn\', \'dl earfcn\', \'earfcn\', \'downlinkearfcn\']);\n                    const band = getVal([\'band\', \'band name\', \'freq band\']);\n\n                    // Specific Request: eNodeB ID-Cell ID\n                    const enodebCellIdRaw = getVal([\'enodeb id-cell id\', \'enodebid-cellid\', \'enodebidcellid\']);\n\n                    let rnc = parseInt(getVal([\'rnc\', \'rncid\', \'rnc_id\', \'enodeb\', \'enodebid\', \'enodeb id\', \'enodeb_id\']));\n                    let cid = parseInt(getVal([\'cid\', \'c_id\', \'ci\', \'cell id\', \'cell_id\', \'cellid\']));\n\n                    let calculatedEci = null;\n                    if (enodebCellIdRaw) {\n                        const parts = String(enodebCellIdRaw).split(\'-\');\n                        if (parts.length === 2) {\n                            const enb = parseInt(parts[0]);\n                            const c = parseInt(parts[1]);\n                            if (!isNaN(enb) && !isNaN(c)) {\n                                // Standard LTE ECI Calculation: eNodeB * 256 + CellID\n                                calculatedEci = (enb * 256) + c;\n\n                                // Fallback: If RNC/CID columns were missing, use these\n                                if (isNaN(rnc)) rnc = enb;\n                                if (isNaN(cid)) cid = c;\n                            }\n                        }\n                    }\n\n                    let tech = getVal([\'tech\', \'technology\', \'system\', \'rat\']);\n                    const cellName = getVal([\'cell name\', \'cellname\']) || \'\';\n\n                    // Infer Tech from Name if missing\n                    if (!tech) {\n                        const combinedName = (name + \' \' + cellName).toLowerCase();\n                        if (combinedName.includes(\'4g\') || combinedName.includes(\'lte\') || combinedName.includes(\'earfcn\')) tech = \'4G\';\n                        else if (combinedName.includes(\'3g\') || combinedName.includes(\'umts\') || combinedName.includes(\'wcdma\')) tech = \'3G\';\n                        else if (combinedName.includes(\'2g\') || combinedName.includes(\'gsm\')) tech = \'2G\';\n                        else if (combinedName.includes(\'5g\') || combinedName.includes(\'nr\')) tech = \'5G\';\n                    }\n\n                    // Robust Fallback: Attempt to extract RNC from CellID or RawID if still missing\n                    if (isNaN(rnc) || !rnc) {\n                        const candidates = [String(enodebCellIdRaw), String(cellId), String(name)];\n                        for (let c of candidates) {\n                            if (c) {\n                                // Check if it\'s a Big Int (RNC+CID)\n                                const val = parseInt(c);\n                                if (!isNaN(val) && val > 65535) {\n                                    rnc = val >> 16;\n                                    cid = val & 0xFFFF;\n                                    break;\n                                }\n\n                                if (c.includes(\'-\') || c.includes(\'/\')) {\n                                    const parts = c.split(/[-/]/);\n                                    if (parts.length === 2) {\n                                        const p1 = parseInt(parts[0]);\n                                        if (!isNaN(p1) && p1 > 0 && p1 < 65535) {\n                                            rnc = p1;\n                                            // Also recover CID if missing\n                                            if (isNaN(cid)) cid = parseInt(parts[1]);\n                                            break;\n                                        }\n                                    }\n                                }\n                            }\n                        }\n                    }\n\n                    // Determine Color\n                    let color = \'#3b82f6\';\n                    if (tech) {\n                        const t = tech.toString().toLowerCase();\n                        if (t.includes(\'3g\') || t.includes(\'umts\')) color = \'#eab308\'; // Yellow/Orange\n                        if (t.includes(\'4g\') || t.includes(\'lte\')) color = \'#3b82f6\'; // Blue\n                        if (t.includes(\'2g\') || t.includes(\'gsm\')) color = \'#ef4444\'; // Red\n                        if (t.includes(\'5g\') || t.includes(\'nr\')) color = \'#a855f7\'; // Purple\n                    }\n\n                    return {\n                        ...row, // Preserve ALL original columns\n                        lat, lng, azimuth: isNaN(azimuth) ? 0 : azimuth,\n                        name, siteName: name, // Ensure siteName is present\n                        cellName,\n                        cellId,\n                        lac,\n                        lac,\n                        pci: parseInt(pci), sc: parseInt(pci),\n                        freq: parseInt(freq),\n                        band,\n                        tech,\n                        color,\n                        rawEnodebCellId: enodebCellIdRaw,\n                        calculatedEci: calculatedEci,\n                        rnc: isNaN(rnc) ? undefined : rnc,\n                        cid: isNaN(cid) ? undefined : cid\n                    };\n                })\n                // Filter out invalid\n                const validSectors = sectors.filter(s => s && s.lat && s.lng);\n\n                if (validSectors.length > 0) {\n                    const id = Date.now().toString();\n                    const name = file.name.replace(/\.[^/.]+$/, "");\n\n                    console.log('[Sites] Importing ${validSectors.length} sites as layer: ${name}');\n\n                    // Add Layer\n                    try {\n                        if (window.mapRenderer) {\n                            console.log(\'[Sites] Calling mapRenderer.addSiteLayer...\');\n                            window.mapRenderer.addSiteLayer(id, name, validSectors, false); // DO NOT FIT BOUNDS\n                            console.log(\'[Sites] addSiteLayer successful. Adding sidebar item...\');\n                            addSiteLayerToSidebar(id, name, validSectors.length);\n                            console.log(\'[Sites] Sidebar item added.\');\n                        } else {\n                            throw new Error("MapRenderer not initialized");\n                        }\n                        fileStatus.textContent = 'Sites Imported: ${validSectors.length}(${name})';\n                    } catch (innerErr) {\n                        console.error(\'[Sites] CRITICAL ERROR adding layer:\', innerErr);\n                        alert('Error adding site layer: ${innerErr.message}');\n                        fileStatus.textContent = \'Error adding layer: \' + innerErr.message;\n                    }\n                } else {\n                    fileStatus.textContent = \'No valid site data found (check Lat/Lng)\';\n                }\n                e.target.value = \'\'; // Reset input\n            } catch (err) {\n                console.error(\'Site Import Error:\', err);\n                fileStatus.textContent = \'Error parsing sites: \' + err.message;\n            }\n        };\n        reader.readAsArrayBuffer(file);\n    });\n}\n\n// --- Site Layer Management UI ---\nwindow.siteLayersList = []; // Track UI state locally if needed, but renderer is source of truth\n\nfunction addSiteLayerToSidebar(id, name, count) {\n    const container = document.getElementById(\'sites-layer-list\');\n    if (!container) {\n        console.error(\'[Sites] CRITICAL: Sidebar container #sites-layer-list NOT FOUND in DOM.\');\n        return;\n    }\n\n    // AUTO-SHOW SIDEBAR\n    const sidebar = document.getElementById(\'smartcare-sidebar\');\n    if (sidebar) {\n        sidebar.style.display = \'flex\';\n    }\n\n    const item = document.createElement(\'div\');\n    item.className = \'layer-item\';\n    item.id = 'site - layer - ${id}';\n\n    item.innerHTML = '
         <div class="layer-info">
             <span class="layer-name" title="${name}" style="font-size:13px;">${name}</span>
         </div>
@@ -5435,266 +3642,7 @@ function addSiteLayerToSidebar(id, name, count) {
             <button class="layer-btn visibility-btn" data-id="${id}" title="Toggle Visibility">👁️</button>
             <button class="layer-btn remove-btn" data-id="${id}" title="Remove Layer">✕</button>
         </div>
-        `;
-
-    // Event Listeners
-    const settingsBtn = item.querySelector('.settings-btn');
-    settingsBtn.onclick = (e) => {
-        e.stopPropagation();
-        // Open Settings Panel in "Layer Mode"
-        const panel = document.getElementById('siteSettingsPanel');
-        if (panel) {
-            panel.style.display = 'block';
-            window.editingLayerId = id; // Set Context
-
-            // Update Title to show we are editing a layer
-            const title = panel.querySelector('h3');
-            if (title) title.textContent = `Settings: ${name}`;
-        }
-    };
-    const visBtn = item.querySelector('.visibility-btn');
-    visBtn.onclick = () => {
-        const isVisible = visBtn.style.opacity !== '0.5';
-        const newState = !isVisible;
-
-        // UI Toggle
-        visBtn.style.opacity = newState ? '1' : '0.5';
-        if (!newState) visBtn.textContent = '━';
-        else visBtn.textContent = '👁️';
-
-        // Logic Toggle
-        if (window.mapRenderer) {
-            window.mapRenderer.toggleSiteLayer(id, newState);
-        }
-    };
-
-    const removeBtn = item.querySelector('.remove-btn');
-    removeBtn.onclick = (e) => {
-        e.stopPropagation();
-        if (confirm(`Remove site layer "${name}" ? `)) {
-            if (window.mapRenderer) {
-                window.mapRenderer.removeSiteLayer(id);
-            }
-            item.remove();
-        }
-    };
-
-    container.appendChild(item);
-}
-
-// Site Settings UI Logic
-const settingsBtn = document.getElementById('siteSettingsBtn');
-const settingsPanel = document.getElementById('siteSettingsPanel');
-const closeSettings = document.getElementById('closeSiteSettings');
-const siteColorBy = document.getElementById('siteColorBy'); // NEW
-
-if (settingsBtn && settingsPanel) {
-    settingsBtn.onclick = () => {
-        // Open in "Global Mode"
-        window.editingLayerId = null;
-        const title = settingsPanel.querySelector('h3');
-        if (title) title.textContent = 'Site Settings (Global)';
-
-        settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
-    };
-    closeSettings.onclick = () => settingsPanel.style.display = 'none';
-
-    const updateSiteStyles = () => {
-        const range = document.getElementById('rangeSiteDist').value;
-        const beam = document.getElementById('rangeIconBeam').value;
-        const opacity = document.getElementById('rangeSiteOpacity').value;
-        const color = document.getElementById('pickerSiteColor').value;
-        const useOverride = document.getElementById('checkSiteColorOverride').checked;
-        const showSiteNames = document.getElementById('checkShowSiteNames').checked;
-        const showCellNames = document.getElementById('checkShowCellNames').checked;
-
-        const colorBy = siteColorBy ? siteColorBy.value : 'tech';
-
-        // Context-Aware Update
-        if (window.editingLayerId) {
-            // Layer Specific
-            if (map) {
-                map.updateLayerSettings(window.editingLayerId, {
-                    range: range,
-                    beamwidth: beam,
-                    opacity: opacity,
-                    color: color,
-                    useOverride: useOverride,
-                    showSiteNames: showSiteNames,
-                    showCellNames: showCellNames
-                });
-            }
-        } else {
-            // Global
-            if (map) {
-                map.updateSiteSettings({
-                    range: range,
-                    beamwidth: beam,
-                    opacity: opacity,
-                    color: color,
-                    useOverride: useOverride,
-                    showSiteNames: showSiteNames,
-                    showCellNames: showCellNames,
-                    colorBy: colorBy
-                });
-            }
-        }
-
-        document.getElementById('valRange').textContent = range;
-        document.getElementById('valBeam').textContent = beam;
-        document.getElementById('valOpacity').textContent = opacity;
-
-        if (map) {
-            // Logic moved above
-        }
-    };
-
-    // Listeners for Site Settings
-    document.getElementById('rangeSiteDist').addEventListener('input', updateSiteStyles);
-    document.getElementById('rangeIconBeam').addEventListener('input', updateSiteStyles);
-    document.getElementById('rangeSiteOpacity').addEventListener('input', updateSiteStyles);
-    document.getElementById('pickerSiteColor').addEventListener('input', updateSiteStyles);
-    document.getElementById('checkSiteColorOverride').addEventListener('change', updateSiteStyles);
-    document.getElementById('checkShowSiteNames').addEventListener('change', updateSiteStyles);
-    document.getElementById('checkShowCellNames').addEventListener('change', updateSiteStyles);
-    if (siteColorBy) siteColorBy.addEventListener('change', updateSiteStyles);
-
-    // Initial sync
-    setTimeout(updateSiteStyles, 100);
-}
-
-// Generic Modal Close
-window.onclick = (event) => {
-    if (event.target == document.getElementById('gridModal')) {
-        document.getElementById('gridModal').style.display = "none";
-    }
-    if (event.target == document.getElementById('chartModal')) {
-        document.getElementById('chartModal').style.display = "none";
-    }
-    if (event.target == document.getElementById('signalingModal')) {
-        document.getElementById('signalingModal').style.display = "none";
-    }
-}
-
-
-window.closeSignalingModal = () => {
-    document.getElementById('signalingModal').style.display = 'none';
-};
-
-
-
-// Apply to Signaling Modal
-const sigModal = document.getElementById('signalingModal');
-const sigContent = sigModal.querySelector('.modal-content');
-const sigHeader = sigModal.querySelector('.modal-header'); // We need to ensure header exists
-
-if (sigContent && sigHeader) {
-    makeElementDraggable(sigHeader, sigContent);
-}
-
-window.showSignalingModal = (logId) => {
-    console.log('Opening Signaling Modal for Log ID:', logId);
-    const log = loadedLogs.find(l => l.id.toString() === logId.toString()); // Ensure string comparison
-
-    if (!log) {
-        console.error('Log not found for ID:', logId);
-        return;
-    }
-
-    currentSignalingLogId = log.id;
-    renderSignalingTable();
-
-    // Show modal
-    document.getElementById('signalingModal').style.display = 'block';
-
-    // Ensure visibility if it was closed or moved off screen?
-    // Reset position if first open? optional.
-};
-
-window.filterSignaling = () => {
-    renderSignalingTable();
-};
-
-function renderSignalingTable() {
-    if (!currentSignalingLogId) return;
-    const log = loadedLogs.find(l => l.id.toString() === currentSignalingLogId.toString());
-    if (!log) return;
-
-    const filterElement = document.getElementById('signalingFilter');
-    const filter = filterElement ? filterElement.value : 'ALL';
-    if (!filterElement) console.warn('Signaling Filter Dropdown not found in DOM!');
-
-    const tbody = document.getElementById('signalingTableBody');
-    const title = document.getElementById('signalingModalTitle');
-
-    tbody.innerHTML = '';
-    title.textContent = `Signaling Data - ${log.name}`; // Changed visual to verify update
-
-    // Filter Data
-    let sigPoints = log.signaling || [];
-    if (filter !== 'ALL') {
-        sigPoints = sigPoints.filter(p => p.category === filter);
-    }
-
-    if (sigPoints.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px;">No messages found matching filter.</td></tr>';
-    } else {
-        const limit = 2000;
-        const displayPoints = sigPoints.slice(0, limit);
-
-        if (sigPoints.length > limit) {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `< td colspan = "5" style = "background:#552200; color:#fff; text-align:center;" > Showing first ${limit} of ${sigPoints.length} messages.</td > `;
-            tbody.appendChild(tr);
-        }
-
-        displayPoints.forEach((p, index) => {
-            const tr = document.createElement('tr');
-            tr.id = `sig - row - ${p.time.replace(/[:.]/g, '')} - ${index}`; // Unique ID for scrolling
-            tr.className = 'signaling-row'; // Add class for selection
-            tr.style.cursor = 'pointer';
-
-            // Row Click = Sync (Map + Chart)
-            tr.onclick = (e) => {
-                // Ignore clicks on buttons
-                if (e.target.tagName === 'BUTTON') return;
-
-                // 1. Sync Map
-                if (p.lat && p.lng) {
-                    window.map.setView([p.lat, p.lng], 16);
-
-                    // Dispatch event for Chart Sync
-                    const event = new CustomEvent('map-point-clicked', {
-                        detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
-                    });
-                    window.dispatchEvent(event);
-                } else {
-                    // Try to find closest GPS point by time? 
-                    // For now, just try chart sync via time
-                    const event = new CustomEvent('map-point-clicked', {
-                        detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
-                    });
-                    window.dispatchEvent(event);
-                }
-
-                // Low-level Visual Highlight (Overridden by highlightPoint later)
-                // But good for immediate feedback
-                document.querySelectorAll('.signaling-row').forEach(r => r.classList.remove('selected-row'));
-                tr.classList.add('selected-row');
-            };
-
-            const mapBtn = (p.lat && p.lng)
-                ? `< button onclick = "window.map.setView([${p.lat}, ${p.lng}], 16); event.stopPropagation();" class= "btn" style = "padding:2px 6px; font-size:10px; background-color:#3b82f6;" > Map</button > `
-                : '<span style="color:#666; font-size:10px;">No GPS</span>';
-
-            // Store point data for the info button handler (simulated via dataset or just passing object index if we could, but stringifying is easier for this hack)
-            // Better: attach object to DOM element directly
-            tr.pointData = p;
-
-            let typeClass = 'badge-rrc';
-            if (p.category === 'L3') typeClass = 'badge-l3';
-
-            tr.innerHTML = `
+        ';\n\n    // Event Listeners\n    const settingsBtn = item.querySelector(\'.settings-btn\');\n    settingsBtn.onclick = (e) => {\n        e.stopPropagation();\n        // Open Settings Panel in "Layer Mode"\n        const panel = document.getElementById(\'siteSettingsPanel\');\n        if (panel) {\n            panel.style.display = \'block\';\n            window.editingLayerId = id; // Set Context\n\n            // Update Title to show we are editing a layer\n            const title = panel.querySelector(\'h3\');\n            if (title) title.textContent = 'Settings: ${name}';\n        }\n    };\n    const visBtn = item.querySelector(\'.visibility-btn\');\n    visBtn.onclick = () => {\n        const isVisible = visBtn.style.opacity !== \'0.5\';\n        const newState = !isVisible;\n\n        // UI Toggle\n        visBtn.style.opacity = newState ? \'1\' : \'0.5\';\n        if (!newState) visBtn.textContent = \'━\';\n        else visBtn.textContent = \'👁️\';\n\n        // Logic Toggle\n        if (window.mapRenderer) {\n            window.mapRenderer.toggleSiteLayer(id, newState);\n        }\n    };\n\n    const removeBtn = item.querySelector(\'.remove-btn\');\n    removeBtn.onclick = (e) => {\n        e.stopPropagation();\n        if (confirm('Remove site layer "${name}" ? ')) {\n            if (window.mapRenderer) {\n                window.mapRenderer.removeSiteLayer(id);\n            }\n            item.remove();\n        }\n    };\n\n    container.appendChild(item);\n}\n\n// Site Settings UI Logic\nconst settingsBtn = document.getElementById(\'siteSettingsBtn\');\nconst settingsPanel = document.getElementById(\'siteSettingsPanel\');\nconst closeSettings = document.getElementById(\'closeSiteSettings\');\nconst siteColorBy = document.getElementById(\'siteColorBy\'); // NEW\n\nif (settingsBtn && settingsPanel) {\n    settingsBtn.onclick = () => {\n        // Open in "Global Mode"\n        window.editingLayerId = null;\n        const title = settingsPanel.querySelector(\'h3\');\n        if (title) title.textContent = \'Site Settings (Global)\';\n\n        settingsPanel.style.display = settingsPanel.style.display === \'none\' ? \'block\' : \'none\';\n    };\n    closeSettings.onclick = () => settingsPanel.style.display = \'none\';\n\n    const updateSiteStyles = () => {\n        const range = document.getElementById(\'rangeSiteDist\').value;\n        const beam = document.getElementById(\'rangeIconBeam\').value;\n        const opacity = document.getElementById(\'rangeSiteOpacity\').value;\n        const color = document.getElementById(\'pickerSiteColor\').value;\n        const useOverride = document.getElementById(\'checkSiteColorOverride\').checked;\n        const showSiteNames = document.getElementById(\'checkShowSiteNames\').checked;\n        const showCellNames = document.getElementById(\'checkShowCellNames\').checked;\n\n        const colorBy = siteColorBy ? siteColorBy.value : \'tech\';\n\n        // Context-Aware Update\n        if (window.editingLayerId) {\n            // Layer Specific\n            if (map) {\n                map.updateLayerSettings(window.editingLayerId, {\n                    range: range,\n                    beamwidth: beam,\n                    opacity: opacity,\n                    color: color,\n                    useOverride: useOverride,\n                    showSiteNames: showSiteNames,\n                    showCellNames: showCellNames\n                });\n            }\n        } else {\n            // Global\n            if (map) {\n                map.updateSiteSettings({\n                    range: range,\n                    beamwidth: beam,\n                    opacity: opacity,\n                    color: color,\n                    useOverride: useOverride,\n                    showSiteNames: showSiteNames,\n                    showCellNames: showCellNames,\n                    colorBy: colorBy\n                });\n            }\n        }\n\n        document.getElementById(\'valRange\').textContent = range;\n        document.getElementById(\'valBeam\').textContent = beam;\n        document.getElementById(\'valOpacity\').textContent = opacity;\n\n        if (map) {\n            // Logic moved above\n        }\n    };\n\n    // Listeners for Site Settings\n    document.getElementById(\'rangeSiteDist\').addEventListener(\'input\', updateSiteStyles);\n    document.getElementById(\'rangeIconBeam\').addEventListener(\'input\', updateSiteStyles);\n    document.getElementById(\'rangeSiteOpacity\').addEventListener(\'input\', updateSiteStyles);\n    document.getElementById(\'pickerSiteColor\').addEventListener(\'input\', updateSiteStyles);\n    document.getElementById(\'checkSiteColorOverride\').addEventListener(\'change\', updateSiteStyles);\n    document.getElementById(\'checkShowSiteNames\').addEventListener(\'change\', updateSiteStyles);\n    document.getElementById(\'checkShowCellNames\').addEventListener(\'change\', updateSiteStyles);\n    if (siteColorBy) siteColorBy.addEventListener(\'change\', updateSiteStyles);\n\n    // Initial sync\n    setTimeout(updateSiteStyles, 100);\n}\n\n// Generic Modal Close\nwindow.onclick = (event) => {\n    if (event.target == document.getElementById(\'gridModal\')) {\n        document.getElementById(\'gridModal\').style.display = "none";\n    }\n    if (event.target == document.getElementById(\'chartModal\')) {\n        document.getElementById(\'chartModal\').style.display = "none";\n    }\n    if (event.target == document.getElementById(\'signalingModal\')) {\n        document.getElementById(\'signalingModal\').style.display = "none";\n    }\n}\n\n\nwindow.closeSignalingModal = () => {\n    document.getElementById(\'signalingModal\').style.display = \'none\';\n};\n\n\n\n// Apply to Signaling Modal\nconst sigModal = document.getElementById(\'signalingModal\');\nconst sigContent = sigModal.querySelector(\'.modal-content\');\nconst sigHeader = sigModal.querySelector(\'.modal-header\'); // We need to ensure header exists\n\nif (sigContent && sigHeader) {\n    makeElementDraggable(sigHeader, sigContent);\n}\n\nwindow.showSignalingModal = (logId) => {\n    console.log(\'Opening Signaling Modal for Log ID:\', logId);\n    const log = loadedLogs.find(l => l.id.toString() === logId.toString()); // Ensure string comparison\n\n    if (!log) {\n        console.error(\'Log not found for ID:\', logId);\n        return;\n    }\n\n    currentSignalingLogId = log.id;\n    renderSignalingTable();\n\n    // Show modal\n    document.getElementById(\'signalingModal\').style.display = \'block\';\n\n    // Ensure visibility if it was closed or moved off screen?\n    // Reset position if first open? optional.\n};\n\nwindow.filterSignaling = () => {\n    renderSignalingTable();\n};\n\nfunction renderSignalingTable() {\n    if (!currentSignalingLogId) return;\n    const log = loadedLogs.find(l => l.id.toString() === currentSignalingLogId.toString());\n    if (!log) return;\n\n    const filterElement = document.getElementById(\'signalingFilter\');\n    const filter = filterElement ? filterElement.value : \'ALL\';\n    if (!filterElement) console.warn(\'Signaling Filter Dropdown not found in DOM!\');\n\n    const tbody = document.getElementById(\'signalingTableBody\');\n    const title = document.getElementById(\'signalingModalTitle\');\n\n    tbody.innerHTML = \'\';\n    title.textContent = 'Signaling Data - ${log.name}'; // Changed visual to verify update\n\n    // Filter Data\n    let sigPoints = log.signaling || [];\n    if (filter !== \'ALL\') {\n        sigPoints = sigPoints.filter(p => p.category === filter);\n    }\n\n    if (sigPoints.length === 0) {\n        tbody.innerHTML = \'<tr><td colspan="5" style="text-align:center; padding:20px;">No messages found matching filter.</td></tr>\';\n    } else {\n        const limit = 2000;\n        const displayPoints = sigPoints.slice(0, limit);\n\n        if (sigPoints.length > limit) {\n            const tr = document.createElement(\'tr\');\n            tr.innerHTML = '< td colspan = "5" style = "background:#552200; color:#fff; text-align:center;" > Showing first ${limit} of ${sigPoints.length} messages.</td > ';\n            tbody.appendChild(tr);\n        }\n\n        displayPoints.forEach((p, index) => {\n            const tr = document.createElement(\'tr\');\n            tr.id = 'sig - row - ${p.time.replace(/[:.]/g, '')} - ${index}'; // Unique ID for scrolling\n            tr.className = \'signaling-row\'; // Add class for selection\n            tr.style.cursor = \'pointer\';\n\n            // Row Click = Sync (Map + Chart)\n            tr.onclick = (e) => {\n                // Ignore clicks on buttons\n                if (e.target.tagName === \'BUTTON\') return;\n\n                // 1. Sync Map\n                if (p.lat && p.lng) {\n                    window.map.setView([p.lat, p.lng], 16);\n\n                    // Dispatch event for Chart Sync\n                    const event = new CustomEvent(\'map-point-clicked\', {\n                        detail: { logId: currentSignalingLogId, point: p, source: \'signaling\' }\n                    });\n                    window.dispatchEvent(event);\n                } else {\n                    // Try to find closest GPS point by time? \n                    // For now, just try chart sync via time\n                    const event = new CustomEvent(\'map-point-clicked\', {\n                        detail: { logId: currentSignalingLogId, point: p, source: \'signaling\' }\n                    });\n                    window.dispatchEvent(event);\n                }\n\n                // Low-level Visual Highlight (Overridden by highlightPoint later)\n                // But good for immediate feedback\n                document.querySelectorAll(\'.signaling-row\').forEach(r => r.classList.remove(\'selected-row\'));\n                tr.classList.add(\'selected-row\');\n            };\n\n            const mapBtn = (p.lat && p.lng)\n                ? '< button onclick = "window.map.setView([${p.lat}, ${p.lng}], 16); event.stopPropagation();" class= "btn" style = "padding:2px 6px; font-size:10px; background-color:#3b82f6;" > Map</button > '\n                : \'<span style="color:#666; font-size:10px;">No GPS</span>\';\n\n            // Store point data for the info button handler (simulated via dataset or just passing object index if we could, but stringifying is easier for this hack)\n            // Better: attach object to DOM element directly\n            tr.pointData = p;\n\n            let typeClass = \'badge-rrc\';\n            if (p.category === \'L3\') typeClass = \'badge-l3\';\n\n            tr.innerHTML = '
 < td > ${p.time}</td >
                     <td><span class="${typeClass}">${p.category}</span></td>
                     <td>${p.direction}</td>
@@ -5703,21 +3651,7 @@ function renderSignalingTable() {
                         ${mapBtn} 
                         <button onclick="const p = this.parentElement.parentElement.pointData; showSignalingPayload(p); event.stopPropagation();" class="btn" style="padding:2px 6px; font-size:10px; background-color:#475569;">Info</button>
                     </td>
-                `;
-            tbody.appendChild(tr);
-        });
-    }
-}
-
-// Payload Viewer
-function showSignalingPayload(point) {
-    // Create Modal on the fly if not exists
-    let modal = document.getElementById('payloadModal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'payloadModal';
-        modal.className = 'modal';
-        modal.innerHTML = `
+                ';\n            tbody.appendChild(tr);\n        });\n    }\n}\n\n// Payload Viewer\nfunction showSignalingPayload(point) {\n    // Create Modal on the fly if not exists\n    let modal = document.getElementById(\'payloadModal\');\n    if (!modal) {\n        modal = document.createElement(\'div\');\n        modal.id = \'payloadModal\';\n        modal.className = \'modal\';\n        modal.innerHTML = '
     <div class= "modal-content" style = "max-width: 600px; background: #1f2937; color: #e5e7eb; border: 1px solid #374151;" >
                 <div class="modal-header" style="border-bottom: 1px solid #374151; padding: 10px 15px; display:flex; justify-content:space-between; align-items:center;">
                     <h3 style="margin:0; font-size:16px;">Signaling Details</h3>
@@ -5730,20 +3664,7 @@ function showSignalingPayload(point) {
                      <button onclick="document.getElementById('payloadModal').style.display='none'" class="btn" style="background:#4b5563;">Close</button>
                 </div>
             </div >
-    `;
-        document.body.appendChild(modal);
-    }
-
-    const content = document.getElementById('payloadContent');
-    const payloadRaw = point.payload || 'No Hex Payload Available';
-
-    // Format Hex (Group by 2 bytes / 4 chars)
-    const formatHex = (str) => {
-        if (!str || str.includes(' ')) return str;
-        return str.replace(/(.{4})/g, '$1 ').trim();
-    };
-
-    content.innerHTML = `
+    ';\n        document.body.appendChild(modal);\n    }\n\n    const content = document.getElementById(\'payloadContent\');\n    const payloadRaw = point.payload || \'No Hex Payload Available\';\n\n    // Format Hex (Group by 2 bytes / 4 chars)\n    const formatHex = (str) => {\n        if (!str || str.includes(\' \')) return str;\n        return str.replace(/(.{4})/g, \'$1 \').trim();\n    };\n\n    content.innerHTML = '
     <div style = "margin-bottom: 15px;" >
             <div style="font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 600;">Message Type</div>
             <div style="font-size: 14px; color: #fff; font-weight: bold;">${point.message}</div>
@@ -5768,1178 +3689,23 @@ function showSignalingPayload(point) {
             <div style="font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 600; margin-bottom:5px;">Raw NMF Line</div>
             <code style="display:block; background:#000; padding:8px; border-radius:4px; font-size:10px; color:#aaa; overflow-x:auto; white-space:nowrap;">${point.details}</code>
         </div>
-    `;
-
-    modal.style.display = 'block';
-}
-window.showSignalingPayload = showSignalingPayload;
-
-// ---------------------------------------------------------
-// ---------------------------------------------------------
-// DOCKING SYSTEM
-// ---------------------------------------------------------
-let isChartDocked = false;
-let isSignalingDocked = false;
-window.isGridDocked = false; // Exposed global
-
-const bottomPanel = document.getElementById('bottomPanel');
-const bottomContent = document.getElementById('bottomContent');
-const bottomResizer = document.getElementById('bottomResizer');
-const dockedChart = document.getElementById('dockedChart');
-const dockedSignaling = document.getElementById('dockedSignaling');
-const dockedGrid = document.getElementById('dockedGrid');
-
-// Resizer Logic
-let isResizingBottom = false;
-
-bottomResizer.addEventListener('mousedown', (e) => {
-    isResizingBottom = true;
-    document.body.style.cursor = 'ns-resize';
-    e.preventDefault();
-});
-
-document.addEventListener('mousemove', (e) => {
-    if (!isResizingBottom) return;
-    const containerHeight = document.getElementById('center-pane').offsetHeight;
-    const newHeight = containerHeight - (e.clientY - document.getElementById('center-pane').getBoundingClientRect().top);
-
-    // Min/Max constraints
-    if (newHeight > 50 && newHeight < containerHeight - 50) {
-        bottomPanel.style.height = newHeight + 'px';
-    }
-});
-
-document.addEventListener('mouseup', () => {
-    if (isResizingBottom) {
-        isResizingBottom = false;
-        document.body.style.cursor = 'default';
-        // Trigger Resize for Chart if needed
-        if (window.currentChartInstance) window.currentChartInstance.resize();
-    }
-});
-
-// Update Layout Visibility
-function updateDockedLayout() {
-    const bottomPanel = document.getElementById('bottomPanel');
-    const dockedChart = document.getElementById('dockedChart');
-    const dockedSignaling = document.getElementById('dockedSignaling');
-    const dockedGrid = document.getElementById('dockedGrid');
-
-    if (!bottomPanel || !dockedChart || !dockedSignaling || !dockedGrid) {
-        console.warn('Docking elements missing, skipping layout update.');
-        return;
-    }
-
-    const anyDocked = isChartDocked || isSignalingDocked || window.isGridDocked;
-
-    if (anyDocked) {
-        bottomPanel.style.display = 'flex';
-        // Force flex basis to 0 0 300px to prevent #map from squashing it
-        bottomPanel.style.flex = '0 0 300px';
-        bottomPanel.style.height = '300px';
-        bottomPanel.style.minHeight = '100px'; // Prevent full collapse
-    } else {
-        bottomPanel.style.display = 'none';
-    }
-
-    dockedChart.style.display = isChartDocked ? 'flex' : 'none';
-    dockedSignaling.style.display = isSignalingDocked ? 'flex' : 'none';
-
-    // Explicitly handle Grid Display
-    if (window.isGridDocked) {
-        dockedGrid.style.display = 'flex';
-        dockedGrid.style.flexDirection = 'column'; // Ensure column layout
-    } else {
-        dockedGrid.style.display = 'none';
-    }
-
-    // Count active items
-    const activeItems = [isChartDocked, isSignalingDocked, window.isGridDocked].filter(Boolean).length;
-
-    if (activeItems > 0) {
-        const width = 100 / activeItems; // e.g. 50% or 33.3%
-        // Apply styles
-        [dockedChart, dockedSignaling, dockedGrid].forEach(el => {
-            // Ensure flex basis is reasonable
-            el.style.flex = '1 1 auto';
-            el.style.width = `${width} % `;
-            el.style.borderRight = '1px solid #444';
-            el.style.height = '100%'; // Full height of bottomPanel
-        });
-        // Remove last border
-        if (window.isGridDocked) dockedGrid.style.borderRight = 'none';
-        else if (isSignalingDocked) dockedSignaling.style.borderRight = 'none';
-        else dockedChart.style.borderRight = 'none';
-    }
-
-    // Trigger Chart Resize
-    if (isChartDocked && window.currentChartInstance) {
-        setTimeout(() => window.currentChartInstance.resize(), 50);
-    }
-}
-
-// Docking Actions
-window.dockChart = () => {
-    isChartDocked = true;
-
-    // Close Floating Modal if open
-    const modal = document.getElementById('chartModal');
-    if (modal) modal.remove();
-
-    updateDockedLayout();
-
-    // Re-open Chart in Docked Mode
-    if (window.currentChartLogId) {
-        // Ensure ID type match (string handling)
-        const log = loadedLogs.find(l => l.id.toString() === window.currentChartLogId.toString());
-
-        if (log && window.currentChartParam) {
-            openChartModal(log, window.currentChartParam);
-        } else {
-            console.error('Docking failed: Log or Param not valid', { log, param: window.currentChartParam });
-        }
-    }
-};
-
-window.undockChart = () => {
-    isChartDocked = false;
-    dockedChart.innerHTML = ''; // Clear docked
-    updateDockedLayout();
-
-    // Re-open as Modal
-    if (window.currentChartLogId && window.currentChartParam) {
-        const log = loadedLogs.find(l => l.id === window.currentChartLogId);
-        if (log) openChartModal(log, window.currentChartParam);
-    }
-};
-
-// ---------------------------------------------------------
-// DOCKING SYSTEM - SIGNALING EXTENSION
-// ---------------------------------------------------------
-
-// Inject Dock Button into Signaling Modal Header if not present
-function ensureSignalingDockButton() {
-    // Use a more specific selector or retry mechanism if needed, but for now standard check
-    const header = document.querySelector('#signalingModal .modal-header');
-    if (header && !header.querySelector('.dock-btn')) {
-        const dockBtn = document.createElement('button');
-        dockBtn.className = 'dock-btn';
-        dockBtn.textContent = 'Dock';
-        // Explicitly set onclick attribute to ensure it persists and isn't lost
-        dockBtn.setAttribute('onclick', "alert('Docking...'); window.dockSignaling();");
-        dockBtn.style.cssText = 'background:#3b82f6; color:white; border:none; padding:4px 10px; cursor:pointer; font-size:11px; margin-left: auto; margin-right: 15px; pointer-events: auto; z-index: 9999; position: relative;';
-
-        // Insert before the close button
-        const closeBtn = header.querySelector('.close');
-        header.insertBefore(dockBtn, closeBtn);
-    }
-}
-// Call it once
-ensureSignalingDockButton();
-
-window.dockSignaling = () => {
-    if (isSignalingDocked) return;
-    isSignalingDocked = true;
-
-    // Move Content
-    const modalContent = document.querySelector('#signalingModal .modal-content');
-    if (!modalContent) {
-        console.error('Signaling modal content not found');
-        return;
-    }
-    const header = modalContent.querySelector('.modal-header');
-    const body = modalContent.querySelector('.modal-body');
-
-    // Verify elements exist before moving
-    if (header && body) {
-        dockedSignaling.appendChild(header);
-        dockedSignaling.appendChild(body);
-
-        // Modify Header for Docked State
-        header.style.borderBottom = '1px solid #444';
-
-        // Fix: Body needs to stretch in flex container
-        body.style.flex = '1';
-        body.style.overflowY = 'auto'; // Ensure scrollable
-
-        // Change Dock Button to Undock
-        const dockBtn = header.querySelector('.dock-btn');
-        if (dockBtn) {
-            dockBtn.textContent = 'Undock';
-            dockBtn.onclick = window.undockSignaling;
-            dockBtn.style.background = '#555';
-        }
-
-        // Hide Close Button
-        const closeBtn = header.querySelector('.close');
-        if (closeBtn) closeBtn.style.display = 'none';
-
-        // Hide Modal Wrapper
-        document.getElementById('signalingModal').style.display = 'none';
-
-        updateDockedLayout();
-    } else {
-        console.error('Signaling modal parts missing', { header, body });
-        isSignalingDocked = false; // Revert state if failed
-    }
-};
-
-window.undockSignaling = () => {
-    if (!isSignalingDocked) return;
-    isSignalingDocked = false;
-
-    const header = dockedSignaling.querySelector('.modal-header');
-    const body = dockedSignaling.querySelector('.modal-body');
-    const modalContent = document.querySelector('#signalingModal .modal-content');
-
-    if (header && body) {
-        modalContent.appendChild(header);
-        modalContent.appendChild(body);
-
-        // Restore Header
-        // Change Undock Button to Dock
-        const dockBtn = header.querySelector('.dock-btn');
-        if (dockBtn) {
-            dockBtn.textContent = 'Dock';
-            dockBtn.onclick = window.dockSignaling;
-            dockBtn.style.background = '#3b82f6';
-        }
-
-        // Show Close Button
-        const closeBtn = header.querySelector('.close');
-        if (closeBtn) closeBtn.style.display = 'block';
-    }
-
-    dockedSignaling.innerHTML = ''; // Should be empty anyway
-    updateDockedLayout();
-
-    // Show Modal
-    if (currentSignalingLogId) {
-        document.getElementById('signalingModal').style.display = 'block';
-    }
-};
-
-// Redefine showSignalingModal to handle visibility only (rendering is same ID based)
-window.showSignalingModal = (logId) => {
-    console.log('Opening Signaling Modal for Log ID:', logId);
-    const log = loadedLogs.find(l => l.id.toString() === logId.toString());
-
-    if (!log) {
-        console.error('Log not found for ID:', logId);
-        return;
-    }
-
-    currentSignalingLogId = log.id;
-    renderSignalingTable();
-
-    if (isSignalingDocked) {
-        // Ensure docked view is visible
-        updateDockedLayout();
-    } else {
-        // Show modal
-        document.getElementById('signalingModal').style.display = 'block';
-        ensureSignalingDockButton();
-    }
-};
-
-// Initial call to update layout state
-updateDockedLayout();
-
-// Global Function to Update Sidebar List
-const updateLogsList = function () {
-    const container = document.getElementById('logsList');
-    if (!container) return; // Safety check
-    container.innerHTML = '';
-
-    loadedLogs.forEach(log => {
-        // Exclude SmartCare layers (Excel/SHP) which are in the right sidebar
-        if (log.type === 'excel' || log.type === 'shp') return;
-
-        const item = document.createElement('div');
-        // REMOVED overflow:hidden to prevent clipping issues. FORCED display:block to override any cached flex rules.
-        item.style.cssText = 'background:#252525; margin-bottom:5px; border-radius:4px; border:1px solid #333; min-height: 50px; display: block !important;';
-
-        // Header
-        const header = document.createElement('div');
-        header.className = 'log-header';
-        header.style.cssText = 'padding:8px 10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:#2d2d2d; border-bottom:1px solid #333;';
-        header.innerHTML = `
+    ';\n\n    modal.style.display = \'block\';\n}\nwindow.showSignalingPayload = showSignalingPayload;\n\n// ---------------------------------------------------------\n// ---------------------------------------------------------\n// DOCKING SYSTEM\n// ---------------------------------------------------------\nlet isChartDocked = false;\nlet isSignalingDocked = false;\nwindow.isGridDocked = false; // Exposed global\n\nconst bottomPanel = document.getElementById(\'bottomPanel\');\nconst bottomContent = document.getElementById(\'bottomContent\');\nconst bottomResizer = document.getElementById(\'bottomResizer\');\nconst dockedChart = document.getElementById(\'dockedChart\');\nconst dockedSignaling = document.getElementById(\'dockedSignaling\');\nconst dockedGrid = document.getElementById(\'dockedGrid\');\n\n// Resizer Logic\nlet isResizingBottom = false;\n\nbottomResizer.addEventListener(\'mousedown\', (e) => {\n    isResizingBottom = true;\n    document.body.style.cursor = \'ns-resize\';\n    e.preventDefault();\n});\n\ndocument.addEventListener(\'mousemove\', (e) => {\n    if (!isResizingBottom) return;\n    const containerHeight = document.getElementById(\'center-pane\').offsetHeight;\n    const newHeight = containerHeight - (e.clientY - document.getElementById(\'center-pane\').getBoundingClientRect().top);\n\n    // Min/Max constraints\n    if (newHeight > 50 && newHeight < containerHeight - 50) {\n        bottomPanel.style.height = newHeight + \'px\';\n    }\n});\n\ndocument.addEventListener(\'mouseup\', () => {\n    if (isResizingBottom) {\n        isResizingBottom = false;\n        document.body.style.cursor = \'default\';\n        // Trigger Resize for Chart if needed\n        if (window.currentChartInstance) window.currentChartInstance.resize();\n    }\n});\n\n// Update Layout Visibility\nfunction updateDockedLayout() {\n    const bottomPanel = document.getElementById(\'bottomPanel\');\n    const dockedChart = document.getElementById(\'dockedChart\');\n    const dockedSignaling = document.getElementById(\'dockedSignaling\');\n    const dockedGrid = document.getElementById(\'dockedGrid\');\n\n    if (!bottomPanel || !dockedChart || !dockedSignaling || !dockedGrid) {\n        console.warn(\'Docking elements missing, skipping layout update.\');\n        return;\n    }\n\n    const anyDocked = isChartDocked || isSignalingDocked || window.isGridDocked;\n\n    if (anyDocked) {\n        bottomPanel.style.display = \'flex\';\n        // Force flex basis to 0 0 300px to prevent #map from squashing it\n        bottomPanel.style.flex = \'0 0 300px\';\n        bottomPanel.style.height = \'300px\';\n        bottomPanel.style.minHeight = \'100px\'; // Prevent full collapse\n    } else {\n        bottomPanel.style.display = \'none\';\n    }\n\n    dockedChart.style.display = isChartDocked ? \'flex\' : \'none\';\n    dockedSignaling.style.display = isSignalingDocked ? \'flex\' : \'none\';\n\n    // Explicitly handle Grid Display\n    if (window.isGridDocked) {\n        dockedGrid.style.display = \'flex\';\n        dockedGrid.style.flexDirection = \'column\'; // Ensure column layout\n    } else {\n        dockedGrid.style.display = \'none\';\n    }\n\n    // Count active items\n    const activeItems = [isChartDocked, isSignalingDocked, window.isGridDocked].filter(Boolean).length;\n\n    if (activeItems > 0) {\n        const width = 100 / activeItems; // e.g. 50% or 33.3%\n        // Apply styles\n        [dockedChart, dockedSignaling, dockedGrid].forEach(el => {\n            // Ensure flex basis is reasonable\n            el.style.flex = \'1 1 auto\';\n            el.style.width = '${width} % ';\n            el.style.borderRight = \'1px solid #444\';\n            el.style.height = \'100%\'; // Full height of bottomPanel\n        });\n        // Remove last border\n        if (window.isGridDocked) dockedGrid.style.borderRight = \'none\';\n        else if (isSignalingDocked) dockedSignaling.style.borderRight = \'none\';\n        else dockedChart.style.borderRight = \'none\';\n    }\n\n    // Trigger Chart Resize\n    if (isChartDocked && window.currentChartInstance) {\n        setTimeout(() => window.currentChartInstance.resize(), 50);\n    }\n}\n\n// Docking Actions\nwindow.dockChart = () => {\n    isChartDocked = true;\n\n    // Close Floating Modal if open\n    const modal = document.getElementById(\'chartModal\');\n    if (modal) modal.remove();\n\n    updateDockedLayout();\n\n    // Re-open Chart in Docked Mode\n    if (window.currentChartLogId) {\n        // Ensure ID type match (string handling)\n        const log = loadedLogs.find(l => l.id.toString() === window.currentChartLogId.toString());\n\n        if (log && window.currentChartParam) {\n            openChartModal(log, window.currentChartParam);\n        } else {\n            console.error(\'Docking failed: Log or Param not valid\', { log, param: window.currentChartParam });\n        }\n    }\n};\n\nwindow.undockChart = () => {\n    isChartDocked = false;\n    dockedChart.innerHTML = \'\'; // Clear docked\n    updateDockedLayout();\n\n    // Re-open as Modal\n    if (window.currentChartLogId && window.currentChartParam) {\n        const log = loadedLogs.find(l => l.id === window.currentChartLogId);\n        if (log) openChartModal(log, window.currentChartParam);\n    }\n};\n\n// ---------------------------------------------------------\n// DOCKING SYSTEM - SIGNALING EXTENSION\n// ---------------------------------------------------------\n\n// Inject Dock Button into Signaling Modal Header if not present\nfunction ensureSignalingDockButton() {\n    // Use a more specific selector or retry mechanism if needed, but for now standard check\n    const header = document.querySelector(\'#signalingModal .modal-header\');\n    if (header && !header.querySelector(\'.dock-btn\')) {\n        const dockBtn = document.createElement(\'button\');\n        dockBtn.className = \'dock-btn\';\n        dockBtn.textContent = \'Dock\';\n        // Explicitly set onclick attribute to ensure it persists and isn\'t lost\n        dockBtn.setAttribute(\'onclick\', "alert(\'Docking...\'); window.dockSignaling();");\n        dockBtn.style.cssText = \'background:#3b82f6; color:white; border:none; padding:4px 10px; cursor:pointer; font-size:11px; margin-left: auto; margin-right: 15px; pointer-events: auto; z-index: 9999; position: relative;\';\n\n        // Insert before the close button\n        const closeBtn = header.querySelector(\'.close\');\n        header.insertBefore(dockBtn, closeBtn);\n    }\n}\n// Call it once\nensureSignalingDockButton();\n\nwindow.dockSignaling = () => {\n    if (isSignalingDocked) return;\n    isSignalingDocked = true;\n\n    // Move Content\n    const modalContent = document.querySelector(\'#signalingModal .modal-content\');\n    if (!modalContent) {\n        console.error(\'Signaling modal content not found\');\n        return;\n    }\n    const header = modalContent.querySelector(\'.modal-header\');\n    const body = modalContent.querySelector(\'.modal-body\');\n\n    // Verify elements exist before moving\n    if (header && body) {\n        dockedSignaling.appendChild(header);\n        dockedSignaling.appendChild(body);\n\n        // Modify Header for Docked State\n        header.style.borderBottom = \'1px solid #444\';\n\n        // Fix: Body needs to stretch in flex container\n        body.style.flex = \'1\';\n        body.style.overflowY = \'auto\'; // Ensure scrollable\n\n        // Change Dock Button to Undock\n        const dockBtn = header.querySelector(\'.dock-btn\');\n        if (dockBtn) {\n            dockBtn.textContent = \'Undock\';\n            dockBtn.onclick = window.undockSignaling;\n            dockBtn.style.background = \'#555\';\n        }\n\n        // Hide Close Button\n        const closeBtn = header.querySelector(\'.close\');\n        if (closeBtn) closeBtn.style.display = \'none\';\n\n        // Hide Modal Wrapper\n        document.getElementById(\'signalingModal\').style.display = \'none\';\n\n        updateDockedLayout();\n    } else {\n        console.error(\'Signaling modal parts missing\', { header, body });\n        isSignalingDocked = false; // Revert state if failed\n    }\n};\n\nwindow.undockSignaling = () => {\n    if (!isSignalingDocked) return;\n    isSignalingDocked = false;\n\n    const header = dockedSignaling.querySelector(\'.modal-header\');\n    const body = dockedSignaling.querySelector(\'.modal-body\');\n    const modalContent = document.querySelector(\'#signalingModal .modal-content\');\n\n    if (header && body) {\n        modalContent.appendChild(header);\n        modalContent.appendChild(body);\n\n        // Restore Header\n        // Change Undock Button to Dock\n        const dockBtn = header.querySelector(\'.dock-btn\');\n        if (dockBtn) {\n            dockBtn.textContent = \'Dock\';\n            dockBtn.onclick = window.dockSignaling;\n            dockBtn.style.background = \'#3b82f6\';\n        }\n\n        // Show Close Button\n        const closeBtn = header.querySelector(\'.close\');\n        if (closeBtn) closeBtn.style.display = \'block\';\n    }\n\n    dockedSignaling.innerHTML = \'\'; // Should be empty anyway\n    updateDockedLayout();\n\n    // Show Modal\n    if (currentSignalingLogId) {\n        document.getElementById(\'signalingModal\').style.display = \'block\';\n    }\n};\n\n// Redefine showSignalingModal to handle visibility only (rendering is same ID based)\nwindow.showSignalingModal = (logId) => {\n    console.log(\'Opening Signaling Modal for Log ID:\', logId);\n    const log = loadedLogs.find(l => l.id.toString() === logId.toString());\n\n    if (!log) {\n        console.error(\'Log not found for ID:\', logId);\n        return;\n    }\n\n    currentSignalingLogId = log.id;\n    renderSignalingTable();\n\n    if (isSignalingDocked) {\n        // Ensure docked view is visible\n        updateDockedLayout();\n    } else {\n        // Show modal\n        document.getElementById(\'signalingModal\').style.display = \'block\';\n        ensureSignalingDockButton();\n    }\n};\n\n// Initial call to update layout state\nupdateDockedLayout();\n\n// Global Function to Update Sidebar List\nconst updateLogsList = function () {\n    const container = document.getElementById(\'logsList\');\n    if (!container) return; // Safety check\n    container.innerHTML = \'\';\n\n    loadedLogs.forEach(log => {\n        // Exclude SmartCare layers (Excel/SHP) which are in the right sidebar\n        if (log.type === \'excel\' || log.type === \'shp\') return;\n\n        const item = document.createElement(\'div\');\n        // REMOVED overflow:hidden to prevent clipping issues. FORCED display:block to override any cached flex rules.\n        item.style.cssText = \'background:#252525; margin-bottom:5px; border-radius:4px; border:1px solid #333; min-height: 50px; display: block !important;\';\n\n        // Header\n        const header = document.createElement(\'div\');\n        header.className = \'log-header\';\n        header.style.cssText = \'padding:8px 10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:#2d2d2d; border-bottom:1px solid #333;\';\n        header.innerHTML = '
 <span style="font-weight:bold; color:#ddd; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;">${log.name}</span>
 <div style="display:flex; gap:5px;">
     <!-- Export Button -->
     <button onclick="window.exportOptimFile('${log.id}'); event.stopPropagation();" title="Export Optim CSV" style="background:#059669; color:white; border:none; width:20px; height:20px; border-radius:3px; cursor:pointer; display:flex; align-items:center; justify-content:center;">⬇</button>
     <button onclick="event.stopPropagation(); window.removeLog('${log.id}')" style="background:#ef4444; color:white; border:none; width:20px; height:20px; border-radius:3px; cursor:pointer; display:flex; align-items:center; justify-content:center;">×</button>
 </div>
-        `;
-
-        // Toggle Logic
-        header.onclick = () => {
-            const body = item.querySelector('.log-body');
-            // Check computed style or inline style
-            const isHidden = body.style.display === 'none';
-            body.style.display = isHidden ? 'block' : 'none';
-        };
-
-        // Body (Default: Visible)
-        const body = document.createElement('div');
-        body.className = 'log-body';
-        body.style.cssText = 'padding:10px; display:block;';
-
-        // Stats
-        const count = log.points.length;
-        const stats = document.createElement('div');
-        stats.style.cssText = 'font-size:10px; color:#888; margin-bottom:8px;';
-        stats.innerHTML = `
+        ';\n\n        // Toggle Logic\n        header.onclick = () => {\n            const body = item.querySelector(\'.log-body\');\n            // Check computed style or inline style\n            const isHidden = body.style.display === \'none\';\n            body.style.display = isHidden ? \'block\' : \'none\';\n        };\n\n        // Body (Default: Visible)\n        const body = document.createElement(\'div\');\n        body.className = \'log-body\';\n        body.style.cssText = \'padding:10px; display:block;\';\n\n        // Stats\n        const count = log.points.length;\n        const stats = document.createElement(\'div\');\n        stats.style.cssText = \'font-size:10px; color:#888; margin-bottom:8px;\';\n        stats.innerHTML = '
     <span style="background:#3b82f6; color:white; padding:2px 4px; border-radius:2px;">${log.tech}</span>
 <span style="margin-left:5px;">${count} pts</span>
-        `;
-
-        // Actions
-        const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
-
-        const addAction = (label, param) => {
-            const btn = document.createElement('div');
-            btn.textContent = label;
-            btn.className = 'param-item'; // Add class for styling if needed
-            btn.draggable = true; // Make Draggable
-            btn.style.cssText = 'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;';
-
-            btn.onmouseover = () => btn.style.background = '#444';
-            btn.onmouseout = () => btn.style.background = '#333';
-
-            // Drag Start Handler
-            btn.ondragstart = (e) => {
-                e.dataTransfer.setData('application/json', JSON.stringify({
-                    logId: log.id,
-                    param: param,
-                    label: label
-                }));
-                e.dataTransfer.effectAllowed = 'copy';
-            };
-
-            // Left Click Handler - Opens Context Menu
-            btn.onclick = (e) => {
-                window.showMetricOptions(e, log.id, param, 'regular');
-            };
-            return btn;
-        };
-
-        // Helper for Group Headers
-        const addHeader = (text) => {
-            const d = document.createElement('div');
-            d.textContent = text;
-            d.style.cssText = 'font-size:10px; color:#aaa; margin-top:8px; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;';
-            return d;
-        };
-
-        // NEW: DYNAMIC METRICS VS FIXED METRICS
-        // If customMetrics exist, use them. Else use Fixed NMF list.
-
-        if (log.customMetrics && log.customMetrics.length > 0) {
-            actions.appendChild(addHeader('Detected Metrics'));
-
-            log.customMetrics.forEach(metric => {
-                let label = metric;
-                if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
-                if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
-                actions.appendChild(addAction(label, metric));
-            });
-
-            // Also add "Time" and "GPS" if they exist in basic points but maybe not in customMetrics list?
-            // The parser excludes Time/Lat/Lon from customMetrics.
-            // So we can re-add them if we want buttons for them (usually just Time/Speed).
-            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-            actions.appendChild(addAction('Time', 'time'));
-
-        } else {
-            // FALLBACK: OLD STATIC NMF METRICS
-
-            // GROUP: Serving Cell
-            actions.appendChild(addHeader('Serving Cell'));
-            actions.appendChild(addAction('Serving RSCP/Level', 'rscp_not_combined'));
-            actions.appendChild(addAction('Serving EcNo', 'ecno'));
-            actions.appendChild(addAction('Serving SC/SC', 'sc'));
-            actions.appendChild(addAction('Serving RNC', 'rnc'));
-            actions.appendChild(addAction('Active Set', 'active_set'));
-            actions.appendChild(addAction('Serving Freq', 'freq'));
-            actions.appendChild(addAction('Serving Band', 'band'));
-            actions.appendChild(addAction('LAC', 'lac'));
-            actions.appendChild(addAction('Cell ID', 'cellId'));
-            actions.appendChild(addAction('Serving Cell Name', 'serving_cell_name'));
-
-            // GROUP: Active Set (Individual)
-            actions.appendChild(addHeader('Active Set Members'));
-            actions.appendChild(addAction('A1 RSCP', 'active_set_A1_RSCP'));
-            actions.appendChild(addAction('A1 SC', 'active_set_A1_SC'));
-            actions.appendChild(addAction('A2 RSCP', 'active_set_A2_RSCP'));
-            actions.appendChild(addAction('A2 SC', 'active_set_A2_SC'));
-            actions.appendChild(addAction('A3 RSCP', 'active_set_A3_RSCP'));
-            actions.appendChild(addAction('A3 SC', 'active_set_A3_SC'));
-
-            // GROUP: Neighbors
-            actions.appendChild(addHeader('Neighbors'));
-            // Neighbors Loop (N1 - N8)
-            for (let i = 1; i <= 8; i++) {
-                actions.appendChild(addAction(`N${i} RSCP`, `n${i}_rscp`));
-                actions.appendChild(addAction(`N${i} EcNo`, `n${i}_ecno`));
-                actions.appendChild(addAction(`N${i} SC`, `n${i}_sc`));
-            }
-
-            // OUTSIDE GROUPS: Composite & General
-            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-
-            actions.appendChild(addAction('Composite RSCP & Neighbors', 'rscp_not_combined'));
-
-            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-
-            // GPS & Others
-            actions.appendChild(addAction('GPS Speed', 'speed'));
-            actions.appendChild(addAction('GPS Altitude', 'alt'));
-            actions.appendChild(addAction('Time', 'time'));
-        }
-
-        // Resurrected Signaling Modal Button
-        const sigBtn = document.createElement('div');
-        sigBtn.className = 'metric-item';
-        sigBtn.style.padding = '4px 8px';
-        sigBtn.style.cursor = 'pointer';
-        sigBtn.style.margin = '2px 0';
-        sigBtn.style.fontSize = '11px';
-        sigBtn.style.color = '#ccc';
-        sigBtn.style.borderRadius = '4px';
-        sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)'; // Purple tint
-        sigBtn.style.border = '1px solid rgba(168, 85, 247, 0.2)';
-        sigBtn.textContent = 'Show Signaling';
-        sigBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (window.showSignalingModal) {
-                window.showSignalingModal(log.id);
-            } else {
-                alert('Signaling Modal function missing!');
-            }
-        };
-        sigBtn.onmouseover = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.2)';
-        sigBtn.onmouseout = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
-        actions.appendChild(sigBtn);
-
-        // Add components
-        body.appendChild(stats);
-        body.appendChild(actions);
-        item.appendChild(header);
-        item.appendChild(body);
-        container.appendChild(item);
-    });
-};
-
-// DEBUG EXPORT FOR TESTING
-window.loadedLogs = loadedLogs;
-window.updateLogsList = updateLogsList;
-window.openChartModal = openChartModal;
-window.showSignalingModal = showSignalingModal;
-window.dockChart = dockChart;
-window.dockSignaling = dockSignaling;
-window.undockChart = undockChart;
-window.undockSignaling = undockSignaling;
-
-// ----------------------------------------------------
-// EXPORT OPTIM FILE FEATURE
-// ----------------------------------------------------
-window.exportOptimFile = (logId) => {
-    const log = loadedLogs.find(l => l.id === logId);
-    if (!log) return;
-
-    const headers = [
-        'Date', 'Time', 'Latitude', 'Longitude',
-        'Serving Band', 'Serving RSCP', 'Serving EcNo', 'Serving SC', 'Serving LAC', 'Serving Freq',
-        'N1 Band', 'N1 RSCP', 'N1 EcNo', 'N1 SC', 'N1 LAC', 'N1 Freq',
-        'N2 Band', 'N2 RSCP', 'N2 EcNo', 'N2 SC', 'N2 LAC', 'N2 Freq',
-        'N3 Band', 'N3 RSCP', 'N3 EcNo', 'N3 SC', 'N3 LAC', 'N3 Freq'
-    ];
-
-    // Helper to guess band from freq (Simplified logic matching parser)
-    const getBand = (f) => {
-        if (!f) return '';
-        f = parseFloat(f);
-        if (f >= 10562 && f <= 10838) return 'B1 (2100)';
-        if (f >= 2937 && f <= 3088) return 'B8 (900)';
-        if (f > 10000) return 'High Band';
-        if (f < 4000) return 'Low Band';
-        return 'Unknown';
-    };
-
-    const rows = [];
-    rows.push(headers.join(','));
-
-    log.points.forEach(p => {
-        if (!p.parsed) return;
-
-        const s = p.parsed.serving;
-        const n = p.parsed.neighbors || [];
-
-        const gn = (idx, field) => {
-            if (idx >= n.length) return '';
-            const nb = n[idx];
-            if (field === 'band') return getBand(nb.freq);
-            if (field === 'lac') return s.lac;
-            return nb[field] !== undefined ? nb[field] : '';
-        };
-
-        const row = [
-            new Date().toISOString().split('T')[0],
-            p.time,
-            p.lat,
-            p.lng,
-            getBand(s.freq),
-            s.level,
-            s.ecno !== null ? s.ecno : '',
-            s.sc,
-            s.lac,
-            s.freq,
-            gn(0, 'band'), gn(0, 'rscp'), gn(0, 'ecno'), gn(0, 'pci'), gn(0, 'lac'), gn(0, 'freq'),
-            gn(1, 'band'), gn(1, 'rscp'), gn(1, 'ecno'), gn(1, 'pci'), gn(1, 'lac'), gn(1, 'freq'),
-            gn(2, 'band'), gn(2, 'rscp'), gn(2, 'ecno'), gn(2, 'pci'), gn(2, 'lac'), gn(2, 'freq')
-        ];
-        rows.push(row.join(','));
-    });
-
-    const csvContent = "data:text/csv;charset=utf-8," + rows.join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${log.name}_optim_export.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-};
-
-
-
-// ----------------------------------------------------
-// CONTEXT MENU LOGIC (Re-added)
-// ----------------------------------------------------
-window.currentContextLogId = null;
-window.currentContextParam = null;
-
-
-// DRAG AND DROP MAP HANDLERS
-window.allowDrop = (ev) => {
-    ev.preventDefault();
-};
-
-window.drop = (ev) => {
-    ev.preventDefault();
-    try {
-        const data = JSON.parse(ev.dataTransfer.getData("application/json"));
-        if (!data || !data.logId || !data.param) return;
-
-        console.log("Dropped Metric:", data);
-
-        const log = loadedLogs.find(l => l.id.toString() === data.logId.toString());
-        if (!log) return;
-
-        // 1. Determine Theme based on Metric
-        const p = data.param.toLowerCase();
-        const l = data.label.toLowerCase();
-        const themeSelect = document.getElementById('themeSelect');
-        let newTheme = 'level'; // Default
-
-        // Heuristic for Quality vs Coverage vs CellID
-        if (p === 'cellid' || p === 'cid' || p === 'cell_id') {
-            // Temporarily add option if missing or just hijack the value
-            let opt = Array.from(themeSelect.options).find(o => o.value === 'cellId');
-            if (!opt) {
-                opt = document.createElement('option');
-                opt.value = 'cellId';
-                opt.text = 'Cell ID';
-                themeSelect.add(opt);
-            }
-            newTheme = 'cellId';
-        } else if (p.includes('qual') || p.includes('ecno') || p.includes('sinr')) {
-            newTheme = 'quality';
-        }
-
-        // 2. Apply Theme if detected
-        if (newTheme && themeSelect) {
-            themeSelect.value = newTheme;
-            console.log(`[Drop] Switched theme to: ${newTheme}`);
-
-            // Trigger any change handlers if strictly needed, but we usually just call render
-            if (window.renderThresholdInputs) {
-                window.renderThresholdInputs();
-            }
-            // Force Legend Update
-            // Force Legend Update (REMOVED: let Async event handle it)
-            // if (window.updateLegend) {
-            //    window.updateLegend();
-            // }
-        }
-
-        // 3. Visualize
-        if (window.mapRenderer) {
-            log.currentParam = data.param; // SYNC: Update active metric for this log
-            window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);
-
-            // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
-            // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
-            // REMOVED: let Async event handle it to avoid "0 Cell IDs" flash
-            // setTimeout(() => {
-            //     if (window.updateLegend) window.updateLegend();
-            // }, 100);
-        } else {
-            console.error("[Drop] window.mapRenderer is undefined!");
-            alert("Internal Error: Map Renderer not initialized.");
-        }
-
-    } catch (e) {
-        console.error("Drop failed:", e);
-        alert("Drop failed: " + e.message);
-    }
-};
-
-// ----------------------------------------------------
-// USER POINT MANUAL ENTRY
-// ----------------------------------------------------
-const addPointBtn = document.getElementById('addPointBtn');
-const userPointModal = document.getElementById('userPointModal');
-const submitUserPoint = document.getElementById('submitUserPoint');
-
-if (addPointBtn && userPointModal) {
-    addPointBtn.onclick = () => {
-        userPointModal.style.display = 'block';
-
-        // Make Draggable
-        const upContent = userPointModal.querySelector('.modal-content');
-        const upHeader = userPointModal.querySelector('.modal-header');
-        if (typeof makeElementDraggable === 'function' && upContent && upHeader) {
-            makeElementDraggable(upHeader, upContent);
-        }
-
-        // Optional: Auto-fill from Search Input if it looks like coords
-        const searchInput = document.getElementById('searchInput');
-        if (searchInput && searchInput.value) {
-            const parts = searchInput.value.split(',');
-            if (parts.length === 2) {
-                const lat = parseFloat(parts[0].trim());
-                const lng = parseFloat(parts[1].trim());
-                if (!isNaN(lat) && !isNaN(lng)) {
-                    document.getElementById('upLat').value = lat;
-                    document.getElementById('upLng').value = lng;
-                }
-            }
-        }
-    };
-}
-
-if (submitUserPoint) {
-    submitUserPoint.onclick = () => {
-        const nameInput = document.getElementById('upName');
-        const latInput = document.getElementById('upLat');
-        const lngInput = document.getElementById('upLng');
-
-        const name = nameInput.value.trim() || 'User Point';
-        const lat = parseFloat(latInput.value);
-        const lng = parseFloat(lngInput.value);
-
-        if (isNaN(lat) || isNaN(lng)) {
-            alert('Invalid Coordinates. Please enter valid numbers.');
-            return;
-        }
-
-        if (!window.map) {
-            alert('Map not initialized.');
-            return;
-        }
-
-        // Add Marker via Leaflet
-        // Using a distinct icon color or style could be nice, but default blue is fine for now.
-        const marker = L.marker([lat, lng]).addTo(window.map);
-
-        // Assign a unique ID to the marker for removal
-        const markerId = 'user_point_' + Date.now();
-        marker._pointId = markerId;
-
-        // Store marker in a global map if not exists
-        if (!window.userMarkers) window.userMarkers = {};
-        window.userMarkers[markerId] = marker;
-
-        // Define global remover if not exists
-        if (!window.removeUserPoint) {
-            window.removeUserPoint = (id) => {
-                const m = window.userMarkers[id];
-                if (m) {
-                    m.remove();
-                    delete window.userMarkers[id];
-                }
-            };
-        }
-
-        const popupContent = `
+        ';\n\n        // Actions\n        const actions = document.createElement(\'div\');\n        actions.style.cssText = \'display:flex; flex-direction:column; gap:4px;\';\n\n        const addAction = (label, param) => {\n            const btn = document.createElement(\'div\');\n            btn.textContent = label;\n            btn.className = \'param-item\'; // Add class for styling if needed\n            btn.draggable = true; // Make Draggable\n            btn.style.cssText = \'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;\';\n\n            btn.onmouseover = () => btn.style.background = \'#444\';\n            btn.onmouseout = () => btn.style.background = \'#333\';\n\n            // Drag Start Handler\n            btn.ondragstart = (e) => {\n                e.dataTransfer.setData(\'application/json\', JSON.stringify({\n                    logId: log.id,\n                    param: param,\n                    label: label\n                }));\n                e.dataTransfer.effectAllowed = \'copy\';\n            };\n\n            // Left Click Handler - Opens Context Menu\n            btn.onclick = (e) => {\n                window.showMetricOptions(e, log.id, param, \'regular\');\n            };\n            return btn;\n        };\n\n        // Helper for Group Headers\n        const addHeader = (text) => {\n            const d = document.createElement(\'div\');\n            d.textContent = text;\n            d.style.cssText = \'font-size:10px; color:#aaa; margin-top:8px; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;\';\n            return d;\n        };\n\n        // NEW: DYNAMIC METRICS VS FIXED METRICS\n        // If customMetrics exist, use them. Else use Fixed NMF list.\n\n        if (log.customMetrics && log.customMetrics.length > 0) {\n            actions.appendChild(addHeader(\'Detected Metrics\'));\n\n            log.customMetrics.forEach(metric => {\n                let label = metric;\n                if (metric === \'throughput_dl\') label = \'DL Throughput (Kbps)\';\n                if (metric === \'throughput_ul\') label = \'UL Throughput (Kbps)\';\n                actions.appendChild(addAction(label, metric));\n            });\n\n            // Also add "Time" and "GPS" if they exist in basic points but maybe not in customMetrics list?\n            // The parser excludes Time/Lat/Lon from customMetrics.\n            // So we can re-add them if we want buttons for them (usually just Time/Speed).\n            actions.appendChild(document.createElement(\'hr\')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";\n            actions.appendChild(addAction(\'Time\', \'time\'));\n\n        } else {\n            // FALLBACK: OLD STATIC NMF METRICS\n\n            // GROUP: Serving Cell\n            actions.appendChild(addHeader(\'Serving Cell\'));\n            actions.appendChild(addAction(\'Serving RSCP/Level\', \'rscp_not_combined\'));\n            actions.appendChild(addAction(\'Serving EcNo\', \'ecno\'));\n            actions.appendChild(addAction(\'Serving SC/SC\', \'sc\'));\n            actions.appendChild(addAction(\'Serving RNC\', \'rnc\'));\n            actions.appendChild(addAction(\'Active Set\', \'active_set\'));\n            actions.appendChild(addAction(\'Serving Freq\', \'freq\'));\n            actions.appendChild(addAction(\'Serving Band\', \'band\'));\n            actions.appendChild(addAction(\'LAC\', \'lac\'));\n            actions.appendChild(addAction(\'Cell ID\', \'cellId\'));\n            actions.appendChild(addAction(\'Serving Cell Name\', \'serving_cell_name\'));\n\n            // GROUP: Active Set (Individual)\n            actions.appendChild(addHeader(\'Active Set Members\'));\n            actions.appendChild(addAction(\'A1 RSCP\', \'active_set_A1_RSCP\'));\n            actions.appendChild(addAction(\'A1 SC\', \'active_set_A1_SC\'));\n            actions.appendChild(addAction(\'A2 RSCP\', \'active_set_A2_RSCP\'));\n            actions.appendChild(addAction(\'A2 SC\', \'active_set_A2_SC\'));\n            actions.appendChild(addAction(\'A3 RSCP\', \'active_set_A3_RSCP\'));\n            actions.appendChild(addAction(\'A3 SC\', \'active_set_A3_SC\'));\n\n            // GROUP: Neighbors\n            actions.appendChild(addHeader(\'Neighbors\'));\n            // Neighbors Loop (N1 - N8)\n            for (let i = 1; i <= 8; i++) {\n                actions.appendChild(addAction('N${i} RSCP', 'n${i}_rscp'));\n                actions.appendChild(addAction('N${i} EcNo', 'n${i}_ecno'));\n                actions.appendChild(addAction('N${i} SC', 'n${i}_sc'));\n            }\n\n            // OUTSIDE GROUPS: Composite & General\n            actions.appendChild(document.createElement(\'hr\')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";\n\n            actions.appendChild(addAction(\'Composite RSCP & Neighbors\', \'rscp_not_combined\'));\n\n            actions.appendChild(document.createElement(\'hr\')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";\n\n            // GPS & Others\n            actions.appendChild(addAction(\'GPS Speed\', \'speed\'));\n            actions.appendChild(addAction(\'GPS Altitude\', \'alt\'));\n            actions.appendChild(addAction(\'Time\', \'time\'));\n        }\n\n        // Resurrected Signaling Modal Button\n        const sigBtn = document.createElement(\'div\');\n        sigBtn.className = \'metric-item\';\n        sigBtn.style.padding = \'4px 8px\';\n        sigBtn.style.cursor = \'pointer\';\n        sigBtn.style.margin = \'2px 0\';\n        sigBtn.style.fontSize = \'11px\';\n        sigBtn.style.color = \'#ccc\';\n        sigBtn.style.borderRadius = \'4px\';\n        sigBtn.style.backgroundColor = \'rgba(168, 85, 247, 0.1)\'; // Purple tint\n        sigBtn.style.border = \'1px solid rgba(168, 85, 247, 0.2)\';\n        sigBtn.textContent = \'Show Signaling\';\n        sigBtn.onclick = (e) => {\n            e.preventDefault();\n            e.stopPropagation();\n            if (window.showSignalingModal) {\n                window.showSignalingModal(log.id);\n            } else {\n                alert(\'Signaling Modal function missing!\');\n            }\n        };\n        sigBtn.onmouseover = () => sigBtn.style.backgroundColor = \'rgba(168, 85, 247, 0.2)\';\n        sigBtn.onmouseout = () => sigBtn.style.backgroundColor = \'rgba(168, 85, 247, 0.1)\';\n        actions.appendChild(sigBtn);\n\n        // Add components\n        body.appendChild(stats);\n        body.appendChild(actions);\n        item.appendChild(header);\n        item.appendChild(body);\n        container.appendChild(item);\n    });\n};\n\n// DEBUG EXPORT FOR TESTING\nwindow.loadedLogs = loadedLogs;\nwindow.updateLogsList = updateLogsList;\nwindow.openChartModal = openChartModal;\nwindow.showSignalingModal = showSignalingModal;\nwindow.dockChart = dockChart;\nwindow.dockSignaling = dockSignaling;\nwindow.undockChart = undockChart;\nwindow.undockSignaling = undockSignaling;\n\n// ----------------------------------------------------\n// EXPORT OPTIM FILE FEATURE\n// ----------------------------------------------------\nwindow.exportOptimFile = (logId) => {\n    const log = loadedLogs.find(l => l.id === logId);\n    if (!log) return;\n\n    const headers = [\n        \'Date\', \'Time\', \'Latitude\', \'Longitude\',\n        \'Serving Band\', \'Serving RSCP\', \'Serving EcNo\', \'Serving SC\', \'Serving LAC\', \'Serving Freq\',\n        \'N1 Band\', \'N1 RSCP\', \'N1 EcNo\', \'N1 SC\', \'N1 LAC\', \'N1 Freq\',\n        \'N2 Band\', \'N2 RSCP\', \'N2 EcNo\', \'N2 SC\', \'N2 LAC\', \'N2 Freq\',\n        \'N3 Band\', \'N3 RSCP\', \'N3 EcNo\', \'N3 SC\', \'N3 LAC\', \'N3 Freq\'\n    ];\n\n    // Helper to guess band from freq (Simplified logic matching parser)\n    const getBand = (f) => {\n        if (!f) return \'\';\n        f = parseFloat(f);\n        if (f >= 10562 && f <= 10838) return \'B1 (2100)\';\n        if (f >= 2937 && f <= 3088) return \'B8 (900)\';\n        if (f > 10000) return \'High Band\';\n        if (f < 4000) return \'Low Band\';\n        return \'Unknown\';\n    };\n\n    const rows = [];\n    rows.push(headers.join(\',\'));\n\n    log.points.forEach(p => {\n        if (!p.parsed) return;\n\n        const s = p.parsed.serving;\n        const n = p.parsed.neighbors || [];\n\n        const gn = (idx, field) => {\n            if (idx >= n.length) return \'\';\n            const nb = n[idx];\n            if (field === \'band\') return getBand(nb.freq);\n            if (field === \'lac\') return s.lac;\n            return nb[field] !== undefined ? nb[field] : \'\';\n        };\n\n        const row = [\n            new Date().toISOString().split(\'T\')[0],\n            p.time,\n            p.lat,\n            p.lng,\n            getBand(s.freq),\n            s.level,\n            s.ecno !== null ? s.ecno : \'\',\n            s.sc,\n            s.lac,\n            s.freq,\n            gn(0, \'band\'), gn(0, \'rscp\'), gn(0, \'ecno\'), gn(0, \'pci\'), gn(0, \'lac\'), gn(0, \'freq\'),\n            gn(1, \'band\'), gn(1, \'rscp\'), gn(1, \'ecno\'), gn(1, \'pci\'), gn(1, \'lac\'), gn(1, \'freq\'),\n            gn(2, \'band\'), gn(2, \'rscp\'), gn(2, \'ecno\'), gn(2, \'pci\'), gn(2, \'lac\'), gn(2, \'freq\')\n        ];\n        rows.push(row.join(\',\'));\n    });\n\n    const csvContent = "data:text/csv;charset=utf-8," + rows.join("\n");\n    const encodedUri = encodeURI(csvContent);\n    const link = document.createElement("a");\n    link.setAttribute("href", encodedUri);\n    link.setAttribute("download", '${log.name}_optim_export.csv');\n    document.body.appendChild(link);\n    link.click();\n    document.body.removeChild(link);\n};\n\n\n\n// ----------------------------------------------------\n// CONTEXT MENU LOGIC (Re-added)\n// ----------------------------------------------------\nwindow.currentContextLogId = null;\nwindow.currentContextParam = null;\n\n\n// DRAG AND DROP MAP HANDLERS\nwindow.allowDrop = (ev) => {\n    ev.preventDefault();\n};\n\nwindow.drop = (ev) => {\n    ev.preventDefault();\n    try {\n        const data = JSON.parse(ev.dataTransfer.getData("application/json"));\n        if (!data || !data.logId || !data.param) return;\n\n        console.log("Dropped Metric:", data);\n\n        const log = loadedLogs.find(l => l.id.toString() === data.logId.toString());\n        if (!log) return;\n\n        // 1. Determine Theme based on Metric\n        const p = data.param.toLowerCase();\n        const l = data.label.toLowerCase();\n        const themeSelect = document.getElementById(\'themeSelect\');\n        let newTheme = \'level\'; // Default\n\n        // Heuristic for Quality vs Coverage vs CellID\n        if (p === \'cellid\' || p === \'cid\' || p === \'cell_id\') {\n            // Temporarily add option if missing or just hijack the value\n            let opt = Array.from(themeSelect.options).find(o => o.value === \'cellId\');\n            if (!opt) {\n                opt = document.createElement(\'option\');\n                opt.value = \'cellId\';\n                opt.text = \'Cell ID\';\n                themeSelect.add(opt);\n            }\n            newTheme = \'cellId\';\n        } else if (p.includes(\'qual\') || p.includes(\'ecno\') || p.includes(\'sinr\')) {\n            newTheme = \'quality\';\n        }\n\n        // 2. Apply Theme if detected\n        if (newTheme && themeSelect) {\n            themeSelect.value = newTheme;\n            console.log('[Drop] Switched theme to: ${newTheme}');\n\n            // Trigger any change handlers if strictly needed, but we usually just call render\n            if (window.renderThresholdInputs) {\n                window.renderThresholdInputs();\n            }\n            // Force Legend Update\n            // Force Legend Update (REMOVED: let Async event handle it)\n            // if (window.updateLegend) {\n            //    window.updateLegend();\n            // }\n        }\n\n        // 3. Visualize\n        if (window.mapRenderer) {\n            log.currentParam = data.param; // SYNC: Update active metric for this log\n            window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);\n\n            // Ensure Legend is updated AGAIN after metric update (metrics might be calc\'d inside renderer)\n            // Ensure Legend is updated AGAIN after metric update (metrics might be calc\'d inside renderer)\n            // REMOVED: let Async event handle it to avoid "0 Cell IDs" flash\n            // setTimeout(() => {\n            //     if (window.updateLegend) window.updateLegend();\n            // }, 100);\n        } else {\n            console.error("[Drop] window.mapRenderer is undefined!");\n            alert("Internal Error: Map Renderer not initialized.");\n        }\n\n    } catch (e) {\n        console.error("Drop failed:", e);\n        alert("Drop failed: " + e.message);\n    }\n};\n\n// ----------------------------------------------------\n// USER POINT MANUAL ENTRY\n// ----------------------------------------------------\nconst addPointBtn = document.getElementById(\'addPointBtn\');\nconst userPointModal = document.getElementById(\'userPointModal\');\nconst submitUserPoint = document.getElementById(\'submitUserPoint\');\n\nif (addPointBtn && userPointModal) {\n    addPointBtn.onclick = () => {\n        userPointModal.style.display = \'block\';\n\n        // Make Draggable\n        const upContent = userPointModal.querySelector(\'.modal-content\');\n        const upHeader = userPointModal.querySelector(\'.modal-header\');\n        if (typeof makeElementDraggable === \'function\' && upContent && upHeader) {\n            makeElementDraggable(upHeader, upContent);\n        }\n\n        // Optional: Auto-fill from Search Input if it looks like coords\n        const searchInput = document.getElementById(\'searchInput\');\n        if (searchInput && searchInput.value) {\n            const parts = searchInput.value.split(\',\');\n            if (parts.length === 2) {\n                const lat = parseFloat(parts[0].trim());\n                const lng = parseFloat(parts[1].trim());\n                if (!isNaN(lat) && !isNaN(lng)) {\n                    document.getElementById(\'upLat\').value = lat;\n                    document.getElementById(\'upLng\').value = lng;\n                }\n            }\n        }\n    };\n}\n\nif (submitUserPoint) {\n    submitUserPoint.onclick = () => {\n        const nameInput = document.getElementById(\'upName\');\n        const latInput = document.getElementById(\'upLat\');\n        const lngInput = document.getElementById(\'upLng\');\n\n        const name = nameInput.value.trim() || \'User Point\';\n        const lat = parseFloat(latInput.value);\n        const lng = parseFloat(lngInput.value);\n\n        if (isNaN(lat) || isNaN(lng)) {\n            alert(\'Invalid Coordinates. Please enter valid numbers.\');\n            return;\n        }\n\n        if (!window.map) {\n            alert(\'Map not initialized.\');\n            return;\n        }\n\n        // Add Marker via Leaflet\n        // Using a distinct icon color or style could be nice, but default blue is fine for now.\n        const marker = L.marker([lat, lng]).addTo(window.map);\n\n        // Assign a unique ID to the marker for removal\n        const markerId = \'user_point_\' + Date.now();\n        marker._pointId = markerId;\n\n        // Store marker in a global map if not exists\n        if (!window.userMarkers) window.userMarkers = {};\n        window.userMarkers[markerId] = marker;\n\n        // Define global remover if not exists\n        if (!window.removeUserPoint) {\n            window.removeUserPoint = (id) => {\n                const m = window.userMarkers[id];\n                if (m) {\n                    m.remove();\n                    delete window.userMarkers[id];\n                }\n            };\n        }\n\n        const popupContent = '
 <div style = "font-size:13px; min-width:150px;" >
                 <b>${name}</b><br>
                 <div style="color:#888; font-size:11px; margin-top:4px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
                 <button onclick="window.removeUserPoint('${markerId}')" style="margin-top:8px; background:#ef4444; color:white; border:none; padding:2px 5px; border-radius:3px; cursor:pointer; font-size:10px;">Remove</button>
             </div>
-         `;
-
-        marker.bindPopup(popupContent).openPopup();
-
-        // Close Modal
-        userPointModal.style.display = 'none';
-
-        // Pan to location
-        window.map.panTo([lat, lng]);
-
-        // Clear Inputs (Optional, or keep for repeated entry?)
-        // Let's keep name but clear coords or clear all? 
-        // Clearing all is standard.
-        nameInput.value = '';
-        latInput.value = '';
-        lngInput.value = '';
-    };
-}
-
-});
-
-// --- SITE EDITOR LOGIC ---
-
-window.refreshSites = function () {
-    if (window.mapRenderer && window.mapRenderer.siteData) {
-        // Pass false to prevent auto-zooming/fitting bounds
-        window.mapRenderer.addSiteLayer(window.mapRenderer.siteData, false);
-    }
-};
-
-function ensureSiteEditorDraggable() {
-    const modal = document.getElementById('siteEditorModal');
-    if (!modal) return;
-    const content = modal.querySelector('.modal-content');
-    const header = modal.querySelector('.modal-header');
-
-    // Center it initially (if not already moved)
-    if (!content.dataset.centered) {
-        const w = 400; // rough width
-        const h = 500; // rough height
-        content.style.position = 'absolute';
-        // Simple center based on viewport
-        content.style.left = Math.max(0, (window.innerWidth - w) / 2) + 'px';
-        content.style.top = Math.max(0, (window.innerHeight - h) / 2) + 'px';
-        content.style.margin = '0'; // Remove auto margin if present
-        content.dataset.centered = "true";
-    }
-
-    // Init Drag if not done
-    if (typeof makeElementDraggable === 'function' && !content.dataset.draggable) {
-        makeElementDraggable(header, content);
-        content.dataset.draggable = "true";
-        header.style.cursor = "move"; // Explicitly show move cursor on header
-    }
-}
-
-window.openAddSectorModal = function () {
-    document.getElementById('siteEditorTitle').textContent = "Add New Site";
-    document.getElementById('editOriginalId').value = "";
-    document.getElementById('editOriginalIndex').value = ""; // Clear Index
-
-    // Clear inputs
-    document.getElementById('editSiteName').value = "";
-    document.getElementById('editCellName').value = "";
-    document.getElementById('editCellId').value = "";
-    document.getElementById('editLat').value = "";
-    document.getElementById('editLng').value = "";
-    document.getElementById('editAzimuth').value = "0";
-    document.getElementById('editPci').value = "";
-    document.getElementById('editTech').value = "4G";
-
-    // Hide Delete Button for New Entry
-    document.getElementById('btnDeleteSector').style.display = 'none';
-
-    // Hide Sibling Button
-    const btnSibling = document.getElementById('btnAddSiblingSector');
-    if (btnSibling) btnSibling.style.display = 'none';
-
-    const modal = document.getElementById('siteEditorModal');
-    modal.style.display = 'block';
-
-    ensureSiteEditorDraggable();
-
-    // Auto-center
-    const content = modal.querySelector('.modal-content');
-    requestAnimationFrame(() => {
-        const rect = content.getBoundingClientRect();
-        if (rect.width > 0) {
-            content.style.left = Math.max(0, (window.innerWidth - rect.width) / 2) + 'px';
-            content.style.top = Math.max(0, (window.innerHeight - rect.height) / 2) + 'px';
-        }
-    });
-};
-
-// Index-based editing (Robust for duplicates)
-// Layer-compatible editing
-window.editSector = function (layerId, index) {
-    if (!window.mapRenderer || !window.mapRenderer.siteLayers) return;
-    const layer = window.mapRenderer.siteLayers.get(String(layerId));
-    if (!layer || !layer.sectors || !layer.sectors[index]) {
-        console.error("Sector not found:", layerId, index);
-        return;
-    }
-    const s = layer.sectors[index];
-
-    document.getElementById('siteEditorTitle').textContent = "Edit Sector";
-    document.getElementById('editOriginalId').value = s.cellId || ""; // keep original for reference if needed
-
-    // Store context for saving
-    document.getElementById('editLayerId').value = layerId;
-    document.getElementById('editOriginalIndex').value = index;
-
-    // Populate
-    document.getElementById('editSiteName').value = s.siteName || s.name || "";
-    document.getElementById('editCellName').value = s.cellName || "";
-    document.getElementById('editCellId').value = s.cellId || "";
-    document.getElementById('editLat').value = s.lat;
-    document.getElementById('editLng').value = s.lng;
-    document.getElementById('editAzimuth').value = s.azimuth || 0;
-    document.getElementById('editPci').value = s.sc || s.pci || "";
-    document.getElementById('editTech').value = s.tech || "4G";
-    document.getElementById('editBeamwidth').value = s.beamwidth || 65;
-
-    // UI Helpers
-    document.getElementById('btnDeleteSector').style.display = 'inline-block';
-    const btnSibling = document.getElementById('btnAddSiblingSector');
-    if (btnSibling) btnSibling.style.display = 'inline-block';
-
-    const modal = document.getElementById('siteEditorModal');
-    modal.style.display = 'block';
-
-    if (typeof ensureSiteEditorDraggable === 'function') ensureSiteEditorDraggable();
-
-    // Auto-center
-    const content = modal.querySelector('.modal-content');
-    requestAnimationFrame(() => {
-        const rect = content.getBoundingClientRect();
-        if (rect.width > 0) {
-            content.style.left = Math.max(0, (window.innerWidth - rect.width) / 2) + 'px';
-            content.style.top = Math.max(0, (window.innerHeight - rect.height) / 2) + 'px';
-        }
-    });
-};
-
-window.addSectorToCurrentSite = function () {
-    // Read current context before clearing
-    const currentName = document.getElementById('editSiteName').value;
-    const currentLat = document.getElementById('editLat').value;
-    const currentLng = document.getElementById('editLng').value;
-    const currentTech = document.getElementById('editTech').value;
-
-    // Switch to Add Mode
-    document.getElementById('siteEditorTitle').textContent = "Add Sector to Site";
-    document.getElementById('editOriginalId').value = ""; // Clear
-    document.getElementById('editOriginalIndex').value = ""; // Clear Index
-
-    // Clear Attributes specific to sector
-    document.getElementById('editCellName').value = ""; // Clear Cell Name
-    document.getElementById('editCellId').value = "";
-    document.getElementById('editAzimuth').value = "0";
-    document.getElementById('editPci').value = "";
-
-    // Keep Site-level Attributes
-    document.getElementById('editSiteName').value = currentName;
-    document.getElementById('editLat').value = currentLat;
-    document.getElementById('editLng').value = currentLng;
-    document.getElementById('editTech').value = currentTech;
-
-    // Hide Delete & Sibling Buttons
-    document.getElementById('btnDeleteSector').style.display = 'none';
-    const btnSibling = document.getElementById('btnAddSiblingSector');
-    if (btnSibling) btnSibling.style.display = 'none';
-};
-
-
-
-window.saveSector = function () {
-    if (!window.mapRenderer) return;
-
-    const layerId = document.getElementById('editLayerId').value;
-    const originalIndex = document.getElementById('editOriginalIndex').value;
-
-    // Validate Layer
-    let layer = null;
-    let sectors = null;
-
-    if (layerId && window.mapRenderer.siteLayers.has(layerId)) {
-        layer = window.mapRenderer.siteLayers.get(layerId);
-        sectors = layer.sectors;
-    } else {
-        // Fallback for VERY legacy or newly created "default" sites without layer?
-        // Unlikely in new architecture. Alert error.
-        alert("Layer Context Lost. Cannot save sector.");
-        return;
-    }
-
-    // Determine target index
-    let idx = -1;
-    if (originalIndex !== "" && originalIndex !== null) {
-        idx = parseInt(originalIndex, 10);
-    }
-
-    const isNew = (idx === -1);
-
-    const newAzimuth = parseInt(document.getElementById('editAzimuth').value, 10);
-    const newSiteName = document.getElementById('editSiteName').value;
-
-    const newObj = {
-        siteName: newSiteName,
-        name: newSiteName,
-        cellName: (document.getElementById('editCellName').value || newSiteName),
-        cellId: (document.getElementById('editCellId').value || newSiteName + "_1"),
-        lat: parseFloat(document.getElementById('editLat').value),
-        lng: parseFloat(document.getElementById('editLng').value),
-        azimuth: isNaN(newAzimuth) ? 0 : newAzimuth,
-        // Tech & PCI
-        tech: document.getElementById('editTech').value,
-        sc: document.getElementById('editPci').value,
-        pci: document.getElementById('editPci').value, // Sync both
-        // Beamwidth
-        beamwidth: parseInt(document.getElementById('editBeamwidth').value, 10) || 65
-    };
-
-    // Compute RNC/CID if possible
-    try {
-        if (String(newObj.cellId).includes('/')) {
-            const parts = newObj.cellId.split('/');
-            newObj.rnc = parts[0];
-            newObj.cid = parts[1];
-        } else {
-            // If numeric > 65535, try split
-            const num = parseInt(newObj.cellId, 10);
-            if (!isNaN(num) && num > 65535) {
-                newObj.rnc = num >> 16;
-                newObj.cid = num & 0xFFFF;
-            }
-        }
-    } catch (e) { }
-
-    // Add Derived Props
-    newObj.rawEnodebCellId = newObj.cellId;
-
-    if (isNew) {
-        sectors.push(newObj);
-        console.log(`[SiteEditor] created sector in layer ${layerId}`);
-    } else {
-        // Update valid index
-        if (sectors[idx]) {
-            const oldS = sectors[idx];
-            const oldAzimuth = oldS.azimuth;
-            const oldSiteName = oldS.siteName || oldS.name;
-
-            // 1. Update the target sector
-            // Merge to preserve other props like frequency if not edited
-            sectors[idx] = { ...sectors[idx], ...newObj };
-            console.log(`[SiteEditor] updated sector ${idx} in layer ${layerId}`);
-
-            // 2. Synchronize Azimuth if changed
-            if (oldAzimuth !== newAzimuth && !isNaN(oldAzimuth) && !isNaN(newAzimuth)) {
-                // Find others with same site name and SAME OLD AZIMUTH
-                sectors.forEach((s, subIdx) => {
-                    const sName = s.siteName || s.name;
-                    // Loose check for Site Name match
-                    if (String(sName) === String(oldSiteName) && subIdx !== idx) {
-                        if (s.azimuth === oldAzimuth) {
-                            s.azimuth = newAzimuth; // Sync
-                            console.log(`[SiteEditor] Synced azimuth for sector ${subIdx}`);
-                        }
-                    }
-                });
-            }
-        }
-    }
-
-    // Refresh Map
-    window.mapRenderer.rebuildSiteIndex();
-    window.mapRenderer.renderSites(false);
-
-    document.getElementById('siteEditorModal').style.display = 'none';
-};
-
-
-window.deleteSectorCurrent = function () {
-    const originalIndex = document.getElementById('editOriginalIndex').value;
-    const originalId = document.getElementById('editOriginalId').value;
-
-    if (!confirm("Are you sure you want to delete this sector?")) return;
-
-    if (window.mapRenderer && window.mapRenderer.siteData) {
-        let idx = -1;
-        if (originalIndex !== "") {
-            idx = parseInt(originalIndex, 10);
-        } else if (originalId) {
-            idx = window.mapRenderer.siteData.findIndex(x => String(x.cellId) === String(originalId));
-        }
-
-        if (idx !== -1) {
-            window.mapRenderer.siteData.splice(idx, 1);
-            window.refreshSites();
-            document.getElementById('siteEditorModal').style.display = 'none';
-            // Sync to Backend
-            window.syncToBackend(window.mapRenderer.siteData);
-        }
-    }
-};
-
-window.syncToBackend = function (siteData) {
-    if (!siteData) return;
-
-    // Show saving feedback
-    const status = document.getElementById('fileStatus');
-    if (status) status.textContent = "Saving to Excel...";
-
-    fetch('/save_sites', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(siteData)
-    })
-        .then(response => response.json())
-        .then(data => {
-            console.log('Save success:', data);
-            if (status) status.textContent = "Changes saved to sites_updated.xlsx";
-            setTimeout(() => { if (status) status.textContent = ""; }, 3000);
-        })
-        .catch((error) => {
-            console.error('Save error:', error);
-            if (status) status.textContent = "Error saving to Excel (Check console)";
-        });
-};
-
-// Initialize Map Action Controls Draggability
-// Map Action Controls are now fixed in the header, no draggability needed.
-
-// ----------------------------------------------------
-
-const getVal = (keys) => {
-    for (const k of keys) {
-        if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
-            const clean = String(d[k]).replace(/[^\d.-]/g, '');
-            const floatVal = parseFloat(clean);
-            if (!isNaN(floatVal)) return floatVal;
-        }
-    }
-    return null;
-};
-
-// Metrics
-const rsrp = getVal(['RSRP', 'Signal Strength', 'rsrp']);
-const sinr = getVal(['SINR', 'Sinr', 'sinr']);
-const dlTput = getVal(['DL Throughput', 'Downlink Throughput', 'DL_Throughput']);
-const prbLoad = getVal(['PRB Load', 'Load', 'Cell Load']);
-
-// Context
-const cellId = d['Cell Identifier'] || 'Unknown';
-
-// Robust Location Lookup
-const latRaw = d['lat'] || d['Latitude'] || d['latitude'] || d['LAT'];
-const lngRaw = d['lng'] || d['Longitude'] || d['longitude'] || d['LONG'];
-
-let location = "Unknown";
-if (latRaw && lngRaw) {
-    const lat = parseFloat(latRaw);
-    const lng = parseFloat(lngRaw);
-    if (!isNaN(lat) && !isNaN(lng)) {
-        location = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-    }
-}
-
-// --- 2. Logic Engine ---
-
-// A. Overall Performance Status
-let status = "Satisfactory";
-let statusClass = "status-ok"; // Default Green
-
-if (rsrp !== null && rsrp < -110) { status = "Critically Degraded (Coverage)"; statusClass = "status-bad"; }
-else if (sinr !== null && sinr < 0) { status = "Critically Degraded (Interference)"; statusClass = "status-bad"; }
-else if (rsrp !== null && rsrp < -100) { status = "Poor"; statusClass = "status-bad"; }
-else if (sinr !== null && sinr < 5) { status = "Suboptimal"; statusClass = "status-warn"; }
-else if (rsrp > -95 && sinr > 10) { status = "Excellent"; statusClass = "status-ok"; }
-
-// B. User Impact & Service
-let userExp = "Satisfactory";
-let impactedService = "None specific";
-let impactClass = "status-ok";
-let isLowTput = false;
-
-if (dlTput !== null) {
-    if (dlTput < 1) { userExp = "Severely Limited"; impactedService = "Real-time Video & Browsing"; isLowTput = true; impactClass = "status-bad"; }
-    else if (dlTput < 3) { userExp = "Degraded"; impactedService = "HD Video Streaming"; isLowTput = true; impactClass = "status-warn"; }
-    else if (dlTput < 5) { userExp = "Acceptable"; impactedService = "File Downloads"; impactClass = "status-warn"; }
-    else { userExp = "Good"; impactedService = "High Bandwidth Applications"; impactClass = "status-ok"; }
-} else {
-    if (status.includes("Critical")) { userExp = "Severely Limited"; impactedService = "All Data Services"; impactClass = "status-bad"; }
-    else if (status.includes("Poor")) { userExp = "Degraded"; impactedService = "High Bitrate Video"; impactClass = "status-warn"; }
-}
-
-// C. Primary Issues
-let primaryCause = "None detected";
-let secondaryCause = "";
-
-if (rsrp !== null && rsrp < -110) primaryCause = "Weak RF Coverage (Dead Zone)";
-else if (sinr !== null && sinr < 3) primaryCause = "High Signal Interference";
-else if (prbLoad !== null && prbLoad > 80) primaryCause = "High Capacity Utilization (Load)";
-else if (sinr !== null && sinr < 8) primaryCause = "Moderate Interference (Pilot Pollution)";
-else if (rsrp !== null && rsrp < -100) primaryCause = "Weak RF Coverage (Edge of Cell)";
-
-if (primaryCause.includes("Coverage") && sinr !== null && sinr < 5) secondaryCause = "Compounded by Interference";
-if (primaryCause.includes("Interference") && rsrp !== null && rsrp < -105) secondaryCause = "Compounded by Weak Signal";
-
-// D. Congestion Analysis
-let congestionStatus = "not congested";
-let issueType = "radio-quality-related";
-let congestionClass = "status-ok";
-
-if (prbLoad !== null && prbLoad > 75) {
-    congestionStatus = "congested";
-    issueType = "capacity-related";
-    congestionClass = "status-bad";
-} else if (rsrp > -95 && sinr > 10 && isLowTput) {
-    congestionStatus = "likely congested (Backhaul/Transport)";
-    issueType = "capacity-related";
-    congestionClass = "status-warn";
-}
-
-// E. Actions
-let highPriority = [];
-let mediumPriority = [];
-let conclusionAction = "targeted optimization";
-
-if (primaryCause.includes("Coverage") && congestionStatus.includes("congested")) {
-    highPriority.push("Review Power Settings / Load Balancing");
-    highPriority.push("Capacity Expansion (Carrier Add/Sector Split)");
-    conclusionAction = "capacity expansion";
-} else if (primaryCause.includes("Coverage")) {
-    highPriority.push("Check Antenna Tilt (Uptilt if possible)");
-    highPriority.push("Verify Neighbor Cell Relations");
-    mediumPriority.push("Drive Test Verification required");
-} else if (primaryCause.includes("Interference")) {
-    highPriority.push("Check Overshooting Neighbors");
-    highPriority.push("Review Antenna Downtilts");
-    mediumPriority.push("PCI Planning Review");
-} else if (congestionStatus.includes("congested")) {
-    highPriority.push("Load Balancing Strategy Review");
-    highPriority.push("Capacity Expansion Planning");
-    conclusionAction = "capacity expansion";
-} else {
-    highPriority.push("Routine Performance Monitoring");
-    mediumPriority.push("Verify Parameter Consistency");
-}
-
-if (highPriority.length === 0) highPriority.push("Monitor Performance Trend");
-
-// --- 3. Format Output (HTML Structure) ---
-// Helper to colorize Cause
-const causeClass = primaryCause === "None detected" ? "status-ok" : "status-bad";
-
-const report = `
+         ';\n\n        marker.bindPopup(popupContent).openPopup();\n\n        // Close Modal\n        userPointModal.style.display = \'none\';\n\n        // Pan to location\n        window.map.panTo([lat, lng]);\n\n        // Clear Inputs (Optional, or keep for repeated entry?)\n        // Let\'s keep name but clear coords or clear all? \n        // Clearing all is standard.\n        nameInput.value = \'\';\n        latInput.value = \'\';\n        lngInput.value = \'\';\n    };\n}\n\n});\n\n// --- SITE EDITOR LOGIC ---\n\nwindow.refreshSites = function () {\n    if (window.mapRenderer && window.mapRenderer.siteData) {\n        // Pass false to prevent auto-zooming/fitting bounds\n        window.mapRenderer.addSiteLayer(window.mapRenderer.siteData, false);\n    }\n};\n\nfunction ensureSiteEditorDraggable() {\n    const modal = document.getElementById(\'siteEditorModal\');\n    if (!modal) return;\n    const content = modal.querySelector(\'.modal-content\');\n    const header = modal.querySelector(\'.modal-header\');\n\n    // Center it initially (if not already moved)\n    if (!content.dataset.centered) {\n        const w = 400; // rough width\n        const h = 500; // rough height\n        content.style.position = \'absolute\';\n        // Simple center based on viewport\n        content.style.left = Math.max(0, (window.innerWidth - w) / 2) + \'px\';\n        content.style.top = Math.max(0, (window.innerHeight - h) / 2) + \'px\';\n        content.style.margin = \'0\'; // Remove auto margin if present\n        content.dataset.centered = "true";\n    }\n\n    // Init Drag if not done\n    if (typeof makeElementDraggable === \'function\' && !content.dataset.draggable) {\n        makeElementDraggable(header, content);\n        content.dataset.draggable = "true";\n        header.style.cursor = "move"; // Explicitly show move cursor on header\n    }\n}\n\nwindow.openAddSectorModal = function () {\n    document.getElementById(\'siteEditorTitle\').textContent = "Add New Site";\n    document.getElementById(\'editOriginalId\').value = "";\n    document.getElementById(\'editOriginalIndex\').value = ""; // Clear Index\n\n    // Clear inputs\n    document.getElementById(\'editSiteName\').value = "";\n    document.getElementById(\'editCellName\').value = "";\n    document.getElementById(\'editCellId\').value = "";\n    document.getElementById(\'editLat\').value = "";\n    document.getElementById(\'editLng\').value = "";\n    document.getElementById(\'editAzimuth\').value = "0";\n    document.getElementById(\'editPci\').value = "";\n    document.getElementById(\'editTech\').value = "4G";\n\n    // Hide Delete Button for New Entry\n    document.getElementById(\'btnDeleteSector\').style.display = \'none\';\n\n    // Hide Sibling Button\n    const btnSibling = document.getElementById(\'btnAddSiblingSector\');\n    if (btnSibling) btnSibling.style.display = \'none\';\n\n    const modal = document.getElementById(\'siteEditorModal\');\n    modal.style.display = \'block\';\n\n    ensureSiteEditorDraggable();\n\n    // Auto-center\n    const content = modal.querySelector(\'.modal-content\');\n    requestAnimationFrame(() => {\n        const rect = content.getBoundingClientRect();\n        if (rect.width > 0) {\n            content.style.left = Math.max(0, (window.innerWidth - rect.width) / 2) + \'px\';\n            content.style.top = Math.max(0, (window.innerHeight - rect.height) / 2) + \'px\';\n        }\n    });\n};\n\n// Index-based editing (Robust for duplicates)\n// Layer-compatible editing\nwindow.editSector = function (layerId, index) {\n    if (!window.mapRenderer || !window.mapRenderer.siteLayers) return;\n    const layer = window.mapRenderer.siteLayers.get(String(layerId));\n    if (!layer || !layer.sectors || !layer.sectors[index]) {\n        console.error("Sector not found:", layerId, index);\n        return;\n    }\n    const s = layer.sectors[index];\n\n    document.getElementById(\'siteEditorTitle\').textContent = "Edit Sector";\n    document.getElementById(\'editOriginalId\').value = s.cellId || ""; // keep original for reference if needed\n\n    // Store context for saving\n    document.getElementById(\'editLayerId\').value = layerId;\n    document.getElementById(\'editOriginalIndex\').value = index;\n\n    // Populate\n    document.getElementById(\'editSiteName\').value = s.siteName || s.name || "";\n    document.getElementById(\'editCellName\').value = s.cellName || "";\n    document.getElementById(\'editCellId\').value = s.cellId || "";\n    document.getElementById(\'editLat\').value = s.lat;\n    document.getElementById(\'editLng\').value = s.lng;\n    document.getElementById(\'editAzimuth\').value = s.azimuth || 0;\n    document.getElementById(\'editPci\').value = s.sc || s.pci || "";\n    document.getElementById(\'editTech\').value = s.tech || "4G";\n    document.getElementById(\'editBeamwidth\').value = s.beamwidth || 65;\n\n    // UI Helpers\n    document.getElementById(\'btnDeleteSector\').style.display = \'inline-block\';\n    const btnSibling = document.getElementById(\'btnAddSiblingSector\');\n    if (btnSibling) btnSibling.style.display = \'inline-block\';\n\n    const modal = document.getElementById(\'siteEditorModal\');\n    modal.style.display = \'block\';\n\n    if (typeof ensureSiteEditorDraggable === \'function\') ensureSiteEditorDraggable();\n\n    // Auto-center\n    const content = modal.querySelector(\'.modal-content\');\n    requestAnimationFrame(() => {\n        const rect = content.getBoundingClientRect();\n        if (rect.width > 0) {\n            content.style.left = Math.max(0, (window.innerWidth - rect.width) / 2) + \'px\';\n            content.style.top = Math.max(0, (window.innerHeight - rect.height) / 2) + \'px\';\n        }\n    });\n};\n\nwindow.addSectorToCurrentSite = function () {\n    // Read current context before clearing\n    const currentName = document.getElementById(\'editSiteName\').value;\n    const currentLat = document.getElementById(\'editLat\').value;\n    const currentLng = document.getElementById(\'editLng\').value;\n    const currentTech = document.getElementById(\'editTech\').value;\n\n    // Switch to Add Mode\n    document.getElementById(\'siteEditorTitle\').textContent = "Add Sector to Site";\n    document.getElementById(\'editOriginalId\').value = ""; // Clear\n    document.getElementById(\'editOriginalIndex\').value = ""; // Clear Index\n\n    // Clear Attributes specific to sector\n    document.getElementById(\'editCellName\').value = ""; // Clear Cell Name\n    document.getElementById(\'editCellId\').value = "";\n    document.getElementById(\'editAzimuth\').value = "0";\n    document.getElementById(\'editPci\').value = "";\n\n    // Keep Site-level Attributes\n    document.getElementById(\'editSiteName\').value = currentName;\n    document.getElementById(\'editLat\').value = currentLat;\n    document.getElementById(\'editLng\').value = currentLng;\n    document.getElementById(\'editTech\').value = currentTech;\n\n    // Hide Delete & Sibling Buttons\n    document.getElementById(\'btnDeleteSector\').style.display = \'none\';\n    const btnSibling = document.getElementById(\'btnAddSiblingSector\');\n    if (btnSibling) btnSibling.style.display = \'none\';\n};\n\n\n\nwindow.saveSector = function () {\n    if (!window.mapRenderer) return;\n\n    const layerId = document.getElementById(\'editLayerId\').value;\n    const originalIndex = document.getElementById(\'editOriginalIndex\').value;\n\n    // Validate Layer\n    let layer = null;\n    let sectors = null;\n\n    if (layerId && window.mapRenderer.siteLayers.has(layerId)) {\n        layer = window.mapRenderer.siteLayers.get(layerId);\n        sectors = layer.sectors;\n    } else {\n        // Fallback for VERY legacy or newly created "default" sites without layer?\n        // Unlikely in new architecture. Alert error.\n        alert("Layer Context Lost. Cannot save sector.");\n        return;\n    }\n\n    // Determine target index\n    let idx = -1;\n    if (originalIndex !== "" && originalIndex !== null) {\n        idx = parseInt(originalIndex, 10);\n    }\n\n    const isNew = (idx === -1);\n\n    const newAzimuth = parseInt(document.getElementById(\'editAzimuth\').value, 10);\n    const newSiteName = document.getElementById(\'editSiteName\').value;\n\n    const newObj = {\n        siteName: newSiteName,\n        name: newSiteName,\n        cellName: (document.getElementById(\'editCellName\').value || newSiteName),\n        cellId: (document.getElementById(\'editCellId\').value || newSiteName + "_1"),\n        lat: parseFloat(document.getElementById(\'editLat\').value),\n        lng: parseFloat(document.getElementById(\'editLng\').value),\n        azimuth: isNaN(newAzimuth) ? 0 : newAzimuth,\n        // Tech & PCI\n        tech: document.getElementById(\'editTech\').value,\n        sc: document.getElementById(\'editPci\').value,\n        pci: document.getElementById(\'editPci\').value, // Sync both\n        // Beamwidth\n        beamwidth: parseInt(document.getElementById(\'editBeamwidth\').value, 10) || 65\n    };\n\n    // Compute RNC/CID if possible\n    try {\n        if (String(newObj.cellId).includes(\'/\')) {\n            const parts = newObj.cellId.split(\'/\');\n            newObj.rnc = parts[0];\n            newObj.cid = parts[1];\n        } else {\n            // If numeric > 65535, try split\n            const num = parseInt(newObj.cellId, 10);\n            if (!isNaN(num) && num > 65535) {\n                newObj.rnc = num >> 16;\n                newObj.cid = num & 0xFFFF;\n            }\n        }\n    } catch (e) { }\n\n    // Add Derived Props\n    newObj.rawEnodebCellId = newObj.cellId;\n\n    if (isNew) {\n        sectors.push(newObj);\n        console.log('[SiteEditor] created sector in layer ${layerId}');\n    } else {\n        // Update valid index\n        if (sectors[idx]) {\n            const oldS = sectors[idx];\n            const oldAzimuth = oldS.azimuth;\n            const oldSiteName = oldS.siteName || oldS.name;\n\n            // 1. Update the target sector\n            // Merge to preserve other props like frequency if not edited\n            sectors[idx] = { ...sectors[idx], ...newObj };\n            console.log('[SiteEditor] updated sector ${idx} in layer ${layerId}');\n\n            // 2. Synchronize Azimuth if changed\n            if (oldAzimuth !== newAzimuth && !isNaN(oldAzimuth) && !isNaN(newAzimuth)) {\n                // Find others with same site name and SAME OLD AZIMUTH\n                sectors.forEach((s, subIdx) => {\n                    const sName = s.siteName || s.name;\n                    // Loose check for Site Name match\n                    if (String(sName) === String(oldSiteName) && subIdx !== idx) {\n                        if (s.azimuth === oldAzimuth) {\n                            s.azimuth = newAzimuth; // Sync\n                            console.log('[SiteEditor] Synced azimuth for sector ${subIdx}');\n                        }\n                    }\n                });\n            }\n        }\n    }\n\n    // Refresh Map\n    window.mapRenderer.rebuildSiteIndex();\n    window.mapRenderer.renderSites(false);\n\n    document.getElementById(\'siteEditorModal\').style.display = \'none\';\n};\n\n\nwindow.deleteSectorCurrent = function () {\n    const originalIndex = document.getElementById(\'editOriginalIndex\').value;\n    const originalId = document.getElementById(\'editOriginalId\').value;\n\n    if (!confirm("Are you sure you want to delete this sector?")) return;\n\n    if (window.mapRenderer && window.mapRenderer.siteData) {\n        let idx = -1;\n        if (originalIndex !== "") {\n            idx = parseInt(originalIndex, 10);\n        } else if (originalId) {\n            idx = window.mapRenderer.siteData.findIndex(x => String(x.cellId) === String(originalId));\n        }\n\n        if (idx !== -1) {\n            window.mapRenderer.siteData.splice(idx, 1);\n            window.refreshSites();\n            document.getElementById(\'siteEditorModal\').style.display = \'none\';\n            // Sync to Backend\n            window.syncToBackend(window.mapRenderer.siteData);\n        }\n    }\n};\n\nwindow.syncToBackend = function (siteData) {\n    if (!siteData) return;\n\n    // Show saving feedback\n    const status = document.getElementById(\'fileStatus\');\n    if (status) status.textContent = "Saving to Excel...";\n\n    fetch(\'/save_sites\', {\n        method: \'POST\',\n        headers: {\n            \'Content-Type\': \'application/json\'\n        },\n        body: JSON.stringify(siteData)\n    })\n        .then(response => response.json())\n        .then(data => {\n            console.log(\'Save success:\', data);\n            if (status) status.textContent = "Changes saved to sites_updated.xlsx";\n            setTimeout(() => { if (status) status.textContent = ""; }, 3000);\n        })\n        .catch((error) => {\n            console.error(\'Save error:\', error);\n            if (status) status.textContent = "Error saving to Excel (Check console)";\n        });\n};\n\n// Initialize Map Action Controls Draggability\n// Map Action Controls are now fixed in the header, no draggability needed.\n\n// ----------------------------------------------------\n\nconst getVal = (keys) => {\n    for (const k of keys) {\n        if (d[k] !== undefined && d[k] !== null && d[k] !== \'\') {\n            const clean = String(d[k]).replace(/[^\d.-]/g, \'\');\n            const floatVal = parseFloat(clean);\n            if (!isNaN(floatVal)) return floatVal;\n        }\n    }\n    return null;\n};\n\n// Metrics\nconst rsrp = getVal([\'RSRP\', \'Signal Strength\', \'rsrp\']);\nconst sinr = getVal([\'SINR\', \'Sinr\', \'sinr\']);\nconst dlTput = getVal([\'DL Throughput\', \'Downlink Throughput\', \'DL_Throughput\']);\nconst prbLoad = getVal([\'PRB Load\', \'Load\', \'Cell Load\']);\n\n// Context\nconst cellId = d[\'Cell Identifier\'] || \'Unknown\';\n\n// Robust Location Lookup\nconst latRaw = d[\'lat\'] || d[\'Latitude\'] || d[\'latitude\'] || d[\'LAT\'];\nconst lngRaw = d[\'lng\'] || d[\'Longitude\'] || d[\'longitude\'] || d[\'LONG\'];\n\nlet location = "Unknown";\nif (latRaw && lngRaw) {\n    const lat = parseFloat(latRaw);\n    const lng = parseFloat(lngRaw);\n    if (!isNaN(lat) && !isNaN(lng)) {\n        location = '${lat.toFixed(5)}, ${lng.toFixed(5)}';\n    }\n}\n\n// --- 2. Logic Engine ---\n\n// A. Overall Performance Status\nlet status = "Satisfactory";\nlet statusClass = "status-ok"; // Default Green\n\nif (rsrp !== null && rsrp < -110) { status = "Critically Degraded (Coverage)"; statusClass = "status-bad"; }\nelse if (sinr !== null && sinr < 0) { status = "Critically Degraded (Interference)"; statusClass = "status-bad"; }\nelse if (rsrp !== null && rsrp < -100) { status = "Poor"; statusClass = "status-bad"; }\nelse if (sinr !== null && sinr < 5) { status = "Suboptimal"; statusClass = "status-warn"; }\nelse if (rsrp > -95 && sinr > 10) { status = "Excellent"; statusClass = "status-ok"; }\n\n// B. User Impact & Service\nlet userExp = "Satisfactory";\nlet impactedService = "None specific";\nlet impactClass = "status-ok";\nlet isLowTput = false;\n\nif (dlTput !== null) {\n    if (dlTput < 1) { userExp = "Severely Limited"; impactedService = "Real-time Video & Browsing"; isLowTput = true; impactClass = "status-bad"; }\n    else if (dlTput < 3) { userExp = "Degraded"; impactedService = "HD Video Streaming"; isLowTput = true; impactClass = "status-warn"; }\n    else if (dlTput < 5) { userExp = "Acceptable"; impactedService = "File Downloads"; impactClass = "status-warn"; }\n    else { userExp = "Good"; impactedService = "High Bandwidth Applications"; impactClass = "status-ok"; }\n} else {\n    if (status.includes("Critical")) { userExp = "Severely Limited"; impactedService = "All Data Services"; impactClass = "status-bad"; }\n    else if (status.includes("Poor")) { userExp = "Degraded"; impactedService = "High Bitrate Video"; impactClass = "status-warn"; }\n}\n\n// C. Primary Issues\nlet primaryCause = "None detected";\nlet secondaryCause = "";\n\nif (rsrp !== null && rsrp < -110) primaryCause = "Weak RF Coverage (Dead Zone)";\nelse if (sinr !== null && sinr < 3) primaryCause = "High Signal Interference";\nelse if (prbLoad !== null && prbLoad > 80) primaryCause = "High Capacity Utilization (Load)";\nelse if (sinr !== null && sinr < 8) primaryCause = "Moderate Interference (Pilot Pollution)";\nelse if (rsrp !== null && rsrp < -100) primaryCause = "Weak RF Coverage (Edge of Cell)";\n\nif (primaryCause.includes("Coverage") && sinr !== null && sinr < 5) secondaryCause = "Compounded by Interference";\nif (primaryCause.includes("Interference") && rsrp !== null && rsrp < -105) secondaryCause = "Compounded by Weak Signal";\n\n// D. Congestion Analysis\nlet congestionStatus = "not congested";\nlet issueType = "radio-quality-related";\nlet congestionClass = "status-ok";\n\nif (prbLoad !== null && prbLoad > 75) {\n    congestionStatus = "congested";\n    issueType = "capacity-related";\n    congestionClass = "status-bad";\n} else if (rsrp > -95 && sinr > 10 && isLowTput) {\n    congestionStatus = "likely congested (Backhaul/Transport)";\n    issueType = "capacity-related";\n    congestionClass = "status-warn";\n}\n\n// E. Actions\nlet highPriority = [];\nlet mediumPriority = [];\nlet conclusionAction = "targeted optimization";\n\nif (primaryCause.includes("Coverage") && congestionStatus.includes("congested")) {\n    highPriority.push("Review Power Settings / Load Balancing");\n    highPriority.push("Capacity Expansion (Carrier Add/Sector Split)");\n    conclusionAction = "capacity expansion";\n} else if (primaryCause.includes("Coverage")) {\n    highPriority.push("Check Antenna Tilt (Uptilt if possible)");\n    highPriority.push("Verify Neighbor Cell Relations");\n    mediumPriority.push("Drive Test Verification required");\n} else if (primaryCause.includes("Interference")) {\n    highPriority.push("Check Overshooting Neighbors");\n    highPriority.push("Review Antenna Downtilts");\n    mediumPriority.push("PCI Planning Review");\n} else if (congestionStatus.includes("congested")) {\n    highPriority.push("Load Balancing Strategy Review");\n    highPriority.push("Capacity Expansion Planning");\n    conclusionAction = "capacity expansion";\n} else {\n    highPriority.push("Routine Performance Monitoring");\n    mediumPriority.push("Verify Parameter Consistency");\n}\n\nif (highPriority.length === 0) highPriority.push("Monitor Performance Trend");\n\n// --- 3. Format Output (HTML Structure) ---\n// Helper to colorize Cause\nconst causeClass = primaryCause === "None detected" ? "status-ok" : "status-bad";\n\nconst report = '
             <div class="report-block">
                 <h4>CELL PERFORMANCE – MANAGEMENT SUMMARY</h4>
                 <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
@@ -6967,7 +3733,7 @@ const report = `
                 <p>The main performance limitation(s) identified are:</p>
                 <ul>
                     <li><span class="${causeClass}" style="font-weight:bold;">${primaryCause}</span></li>
-                    ${secondaryCause ? `<li>${secondaryCause}</li>` : ''}
+                    ${secondaryCause ? '<li>' + (secondaryCause) + '</li>' : ''}
                 </ul>
                 <p style="margin-top:5px; font-size:0.9em; color:#bbb;">
                     <em>This issue is impacting: Data speeds, Service stability, User experience consistency.</em>
@@ -6985,12 +3751,12 @@ const report = `
                 
                 <h5 style="color:#ff6b6b; margin:10px 0 5px 0;">Immediate actions recommended:</h5>
                 <ul>
-                    ${highPriority.map(a => `<li>${a}</li>`).join('')}
+                    ${highPriority.map(a => '<li>' + (a) + '</li>').join('')}
                 </ul>
 
                 <h5 style="color:#ffd93d; margin:10px 0 5px 0;">Supporting optimization actions:</h5>
                 <ul>
-                    ${mediumPriority.length > 0 ? mediumPriority.map(a => `<li>${a}</li>`).join('') : '<li>None required at this stage</li>'}
+                    ${mediumPriority.length > 0 ? mediumPriority.map(a => '<li>' + (a) + '</li>').join('') : '<li>None required at this stage</li>'}
                 </ul>
             </div>
 
@@ -7001,18 +3767,7 @@ const report = `
                     to improve customer experience and overall network efficiency.
                 </p>
             </div>
-        `;
-
-// --- 4. Display ---
-window.showAnalysisModal(report, "MANAGEMENT SUMMARY");
-};
-
-window.showAnalysisModal = (content, title) => {
-    let modal = document.getElementById('analysisModal');
-
-    // --- LAZY CREATE MODAL IF MISSING ---
-    if (!modal) {
-        const modalHtml = `
+        ';\n\n// --- 4. Display ---\nwindow.showAnalysisModal(report, "MANAGEMENT SUMMARY");\n};\n\nwindow.showAnalysisModal = (content, title) => {\n    let modal = document.getElementById(\'analysisModal\');\n\n    // --- LAZY CREATE MODAL IF MISSING ---\n    if (!modal) {\n        const modalHtml = '
                 <div class="analysis-modal-overlay" onclick="const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()">
                     <div class="analysis-modal" id="analysisModal" style="width: 800px; max-width: 90vw; display:flex;">
                         <div class="analysis-header">
