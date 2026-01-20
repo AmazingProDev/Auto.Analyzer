@@ -3844,10 +3844,229 @@ document.addEventListener('DOMContentLoaded', () => {
                     </script>
                 </div>
             </div>
-        `;
-
         return { html, connectionTargets };
     }
+
+    // --- STRICT MANAGEMENT SUMMARY IMPLEMENTATION (SECTION 0-15 Rules) ---
+    window.generateManagementSummary = (d) => {
+        // Helper: Extract Metric Safely
+        const getVal = (targetKeys) => {
+            if (!Array.isArray(targetKeys)) targetKeys = [targetKeys];
+            const rowKeys = Object.keys(d);
+            const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+            for (let t of targetKeys) {
+                const normT = normalize(t);
+                // Try Exact first
+                if (d[t] !== undefined) return d[t];
+                // Try Normalized Search
+                const match = rowKeys.find(k => normalize(k) === normT || normalize(k).includes(normT));
+                if (match && d[match] !== undefined) return d[match];
+            }
+            return null;
+        };
+
+        const val = (v) => (v === null || v === undefined || isNaN(parseFloat(v))) ? null : parseFloat(v);
+
+        // --- EXTRACT METRICS ---
+        const mrCount = val(getVal(['Dominant MR Count', 'MR Count', 'Sample Count']));
+        const rsrp = val(getVal(['Dominant RSRP', 'RSRP']));
+        const rsrq = val(getVal(['Dominant RSRQ', 'RSRQ']));
+        const cqi = val(getVal(['Average DL Wideband CQI', 'Wideband CQI']));
+        const dlLowTput = val(getVal(['DL Low-Throughput Ratio', 'DL Low Tput Ratio']));
+        const ulLowTput = val(getVal(['UL Low-Throughput Ratio', 'UL Low Tput Ratio']));
+        const dlRb = val(getVal(['Average DL RB Quantity', 'DL RB Quantity']));
+        const dlSpecEff = val(getVal(['DL Spectrum Efficiency', 'Spectrum Efficiency']));
+        const dlIbler = val(getVal(['DL IBLER', 'IBLER']));
+        const rank2 = val(getVal(['Rank 2 Percentage', 'Rank 2 %']));
+        const dl3cc = val(getVal(['DL 3CC Percentage', '3CC']));
+        const dl1cc = val(getVal(['DL 1CC Percentage', '1CC']));
+
+        let output = {};
+        let scoreBase = 0;
+        let bonus = 0;
+        let penalty = 0;
+
+        // --- SECTION 0: DATA CONFIDENCE & VALIDITY ---
+        if (mrCount !== null && mrCount >= 1000) { output.dataConf = "High"; scoreBase = 70; }
+        else if (mrCount !== null && mrCount >= 100) { output.dataConf = "Medium"; scoreBase = 55; }
+        else { output.dataConf = "Low"; scoreBase = 35; }
+
+        if (mrCount !== null && mrCount < 20) { output.limitation = "Indicative Only"; penalty += 20; }
+
+        // --- SECTION 1: COVERAGE STATUS ---
+        if (rsrp !== null) {
+            if (rsrp >= -90) output.coverage = "Good";
+            else if (rsrp > -100) output.coverage = "Fair";
+            else output.coverage = "Poor";
+        } else output.coverage = "N/A";
+
+        // --- SECTION 2: SIGNAL QUALITY ---
+        if (rsrq !== null) {
+            if (rsrq >= -9) output.quality = "Good";
+            else if (rsrq > -11) output.quality = "Degraded";
+            else output.quality = "Poor";
+        } else output.quality = "N/A";
+
+        // --- SECTION 3: CHANNEL QUALITY ---
+        if (cqi !== null) {
+            if (cqi < 6) output.cqi = "Poor";
+            else if (cqi < 9) output.cqi = "Moderate";
+            else output.cqi = "Good";
+        } else output.cqi = "N/A";
+
+        // --- SECTION 4: USER EXPERIENCE (DL) ---
+        if (dlLowTput !== null) {
+            if (dlLowTput >= 80) { output.dlExp = "Severely Degraded"; bonus += 10; }
+            else if (dlLowTput >= 25) output.dlExp = "Degraded";
+            else output.dlExp = "Acceptable";
+        } else output.dlExp = "N/A";
+
+        // --- SECTION 5: LOAD & CONGESTION ---
+        if (dlRb !== null) {
+            if (dlRb <= 10) output.load = "Very Low Load";
+            else if (dlRb < 70) output.load = "Moderate Load";
+            else output.load = "Congested";
+        } else output.load = "N/A";
+
+        // --- SECTION 6: SPECTRUM EFFICIENCY ---
+        if (dlSpecEff !== null) {
+            if (dlSpecEff < 1000) { output.specEff = "Very Low"; bonus += 10; } // Bonus for very low finding? (As per interpreting 'detected issue') - Wait, prompt says: IF DL Spectral Performance = "Very Low" THEN +10
+            else if (dlSpecEff < 2000) output.specEff = "Low";
+            else output.specEff = "Normal";
+        } else output.specEff = "N/A";
+
+        // --- SECTION 7: LINK STABILITY ---
+        /* Note: DL IBLER not requested in Final Output list, but used for logic? 
+           Wait, Rules section 7 exists, but Section 15 (Output) DOES NOT list Link Stability.
+           I will calculate it but not output unless implicitly needed.
+           Actually, checking Section 15 list... "Date Confidence, Coverage, Signal, Channel, User Exp, Load, Spectral, MIMO, CA, Interp, Diag, Rec, Score, Level". 
+           Link Stability is MISSING from Output. I will skip outputting it to string. */
+
+        // --- SECTION 8: MIMO UTILIZATION ---
+        if (rank2 !== null) {
+            if (rank2 >= 30) output.mimo = "Good";
+            else if (rank2 >= 15) output.mimo = "Limited";
+            else output.mimo = "Poor";
+        } else output.mimo = "N/A";
+
+        // --- SECTION 9: CA EFFECTIVENESS ---
+        output.ca = "N/A";
+        if (dl3cc !== null && dl3cc === 100 && output.specEff !== "Normal" && output.specEff !== "N/A") {
+            output.ca = "Active but Ineffective";
+            bonus += 10;
+        } else if (dl1cc !== null && dl1cc >= 60) {
+            output.ca = "Underutilized";
+        }
+
+        // --- SECTION 10: INTERPRETATION (WHY) ---
+        let interpretation = null;
+        if (output.coverage !== "Poor" && output.coverage !== "N/A" &&
+            output.quality === "Poor" &&
+            output.cqi !== "Poor" && output.cqi !== "N/A") {
+            interpretation = "Signal power is present but radio quality is degraded by interference.";
+        }
+        if (output.dlExp !== "Acceptable" && output.dlExp !== "N/A" &&
+            ulLowTput !== null && ulLowTput === 0) {
+            interpretation = "Downlink-only degradation indicates interference or overlap issues.";
+        }
+        if (output.ca === "Active but Ineffective") {
+            interpretation = "Carrier Aggregation is enabled but limited by poor SINR.";
+        }
+        if (interpretation) bonus += 10;
+
+        // --- SECTION 11: EXPERT DIAGNOSIS (WHAT) ---
+        let diagnosis = "N/A";
+        if (output.quality === "Poor" &&
+            (output.specEff === "Low" || output.specEff === "Very Low") &&
+            (output.load === "Very Low Load" || output.load === "Moderate Load")) {
+            diagnosis = "Interference-Limited Cell";
+        } else if (output.coverage === "Poor" && output.cqi !== "Good" && output.cqi !== "N/A") {
+            diagnosis = "Coverage-Limited Cell";
+        } else if (output.load === "Congested") {
+            diagnosis = "Capacity-Limited Cell";
+        }
+
+        // --- SECTION 12: OPTIMIZATION ACTIONS ---
+        let actions = [];
+        if (diagnosis === "Interference-Limited Cell") {
+            actions.push("Increase electrical downtilt (1–2°)", "Review overshooting neighbors", "Reduce DL power if overlap confirmed", "Audit PCI and neighbor relations");
+        }
+        if (output.mimo === "Limited" || output.mimo === "Poor") {
+            actions.push("Verify antenna cross-polar isolation", "Check RF paths and connectors");
+        }
+        if (output.ca === "Active but Ineffective") {
+            actions.push("Improve secondary carrier SINR", "Align antenna configuration across bands", "Adjust CA activation thresholds");
+        }
+        if (actions.length === 0) actions.push("Monitor performance.");
+
+        // --- SECTION 13: CONFIDENCE SCORING ---
+        let rawScore = scoreBase + bonus - penalty;
+        let finalScore = Math.max(20, Math.min(95, rawScore));
+
+        // --- SECTION 14: CONFIDENCE LEVEL ---
+        let confLevel = "Low";
+        if (finalScore >= 85) confLevel = "Very High";
+        else if (finalScore >= 70) confLevel = "High";
+        else if (finalScore >= 50) confLevel = "Medium";
+
+        // --- GENERATE HTML OUTPUT ---
+        // Style helpers
+        const getCls = (val) => {
+            if (!val || val === "N/A") return "";
+            const v = val.toLowerCase();
+            if (v === "good" || v === "normal" || v === "stable" || v === "very high" || v === "high" || v === "acceptable") return "status-ok";
+            if (v === "poor" || v === "very low" || v === "severe" || v === "congested" || v === "unstable" || v === "low") return "status-bad";
+            if (v === "fair" || v === "degraded" || v === "limited" || v === "underutilized" || v === "moderate") return "status-warn";
+            return "";
+        };
+
+        const row = (label, val) => `
+            <div style = "display:flex; justify-content:space-between; margin-bottom:4px; padding-bottom:4px; border-bottom:1px solid #333;" >
+                <span style="color:#aaa;">${label}</span>
+                <span class="${getCls(val)}" style="font-weight:600;">${val || 'N/A'}</span>
+            </div > `;
+
+        let html = `<div class="report-block" >
+            <h4 class="report-header">EXPERT ANALYSIS</h4>
+            ${ row('Confidence Level', confLevel) }
+            ${ row('Confidence Score', finalScore + '%') }
+            ${ row('Data Confidence', output.dataConf) }
+        <br>
+            ${row('Coverage Status', output.coverage)}
+            ${row('Signal Quality', output.quality)}
+            ${row('Channel Quality', output.cqi)}
+            ${row('DL User Exp', output.dlExp)}
+            ${row('Cell Load', output.load)}
+            ${row('Spectral Perf', output.specEff)}
+            ${row('MIMO Utilization', output.mimo)}
+            ${row('CA Effectiveness', output.ca)}
+        </div>`;
+
+        html += `<div class="report-block" >
+            <h4 class="report-header">DIAGNOSIS & ACTIONS</h4>
+            <div style="margin-bottom:8px;">
+                <div style="color:#888; font-size:10px; text-transform:uppercase;">Expert Diagnosis</div>
+                <div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">${diagnosis}</div>
+            </div>
+            
+             ${
+            interpretation ? `
+            <div style="margin-bottom:8px;">
+                <div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>
+                <div style="color:#ddd; font-style:italic; margin-top:2px;">"${interpretation}"</div>
+            </div>` : ''
+        }
+
+        <div style="margin-top:10px;">
+            <div style="color:#888; font-size:10px; text-transform:uppercase;">Optimization Actions</div>
+            <ul style="margin:5px 0 0 15px; padding:0; color:#cbd5e1;">
+                ${actions.map(a => `<li>${a}</li>`).join('')}
+            </ul>
+        </div>
+        </div > `;
+
+        return html;
+    };
 
     // --- ANALYSIS ENGINE ---
 
@@ -4036,14 +4255,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Styles for specific keywords
                 const colorize = (txt) => {
                     const t = txt.toLowerCase();
-                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `<span class="status-good">${txt}</span>`;
-                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `<span class="status-fair">${txt}</span>`;
-                    return `<span class="status-poor">${txt}</span>`;
+                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `< span class="status-good" > ${ txt }</span > `;
+                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `< span class="status-fair" > ${ txt }</span > `;
+                    return `< span class="status-poor" > ${ txt }</span > `;
                 };
 
                 combinedHtml += `
-                    <div class="report-section" style="${idx > 0 ? 'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;' : ''}">
-                         ${item.name ? `<h2 style="margin: 0 0 20px 0; color: #60a5fa; border-bottom: 1px solid #444; padding-bottom: 10px; font-size: 18px;">${item.name} Analysis</h2>` : ''}
+            <div class="report-section" style = "${idx > 0 ? 'margin-top: 40px; border-top: 4px solid #333; padding-top: 30px;' : ''}" >
+                ${ item.name ? `<h2 style="margin: 0 0 20px 0; color: #60a5fa; border-bottom: 1px solid #444; padding-bottom: 10px; font-size: 18px;">${item.name} Analysis</h2>` : '' }
 
                         <div class="report-block">
                             <h3 class="report-header">1. Cell Context</h3>
@@ -4133,37 +4352,37 @@ document.addEventListener('DOMContentLoaded', () => {
                             <p>The analyzed LTE cell is primarily <strong>${rootCauses[0]}</strong>, resulting in <strong>${metrics.dlUserExp} User Experience</strong>. Targeted RF and feature optimization is required to improve spectrum efficiency.</p>
                         </div>
 
-                    </div>
-                `;
+                    </div >
+            `;
             });
 
             // CSS For Report
             const style = `
-                <style>
-                    .report-block { margin-bottom: 20px; }
-                    .report-header { color: #aaa; border-bottom: 1px solid #444; padding-bottom: 4px; margin-bottom: 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
-                    .report-list { padding-left: 20px; color: #ddd; font-size: 13px; line-height: 1.6; }
-                    .report-section p { font-size: 13px; color: #eee; line-height: 1.6; margin-bottom: 8px; }
-                    .status-good { color: #4ade80; font-weight: bold; }
-                    .status-fair { color: #facc15; font-weight: bold; }
-                    .status-poor { color: #f87171; font-weight: bold; }
-                    .report-summary { background: #1f2937; padding: 15px; border-left: 4px solid #3b82f6; margin-top: 30px; }
-                </style>
+            < style >
+                    .report - block { margin - bottom: 20px; }
+                    .report - header { color: #aaa; border - bottom: 1px solid #444; padding - bottom: 4px; margin - bottom: 8px; font - size: 14px; text - transform: uppercase; letter - spacing: 0.5px; }
+                    .report - list { padding - left: 20px; color: #ddd; font - size: 13px; line - height: 1.6; }
+                    .report - section p { font - size: 13px; color: #eee; line - height: 1.6; margin - bottom: 8px; }
+                    .status - good { color: #4ade80; font - weight: bold; }
+                    .status - fair { color: #facc15; font - weight: bold; }
+                    .status - poor { color: #f87171; font - weight: bold; }
+                    .report - summary { background: #1f2937; padding: 15px; border - left: 4px solid #3b82f6; margin - top: 30px; }
+                </style >
             `;
 
             const modalHtml = `
-                <div class="analysis-modal-overlay" onclick="const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()">
-                    <div class="analysis-modal" style="width: 800px; max-width: 90vw;">
-                        <div class="analysis-header">
-                            <h3>Cell Performance Analysis Report</h3>
-                            <button class="analysis-close-btn" onclick="document.querySelector('.analysis-modal-overlay').remove()">×</button>
-                        </div>
-                        <div class="analysis-content" style="padding: 30px;">
-                            ${style}
-                            ${combinedHtml}
-                        </div>
+            <div class="analysis-modal-overlay" onclick = "const m=document.querySelector('.analysis-modal-overlay'); if(event.target===m) m.remove()" >
+                <div class="analysis-modal" style="width: 800px; max-width: 90vw;">
+                    <div class="analysis-header">
+                        <h3>Cell Performance Analysis Report</h3>
+                        <button class="analysis-close-btn" onclick="document.querySelector('.analysis-modal-overlay').remove()">×</button>
+                    </div>
+                    <div class="analysis-content" style="padding: 30px;">
+                        ${style}
+                        ${combinedHtml}
                     </div>
                 </div>
+                </div >
             `;
 
             // Append to body
@@ -4311,7 +4530,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
 
         // Determine Identity Label
-        let identityLabel = `${sSC}/${sFreq}`; // Default 
+        let identityLabel = `${ sSC } /${sFreq}`; / / Default
         if (servingRes && servingRes.id) {
             identityLabel = servingRes.id;
         } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
@@ -5519,7 +5738,7 @@ document.addEventListener('DOMContentLoaded', () => {
             modal.id = 'payloadModal';
             modal.className = 'modal';
             modal.innerHTML = `
-    < div class= "modal-content" style = "max-width: 600px; background: #1f2937; color: #e5e7eb; border: 1px solid #374151;" >
+    <div class= "modal-content" style = "max-width: 600px; background: #1f2937; color: #e5e7eb; border: 1px solid #374151;" >
                 <div class="modal-header" style="border-bottom: 1px solid #374151; padding: 10px 15px; display:flex; justify-content:space-between; align-items:center;">
                     <h3 style="margin:0; font-size:16px;">Signaling Details</h3>
                     <span class="close" onclick="document.getElementById('payloadModal').style.display='none'" style="color:#9ca3af; cursor:pointer; font-size:20px;">&times;</span>
@@ -5545,7 +5764,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         content.innerHTML = `
-    < div style = "margin-bottom: 15px;" >
+    <div style = "margin-bottom: 15px;" >
             <div style="font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 600;">Message Type</div>
             <div style="font-size: 14px; color: #fff; font-weight: bold;">${point.message}</div>
         </div >
@@ -6277,7 +6496,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const popupContent = `
-< div style = "font-size:13px; min-width:150px;" >
+<div style = "font-size:13px; min-width:150px;" >
                 <b>${name}</b><br>
                 <div style="color:#888; font-size:11px; margin-top:4px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
                 <button onclick="window.removeUserPoint('${markerId}')" style="margin-top:8px; background:#ef4444; color:white; border:none; padding:2px 5px; border-radius:3px; cursor:pointer; font-size:10px;">Remove</button>
@@ -6618,149 +6837,129 @@ window.syncToBackend = function (siteData) {
 // Map Action Controls are now fixed in the header, no draggability needed.
 
 // ----------------------------------------------------
-// GLOBAL MANAGEMENT SUMMARY GENERATOR (MOVED TO ROOT SCOPE)
-// ----------------------------------------------------
-// ----------------------------------------------------
-// GLOBAL MANAGEMENT SUMMARY GENERATOR (MOVED TO ROOT SCOPE)
-// ----------------------------------------------------
-window.generateManagementSummary = () => {
-    const stash = document.getElementById('point-data-stash');
-    if (!stash || !stash.textContent) {
-        alert("No point data available for summary.");
-        return;
-    }
 
-    let d;
-    try {
-        d = JSON.parse(stash.textContent);
-    } catch (e) {
-        console.error("Stash parse error", e);
-        return;
-    }
-
-    // --- 1. Data Abstraction & Cleaning ---
-    const getVal = (keys) => {
-        for (const k of keys) {
-            if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
-                const clean = String(d[k]).replace(/[^\d.-]/g, '');
-                const floatVal = parseFloat(clean);
-                if (!isNaN(floatVal)) return floatVal;
-            }
-        }
-        return null;
-    };
-
-    // Metrics
-    const rsrp = getVal(['RSRP', 'Signal Strength', 'rsrp']);
-    const sinr = getVal(['SINR', 'Sinr', 'sinr']);
-    const dlTput = getVal(['DL Throughput', 'Downlink Throughput', 'DL_Throughput']);
-    const prbLoad = getVal(['PRB Load', 'Load', 'Cell Load']);
-
-    // Context
-    const cellId = d['Cell Identifier'] || 'Unknown';
-
-    // Robust Location Lookup
-    const latRaw = d['lat'] || d['Latitude'] || d['latitude'] || d['LAT'];
-    const lngRaw = d['lng'] || d['Longitude'] || d['longitude'] || d['LONG'];
-
-    let location = "Unknown";
-    if (latRaw && lngRaw) {
-        const lat = parseFloat(latRaw);
-        const lng = parseFloat(lngRaw);
-        if (!isNaN(lat) && !isNaN(lng)) {
-            location = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+const getVal = (keys) => {
+    for (const k of keys) {
+        if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
+            const clean = String(d[k]).replace(/[^\d.-]/g, '');
+            const floatVal = parseFloat(clean);
+            if (!isNaN(floatVal)) return floatVal;
         }
     }
+    return null;
+};
 
-    // --- 2. Logic Engine ---
+// Metrics
+const rsrp = getVal(['RSRP', 'Signal Strength', 'rsrp']);
+const sinr = getVal(['SINR', 'Sinr', 'sinr']);
+const dlTput = getVal(['DL Throughput', 'Downlink Throughput', 'DL_Throughput']);
+const prbLoad = getVal(['PRB Load', 'Load', 'Cell Load']);
 
-    // A. Overall Performance Status
-    let status = "Satisfactory";
-    let statusClass = "status-ok"; // Default Green
+// Context
+const cellId = d['Cell Identifier'] || 'Unknown';
 
-    if (rsrp !== null && rsrp < -110) { status = "Critically Degraded (Coverage)"; statusClass = "status-bad"; }
-    else if (sinr !== null && sinr < 0) { status = "Critically Degraded (Interference)"; statusClass = "status-bad"; }
-    else if (rsrp !== null && rsrp < -100) { status = "Poor"; statusClass = "status-bad"; }
-    else if (sinr !== null && sinr < 5) { status = "Suboptimal"; statusClass = "status-warn"; }
-    else if (rsrp > -95 && sinr > 10) { status = "Excellent"; statusClass = "status-ok"; }
+// Robust Location Lookup
+const latRaw = d['lat'] || d['Latitude'] || d['latitude'] || d['LAT'];
+const lngRaw = d['lng'] || d['Longitude'] || d['longitude'] || d['LONG'];
 
-    // B. User Impact & Service
-    let userExp = "Satisfactory";
-    let impactedService = "None specific";
-    let impactClass = "status-ok";
-    let isLowTput = false;
-
-    if (dlTput !== null) {
-        if (dlTput < 1) { userExp = "Severely Limited"; impactedService = "Real-time Video & Browsing"; isLowTput = true; impactClass = "status-bad"; }
-        else if (dlTput < 3) { userExp = "Degraded"; impactedService = "HD Video Streaming"; isLowTput = true; impactClass = "status-warn"; }
-        else if (dlTput < 5) { userExp = "Acceptable"; impactedService = "File Downloads"; impactClass = "status-warn"; }
-        else { userExp = "Good"; impactedService = "High Bandwidth Applications"; impactClass = "status-ok"; }
-    } else {
-        if (status.includes("Critical")) { userExp = "Severely Limited"; impactedService = "All Data Services"; impactClass = "status-bad"; }
-        else if (status.includes("Poor")) { userExp = "Degraded"; impactedService = "High Bitrate Video"; impactClass = "status-warn"; }
+let location = "Unknown";
+if (latRaw && lngRaw) {
+    const lat = parseFloat(latRaw);
+    const lng = parseFloat(lngRaw);
+    if (!isNaN(lat) && !isNaN(lng)) {
+        location = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
     }
+}
 
-    // C. Primary Issues
-    let primaryCause = "None detected";
-    let secondaryCause = "";
+// --- 2. Logic Engine ---
 
-    if (rsrp !== null && rsrp < -110) primaryCause = "Weak RF Coverage (Dead Zone)";
-    else if (sinr !== null && sinr < 3) primaryCause = "High Signal Interference";
-    else if (prbLoad !== null && prbLoad > 80) primaryCause = "High Capacity Utilization (Load)";
-    else if (sinr !== null && sinr < 8) primaryCause = "Moderate Interference (Pilot Pollution)";
-    else if (rsrp !== null && rsrp < -100) primaryCause = "Weak RF Coverage (Edge of Cell)";
+// A. Overall Performance Status
+let status = "Satisfactory";
+let statusClass = "status-ok"; // Default Green
 
-    if (primaryCause.includes("Coverage") && sinr !== null && sinr < 5) secondaryCause = "Compounded by Interference";
-    if (primaryCause.includes("Interference") && rsrp !== null && rsrp < -105) secondaryCause = "Compounded by Weak Signal";
+if (rsrp !== null && rsrp < -110) { status = "Critically Degraded (Coverage)"; statusClass = "status-bad"; }
+else if (sinr !== null && sinr < 0) { status = "Critically Degraded (Interference)"; statusClass = "status-bad"; }
+else if (rsrp !== null && rsrp < -100) { status = "Poor"; statusClass = "status-bad"; }
+else if (sinr !== null && sinr < 5) { status = "Suboptimal"; statusClass = "status-warn"; }
+else if (rsrp > -95 && sinr > 10) { status = "Excellent"; statusClass = "status-ok"; }
 
-    // D. Congestion Analysis
-    let congestionStatus = "not congested";
-    let issueType = "radio-quality-related";
-    let congestionClass = "status-ok";
+// B. User Impact & Service
+let userExp = "Satisfactory";
+let impactedService = "None specific";
+let impactClass = "status-ok";
+let isLowTput = false;
 
-    if (prbLoad !== null && prbLoad > 75) {
-        congestionStatus = "congested";
-        issueType = "capacity-related";
-        congestionClass = "status-bad";
-    } else if (rsrp > -95 && sinr > 10 && isLowTput) {
-        congestionStatus = "likely congested (Backhaul/Transport)";
-        issueType = "capacity-related";
-        congestionClass = "status-warn";
-    }
+if (dlTput !== null) {
+    if (dlTput < 1) { userExp = "Severely Limited"; impactedService = "Real-time Video & Browsing"; isLowTput = true; impactClass = "status-bad"; }
+    else if (dlTput < 3) { userExp = "Degraded"; impactedService = "HD Video Streaming"; isLowTput = true; impactClass = "status-warn"; }
+    else if (dlTput < 5) { userExp = "Acceptable"; impactedService = "File Downloads"; impactClass = "status-warn"; }
+    else { userExp = "Good"; impactedService = "High Bandwidth Applications"; impactClass = "status-ok"; }
+} else {
+    if (status.includes("Critical")) { userExp = "Severely Limited"; impactedService = "All Data Services"; impactClass = "status-bad"; }
+    else if (status.includes("Poor")) { userExp = "Degraded"; impactedService = "High Bitrate Video"; impactClass = "status-warn"; }
+}
 
-    // E. Actions
-    let highPriority = [];
-    let mediumPriority = [];
-    let conclusionAction = "targeted optimization";
+// C. Primary Issues
+let primaryCause = "None detected";
+let secondaryCause = "";
 
-    if (primaryCause.includes("Coverage") && congestionStatus.includes("congested")) {
-        highPriority.push("Review Power Settings / Load Balancing");
-        highPriority.push("Capacity Expansion (Carrier Add/Sector Split)");
-        conclusionAction = "capacity expansion";
-    } else if (primaryCause.includes("Coverage")) {
-        highPriority.push("Check Antenna Tilt (Uptilt if possible)");
-        highPriority.push("Verify Neighbor Cell Relations");
-        mediumPriority.push("Drive Test Verification required");
-    } else if (primaryCause.includes("Interference")) {
-        highPriority.push("Check Overshooting Neighbors");
-        highPriority.push("Review Antenna Downtilts");
-        mediumPriority.push("PCI Planning Review");
-    } else if (congestionStatus.includes("congested")) {
-        highPriority.push("Load Balancing Strategy Review");
-        highPriority.push("Capacity Expansion Planning");
-        conclusionAction = "capacity expansion";
-    } else {
-        highPriority.push("Routine Performance Monitoring");
-        mediumPriority.push("Verify Parameter Consistency");
-    }
+if (rsrp !== null && rsrp < -110) primaryCause = "Weak RF Coverage (Dead Zone)";
+else if (sinr !== null && sinr < 3) primaryCause = "High Signal Interference";
+else if (prbLoad !== null && prbLoad > 80) primaryCause = "High Capacity Utilization (Load)";
+else if (sinr !== null && sinr < 8) primaryCause = "Moderate Interference (Pilot Pollution)";
+else if (rsrp !== null && rsrp < -100) primaryCause = "Weak RF Coverage (Edge of Cell)";
 
-    if (highPriority.length === 0) highPriority.push("Monitor Performance Trend");
+if (primaryCause.includes("Coverage") && sinr !== null && sinr < 5) secondaryCause = "Compounded by Interference";
+if (primaryCause.includes("Interference") && rsrp !== null && rsrp < -105) secondaryCause = "Compounded by Weak Signal";
 
-    // --- 3. Format Output (HTML Structure) ---
-    // Helper to colorize Cause
-    const causeClass = primaryCause === "None detected" ? "status-ok" : "status-bad";
+// D. Congestion Analysis
+let congestionStatus = "not congested";
+let issueType = "radio-quality-related";
+let congestionClass = "status-ok";
 
-    const report = `
+if (prbLoad !== null && prbLoad > 75) {
+    congestionStatus = "congested";
+    issueType = "capacity-related";
+    congestionClass = "status-bad";
+} else if (rsrp > -95 && sinr > 10 && isLowTput) {
+    congestionStatus = "likely congested (Backhaul/Transport)";
+    issueType = "capacity-related";
+    congestionClass = "status-warn";
+}
+
+// E. Actions
+let highPriority = [];
+let mediumPriority = [];
+let conclusionAction = "targeted optimization";
+
+if (primaryCause.includes("Coverage") && congestionStatus.includes("congested")) {
+    highPriority.push("Review Power Settings / Load Balancing");
+    highPriority.push("Capacity Expansion (Carrier Add/Sector Split)");
+    conclusionAction = "capacity expansion";
+} else if (primaryCause.includes("Coverage")) {
+    highPriority.push("Check Antenna Tilt (Uptilt if possible)");
+    highPriority.push("Verify Neighbor Cell Relations");
+    mediumPriority.push("Drive Test Verification required");
+} else if (primaryCause.includes("Interference")) {
+    highPriority.push("Check Overshooting Neighbors");
+    highPriority.push("Review Antenna Downtilts");
+    mediumPriority.push("PCI Planning Review");
+} else if (congestionStatus.includes("congested")) {
+    highPriority.push("Load Balancing Strategy Review");
+    highPriority.push("Capacity Expansion Planning");
+    conclusionAction = "capacity expansion";
+} else {
+    highPriority.push("Routine Performance Monitoring");
+    mediumPriority.push("Verify Parameter Consistency");
+}
+
+if (highPriority.length === 0) highPriority.push("Monitor Performance Trend");
+
+// --- 3. Format Output (HTML Structure) ---
+// Helper to colorize Cause
+const causeClass = primaryCause === "None detected" ? "status-ok" : "status-bad";
+
+const report = `
             <div class="report-block">
                 <h4>CELL PERFORMANCE – MANAGEMENT SUMMARY</h4>
                 <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
@@ -6824,8 +7023,8 @@ window.generateManagementSummary = () => {
             </div>
         `;
 
-    // --- 4. Display ---
-    window.showAnalysisModal(report, "MANAGEMENT SUMMARY");
+// --- 4. Display ---
+window.showAnalysisModal(report, "MANAGEMENT SUMMARY");
 };
 
 window.showAnalysisModal = (content, title) => {
