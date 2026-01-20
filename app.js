@@ -5209,7 +5209,7 @@ fileInput.addEventListener('change', (e) => {
                 map.addEventsLayer(id, signalingData);
             }
 
-            fileStatus.textContent = `Loaded: ${name}(${parsedData.length} pts)`;
+fileStatus.textContent = 'Loaded: ' + name + '(' + parsedData.length + ' pts)';
 
 
         } else {
@@ -5225,7 +5225,7 @@ if (siteInput) {
         const file = e.target.files[0];
         if (!file) return;
 
-        fileStatus.textContent = `Importing Sites...`;
+fileStatus.textContent = 'Importing Sites...';
 
         const reader = new FileReader();
         reader.onload = (event) => {
