@@ -3930,17 +3930,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // --- SECTION 6: SPECTRUM EFFICIENCY ---
         if (dlSpecEff !== null) {
-            if (dlSpecEff < 1000) { output.specEff = "Very Low"; bonus += 10; } // Bonus for very low finding? (As per interpreting 'detected issue') - Wait, prompt says: IF DL Spectral Performance = "Very Low" THEN +10
+            if (dlSpecEff < 1000) { output.specEff = "Very Low"; bonus += 10; }
             else if (dlSpecEff < 2000) output.specEff = "Low";
             else output.specEff = "Normal";
         } else output.specEff = "N/A";
 
         // --- SECTION 7: LINK STABILITY ---
-        /* Note: DL IBLER not requested in Final Output list, but used for logic? 
-           Wait, Rules section 7 exists, but Section 15 (Output) DOES NOT list Link Stability.
-           I will calculate it but not output unless implicitly needed.
-           Actually, checking Section 15 list... "Date Confidence, Coverage, Signal, Channel, User Exp, Load, Spectral, MIMO, CA, Interp, Diag, Rec, Score, Level". 
-           Link Stability is MISSING from Output. I will skip outputting it to string. */
+        // (Skipped as per verification output requirements)
 
         // --- SECTION 8: MIMO UTILIZATION ---
         if (rank2 !== null) {
@@ -4010,7 +4006,6 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (finalScore >= 50) confLevel = "Medium";
 
         // --- GENERATE HTML OUTPUT ---
-        // Style helpers
         const getCls = (val) => {
             if (!val || val === "N/A") return "";
             const v = val.toLowerCase();
@@ -4049,7 +4044,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div style="color:#fff; font-weight:700; font-size:14px; margin-top:2px; color:#f87171;">${diagnosis}</div>
             </div>
             
-             ${
+            ${
             interpretation ? `
             <div style="margin-bottom:8px;">
                 <div style="color:#888; font-size:10px; text-transform:uppercase;">Interpretation</div>
@@ -4255,9 +4250,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Styles for specific keywords
                 const colorize = (txt) => {
                     const t = txt.toLowerCase();
-                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `< span class="status-good" > ${ txt }</span > `;
-                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `< span class="status-fair" > ${ txt }</span > `;
-                    return `< span class="status-poor" > ${ txt }</span > `;
+                    if (t === 'good' || t === 'low' || t === 'stable' || t === 'acceptable' || t === 'not congested' || t === 'well utilized' || t === 'effective') return `<span class="status-good" > ${ txt }</span > `;
+                    if (t === 'fair' || t === 'moderate' || t === 'keep') return `<span class="status-fair" > ${ txt }</span > `;
+                    return `<span class="status-poor" > ${ txt }</span > `;
                 };
 
                 combinedHtml += `
