@@ -4519,11 +4519,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
 
         // Determine Identity Label
-        let identityLabel = `${ sSC } /${sFreq}`; / / Default
+        let identityLabel = sSC + ' / ' + sFreq; // Default
         if (servingRes && servingRes.id) {
             identityLabel = servingRes.id;
         } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
-            identityLabel = `${sRnc}/${sCid}`; // UMTS RNC/CID
+            identityLabel = sRnc + '/' + sCid; // UMTS RNC/CID
         } else if (p.cellId && p.cellId !== 'N/A') {
             identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
         }
@@ -4587,7 +4587,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const neighbors = rawNeighbors.map((n, i) => {
             const resolved = resolveN(n.sc, n.freq, n.cellName);
             return {
-                type: `N${i + 1}`,
+                type: `N${ i + 1
+    } `,
                 name: resolved.name,
                 rnc: resolved.rnc,
                 cid: resolved.cid,
@@ -4608,12 +4609,12 @@ document.addEventListener('DOMContentLoaded', () => {
         let sClickAction = '';
         /* FIX: Use highlightAndPan */
         if (servingRes && servingRes.lat && servingRes.lng) {
-            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? `${servingRes.rnc}/${servingRes.cid}` : '');
-            sClickAction = `onclick="window.highlightAndPan(${servingRes.lat}, ${servingRes.lng}, '${safeId}', 'serving')" style="cursor:pointer; color:#fff;"`;
+            const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? `${ servingRes.rnc }/${servingRes.cid}` : '');
+sClickAction = `onclick="window.highlightAndPan(${servingRes.lat}, ${servingRes.lng}, '${safeId}', 'serving')" style="cursor:pointer; color:#fff;"`;
         }
 
-        // Serving Row
-        rows += `
+// Serving Row
+rows += `
             <tr class="log-row serving-row">
                 <td class="log-cell-type">Serving</td>
                 <td class="log-cell-name"><span class="log-header-serving" ${sClickAction}>${sName}</span> <span style="color:#666; font-size:10px;">(${identityLabel})</span></td>
@@ -4624,18 +4625,18 @@ document.addEventListener('DOMContentLoaded', () => {
             </tr>
         `;
 
-        neighbors.forEach(n => {
-            let nIdLabel = `${n.sc}/${n.freq}`;
-            if (n.rnc && n.cid) nIdLabel = `${n.rnc}/${n.cid}`;
+neighbors.forEach(n => {
+    let nIdLabel = `${n.sc}/${n.freq}`;
+    if (n.rnc && n.cid) nIdLabel = `${n.rnc}/${n.cid}`;
 
-            let nClickAction = '';
-            /* FIX: Use highlightAndPan */
-            if (n.lat && n.lng) {
-                const safeId = n.id || (n.rnc && n.cid ? `${n.rnc}/${n.cid}` : '');
-                nClickAction = `onclick="window.highlightAndPan(${n.lat}, ${n.lng}, '${safeId}', 'neighbor')" style="cursor:pointer;"`;
-            }
+    let nClickAction = '';
+    /* FIX: Use highlightAndPan */
+    if (n.lat && n.lng) {
+        const safeId = n.id || (n.rnc && n.cid ? `${n.rnc}/${n.cid}` : '');
+        nClickAction = `onclick="window.highlightAndPan(${n.lat}, ${n.lng}, '${safeId}', 'neighbor')" style="cursor:pointer;"`;
+    }
 
-            rows += `
+    rows += `
                 <tr class="log-row">
                     <td class="log-cell-type">${n.type}</td>
                     <td class="log-cell-name"><span ${nClickAction}>${n.name}</span> <span style="color:#666; font-size:10px;">(${nIdLabel})</span></td>
@@ -4645,41 +4646,41 @@ document.addEventListener('DOMContentLoaded', () => {
                     <td class="log-cell-val">${n.freq}</td>
                 </tr>
             `;
-        });
+});
 
-        // ----------------------------------------------------
-        // EXTRACT OTHER METRICS
-        // ----------------------------------------------------
-        let extraMetricsHtml = '';
-        const sourceObj = p.properties ? p.properties : p;
-        const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
-            'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual',
-            'rnc', 'cid', 'lac', 'freq', 'earfcn', 'uarfcn', 'band', 'tech', 'technology',
-            'cellid', 'cell_id', 'sitename', 'cellname', 'name',
-            'n1_sc', 'n1_rscp', 'n1_ecno', 'n2_sc', 'n2_rscp', 'n2_ecno', 'n3_sc', 'n3_rscp', 'n3_ecno',
-            'a2_sc', 'a2_rscp', 'a3_sc', 'a3_rscp'];
+// ----------------------------------------------------
+// EXTRACT OTHER METRICS
+// ----------------------------------------------------
+let extraMetricsHtml = '';
+const sourceObj = p.properties ? p.properties : p;
+const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
+    'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual',
+    'rnc', 'cid', 'lac', 'freq', 'earfcn', 'uarfcn', 'band', 'tech', 'technology',
+    'cellid', 'cell_id', 'sitename', 'cellname', 'name',
+    'n1_sc', 'n1_rscp', 'n1_ecno', 'n2_sc', 'n2_rscp', 'n2_ecno', 'n3_sc', 'n3_rscp', 'n3_ecno',
+    'a2_sc', 'a2_rscp', 'a3_sc', 'a3_rscp'];
 
-        const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
+const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
 
-        Object.entries(sourceObj).forEach(([k, v]) => {
-            const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
-            if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
-            if (isNeighborKey(k.toLowerCase())) return;
-            if (typeof v === 'object') return; // Skip nested objects for now
-            if (v === undefined || v === null || v === '') return;
+Object.entries(sourceObj).forEach(([k, v]) => {
+    const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
+    if (isNeighborKey(k.toLowerCase())) return;
+    if (typeof v === 'object') return; // Skip nested objects for now
+    if (v === undefined || v === null || v === '') return;
 
-            // Format numeric
-            let val = v;
-            if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
+    // Format numeric
+    let val = v;
+    if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
 
-            extraMetricsHtml += `
+    extraMetricsHtml += `
             <div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">
                 <span style="color:#aaa; margin-right: 10px;">${k}</span>
                 <span style="color:#fff; font-weight:bold; text-align: right;">${val}</span>
             </div>`;
-        });
+});
 
-        const html = `
+const html = `
             <div class="log-view-container">
              <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">
                     <div>
@@ -4720,103 +4721,103 @@ document.addEventListener('DOMContentLoaded', () => {
                     <!-- Hidden data stash for the analyzer -->
                     <script type="application/json" id="point-data-stash">
                     ${JSON.stringify({
-            ...(p.properties || p),
-            'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
-            'Cell Name': sName,
-            'Tech': isLTE ? 'LTE' : 'UMTS'
-        })}
+    ...(p.properties || p),
+    'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
+    'Cell Name': sName,
+    'Tech': isLTE ? 'LTE' : 'UMTS'
+})}
                     </script>
                 </div>
 
             </div>
         `;
 
-        // Add connection targets for top 3 neighbors if they resolve
-        neighbors.slice(0, 3).forEach(n => {
-            if (window.resolveSmartSite) {
-                const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
-                if (nRes && nRes.lat && nRes.lng) {
-                    connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: '#ef4444', weight: 4, cellId: nRes.id });
-                }
-            }
-        });
+// Add connection targets for top 3 neighbors if they resolve
+neighbors.slice(0, 3).forEach(n => {
+    if (window.resolveSmartSite) {
+        const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
+        if (nRes && nRes.lat && nRes.lng) {
+            connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: '#ef4444', weight: 4, cellId: nRes.id });
+        }
+    }
+});
 
-        return { html, connectionTargets };
+return { html, connectionTargets };
     }
 
 
-    window.updateFloatingInfoPanelMulti = (hits) => {
-        try {
-            window.lastMultiHits = hits; // Store for toggle re-render
+window.updateFloatingInfoPanelMulti = (hits) => {
+    try {
+        window.lastMultiHits = hits; // Store for toggle re-render
 
-            const panel = document.getElementById('floatingInfoPanel');
-            const content = document.getElementById('infoPanelContent');
-            const headerDom = document.getElementById('infoPanelHeader');
+        const panel = document.getElementById('floatingInfoPanel');
+        const content = document.getElementById('infoPanelContent');
+        const headerDom = document.getElementById('infoPanelHeader');
 
-            if (!panel || !content) return;
+        if (!panel || !content) return;
 
-            if (panel.style.display !== 'block') panel.style.display = 'block';
-            content.innerHTML = ''; // Clear
+        if (panel.style.display !== 'block') panel.style.display = 'block';
+        content.innerHTML = ''; // Clear
 
-            // Inject Toggle Button into Header if not present
-            let toggleBtn = document.getElementById('toggleViewBtn');
-            if (!toggleBtn && headerDom) {
-                // Remove existing title text to replace with flex container if needed, or just append
-                // Let's repurpose the header content slightly
-                const closeBtn = headerDom.querySelector('.info-panel-close');
+        // Inject Toggle Button into Header if not present
+        let toggleBtn = document.getElementById('toggleViewBtn');
+        if (!toggleBtn && headerDom) {
+            // Remove existing title text to replace with flex container if needed, or just append
+            // Let's repurpose the header content slightly
+            const closeBtn = headerDom.querySelector('.info-panel-close');
 
-                toggleBtn = document.createElement('span');
-                toggleBtn.id = 'toggleViewBtn';
-                toggleBtn.className = 'toggle-view-btn';
-                toggleBtn.innerHTML = '⚙️ View';
-                toggleBtn.title = 'Switch View Mode';
-                toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };
+            toggleBtn = document.createElement('span');
+            toggleBtn.id = 'toggleViewBtn';
+            toggleBtn.className = 'toggle-view-btn';
+            toggleBtn.innerHTML = '⚙️ View';
+            toggleBtn.title = 'Switch View Mode';
+            toggleBtn.onclick = (e) => { e.stopPropagation(); window.togglePointDetailsMode(); };
 
-                // Insert before close button
-                headerDom.insertBefore(toggleBtn, closeBtn);
-            }
+            // Insert before close button
+            headerDom.insertBefore(toggleBtn, closeBtn);
+        }
 
-            let allConnectionTargets = [];
-            let aggregatedData = [];
+        let allConnectionTargets = [];
+        let aggregatedData = [];
 
-            hits.forEach((hit, idx) => {
-                const { log, point } = hit;
+        hits.forEach((hit, idx) => {
+            const { log, point } = hit;
 
-                // Collect Data for Unified Analysis
-                aggregatedData.push({
-                    name: `Layer: ${log.name}`,
-                    data: point.properties ? point.properties : point
-                });
-
-                // Header for this Log Layer
-                const header = document.createElement('div');
-                header.style.cssText = `background:#ef4444; color:#fff; padding:5px; font-weight:bold; font-size:12px; margin-top:${idx > 0 ? '10px' : '0'}; border-radius:4px 4px 0 0;`;
-                header.textContent = `Layer: ${log.name}`;
-                content.appendChild(header);
-
-                // Body Selection
-                // Use new Log Generator if mode is 'log', else default
-                const generator = window.pointDetailsMode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
-                const { html, connectionTargets } = generator(point, log.color, false);
-
-                const body = document.createElement('div');
-                body.innerHTML = html;
-                content.appendChild(body);
-
-                // Aggregate connections
-                if (connectionTargets) allConnectionTargets = allConnectionTargets.concat(connectionTargets);
+            // Collect Data for Unified Analysis
+            aggregatedData.push({
+                name: `Layer: ${log.name}`,
+                data: point.properties ? point.properties : point
             });
 
-            // Update Connections (Draw ALL lines from ALL layers)
-            if (window.mapRenderer && !window.isSpiderMode && hits.length > 0) {
-                const primary = hits[0].point;
-                window.mapRenderer.drawConnections({ lat: primary.lat, lng: primary.lng }, allConnectionTargets);
-            }
+            // Header for this Log Layer
+            const header = document.createElement('div');
+            header.style.cssText = `background:#ef4444; color:#fff; padding:5px; font-weight:bold; font-size:12px; margin-top:${idx > 0 ? '10px' : '0'}; border-radius:4px 4px 0 0;`;
+            header.textContent = `Layer: ${log.name}`;
+            content.appendChild(header);
 
-            // UNIFIED ANALYZE BUTTON
-            const btnContainer = document.createElement('div');
-            btnContainer.style.cssText = "margin-top: 15px; text-align: center; border-top: 1px solid #555; padding-top: 10px;";
-            btnContainer.innerHTML = `
+            // Body Selection
+            // Use new Log Generator if mode is 'log', else default
+            const generator = window.pointDetailsMode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
+            const { html, connectionTargets } = generator(point, log.color, false);
+
+            const body = document.createElement('div');
+            body.innerHTML = html;
+            content.appendChild(body);
+
+            // Aggregate connections
+            if (connectionTargets) allConnectionTargets = allConnectionTargets.concat(connectionTargets);
+        });
+
+        // Update Connections (Draw ALL lines from ALL layers)
+        if (window.mapRenderer && !window.isSpiderMode && hits.length > 0) {
+            const primary = hits[0].point;
+            window.mapRenderer.drawConnections({ lat: primary.lat, lng: primary.lng }, allConnectionTargets);
+        }
+
+        // UNIFIED ANALYZE BUTTON
+        const btnContainer = document.createElement('div');
+        btnContainer.style.cssText = "margin-top: 15px; text-align: center; border-top: 1px solid #555; padding-top: 10px;";
+        btnContainer.innerHTML = `
                 <button onclick="window.analyzePoint(this)" 
                         style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; width: 100%;">
                     Analyze All Layers
@@ -4824,618 +4825,618 @@ document.addEventListener('DOMContentLoaded', () => {
                 <script type="application/json" id="point-data-stash">${JSON.stringify(aggregatedData)}</script>
                 <script type="application/json" id="point-data-stash-meta">{"hits":true}</script>
             `;
-            content.appendChild(btnContainer);
+        content.appendChild(btnContainer);
 
-        } catch (e) {
-            console.error("Error updating Multi-Info Panel:", e);
-        }
-    };
+    } catch (e) {
+        console.error("Error updating Multi-Info Panel:", e);
+    }
+};
 
-    window.syncMarker = null; // Global marker for current sync point
+window.syncMarker = null; // Global marker for current sync point
 
 
-    window.globalSync = (logId, index, source, skipPanel = false) => {
-        const log = loadedLogs.find(l => l.id === logId);
-        if (!log || !log.points[index]) return;
+window.globalSync = (logId, index, source, skipPanel = false) => {
+    const log = loadedLogs.find(l => l.id === logId);
+    if (!log || !log.points[index]) return;
 
-        const point = log.points[index];
+    const point = log.points[index];
 
-        // 1. Update Map (Marker & View)
-        // 1. Update Map (Marker & View)
-        // Always update marker, even if source is map (to show selection highlight)
-        if (!window.syncMarker) {
-            window.syncMarker = L.circleMarker([point.lat, point.lng], {
-                radius: 18, // Larger radius to surround the point
-                color: '#ffff00', // Yellow
-                weight: 4,
-                fillColor: 'transparent',
-                fillOpacity: 0
-            }).addTo(window.map);
-        } else {
-            window.syncMarker.setLatLng([point.lat, point.lng]);
-            // Ensure style is consistent (in case it was overwritten or different)
-            window.syncMarker.setStyle({
-                radius: 18,
-                color: '#ffff00',
-                weight: 4,
-                fillColor: 'transparent',
-                fillOpacity: 0
-            });
-        }
-
-        // View Navigation (Zoom/Pan) - User Request: Zoom in on click
-        // UPDATED: Keep current zoom, just pan.
-        // AB: User requested to NOT move map when clicking ON the map.
-        if (source !== 'chart_scrub' && source !== 'map') {
-            // const targetZoom = Math.max(window.map.getZoom(), 17); // Previous logic
-            // window.map.flyTo([point.lat, point.lng], targetZoom, { animate: true, duration: 0.5 });
-
-            // New Logic: Pan only, preserve zoom
-            window.map.panTo([point.lat, point.lng], { animate: true, duration: 0.5 });
-        }
-
-        // 2. Update Charts
-        if (source !== 'chart' && source !== 'chart_scrub') {
-            if (window.currentChartLogId === logId && window.updateDualCharts) {
-                // We need to update the chart's active index WITHOUT triggering a loop
-                // updateDualCharts draws the chart.
-                // We simply set the index and draw.
-                window.updateDualCharts(index, true); // true = skipSync to avoid loop
-
-                // AUTO ZOOM if requested (User Request: Zoom on Click)
-                if (window.zoomChartToActive) {
-                    window.zoomChartToActive();
-                }
-            }
-        }
-
-        // 3. Update Floating Panel
-        if (window.updateFloatingInfoPanel && !skipPanel) {
-            window.updateFloatingInfoPanel(point, log.color);
-        }
-
-        // 4. Update Grid
-        if (window.currentGridLogId === logId) {
-            const row = document.getElementById(`grid-row-${index}`);
-            if (row) {
-                document.querySelectorAll('.grid-row').forEach(r => r.classList.remove('selected-row'));
-                row.classList.add('selected-row');
-
-                if (source !== 'grid') {
-                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            }
-        }
-
-        // 5. Update Signaling
-        if (source !== 'signaling') {
-            // Find closest signaling row by time logic (reuised from highlightPoint)
-            const targetTime = point.time;
-            const parseTime = (t) => {
-                const [h, m, s] = t.split(':');
-                return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;
-            };
-            const tTarget = parseTime(targetTime);
-            let bestIdx = null;
-            let minDiff = Infinity;
-            const rows = document.querySelectorAll('#signalingTableBody tr');
-            rows.forEach((row) => {
-                if (!row.pointData) return;
-                row.classList.remove('selected-row');
-                const t = parseTime(row.pointData.time);
-                const diff = Math.abs(t - tTarget);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    bestIdx = row;
-                }
-            });
-            if (bestIdx && minDiff < 5000) {
-                bestIdx.classList.add('selected-row');
-                bestIdx.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-        }
-    };
-
-    // Global Listener for Custom Legend Color Changes
-    window.addEventListener('metric-color-changed', (e) => {
-        const { id, color } = e.detail;
-        console.log(`[App] Color overridden for ${id} -> ${color}`);
-
-        // Re-render ALL logs currently showing Discrete Metrics (CellId or CID)
-        loadedLogs.forEach(log => {
-            if (log.currentParam === 'cellId' || log.currentParam === 'cid') {
-                window.mapRenderer.addLogLayer(log.id, log.points, log.currentParam);
-            }
+    // 1. Update Map (Marker & View)
+    // 1. Update Map (Marker & View)
+    // Always update marker, even if source is map (to show selection highlight)
+    if (!window.syncMarker) {
+        window.syncMarker = L.circleMarker([point.lat, point.lng], {
+            radius: 18, // Larger radius to surround the point
+            color: '#ffff00', // Yellow
+            weight: 4,
+            fillColor: 'transparent',
+            fillOpacity: 0
+        }).addTo(window.map);
+    } else {
+        window.syncMarker.setLatLng([point.lat, point.lng]);
+        // Ensure style is consistent (in case it was overwritten or different)
+        window.syncMarker.setStyle({
+            radius: 18,
+            color: '#ffff00',
+            weight: 4,
+            fillColor: 'transparent',
+            fillOpacity: 0
         });
-    });
+    }
 
-    // Global Sync Listener (Legacy Adapatation)
-    // Global Sync Listener (Aligning with User Logic: Coordinator Pattern)
-    window.addEventListener('map-point-clicked', (e) => {
-        const { logId, point, source } = e.detail;
+    // View Navigation (Zoom/Pan) - User Request: Zoom in on click
+    // UPDATED: Keep current zoom, just pan.
+    // AB: User requested to NOT move map when clicking ON the map.
+    if (source !== 'chart_scrub' && source !== 'map') {
+        // const targetZoom = Math.max(window.map.getZoom(), 17); // Previous logic
+        // window.map.flyTo([point.lat, point.lng], targetZoom, { animate: true, duration: 0.5 });
 
-        const log = loadedLogs.find(l => l.id === logId);
-        if (log) {
-            // Prioritize ID match
-            let index = -1;
-            if (point.id !== undefined) {
-                index = log.points.findIndex(p => p.id === point.id);
-            }
-            // Fallback to Time
-            if (index === -1 && point.time) {
-                index = log.points.findIndex(p => p.time === point.time);
-            }
-            // Fallback to Coord (Tolerance 1e-5 for roughly 1m)
-            if (index === -1) {
-                index = log.points.findIndex(p => Math.abs(p.lat - point.lat) < 0.00001 && Math.abs(p.lng - point.lng) < 0.00001);
-            }
+        // New Logic: Pan only, preserve zoom
+        window.map.panTo([point.lat, point.lng], { animate: true, duration: 0.5 });
+    }
 
-            if (index !== -1) {
-                // The Coordinator: globalSync
-                // Logic: catches map-point-clicked and calls window.globalSync(). 
-                // It specifically invokes window.updateFloatingInfoPanel(point) (via skipPanel=false default)
-                window.globalSync(logId, index, source || 'map');
-            } else {
-                console.warn("[App] Sync Index not found for clicked point.");
-                // Fallback: If we can't sync index, just update the panel directly
-                if (window.updateFloatingInfoPanel) {
-                    window.updateFloatingInfoPanel(point);
-                }
+    // 2. Update Charts
+    if (source !== 'chart' && source !== 'chart_scrub') {
+        if (window.currentChartLogId === logId && window.updateDualCharts) {
+            // We need to update the chart's active index WITHOUT triggering a loop
+            // updateDualCharts draws the chart.
+            // We simply set the index and draw.
+            window.updateDualCharts(index, true); // true = skipSync to avoid loop
+
+            // AUTO ZOOM if requested (User Request: Zoom on Click)
+            if (window.zoomChartToActive) {
+                window.zoomChartToActive();
             }
         }
-    });
+    }
 
-    // SPIDER OPTION: Sector Click Listener
-    window.addEventListener('site-sector-clicked', (e) => {
-        // GATED: Only run if Spider Mode is ON
-        if (!window.isSpiderMode) return;
+    // 3. Update Floating Panel
+    if (window.updateFloatingInfoPanel && !skipPanel) {
+        window.updateFloatingInfoPanel(point, log.color);
+    }
 
-        const sector = e.detail;
-        if (!sector || !window.mapRenderer) return;
+    // 4. Update Grid
+    if (window.currentGridLogId === logId) {
+        const row = document.getElementById(`grid-row-${index}`);
+        if (row) {
+            document.querySelectorAll('.grid-row').forEach(r => r.classList.remove('selected-row'));
+            row.classList.add('selected-row');
 
-        console.log("[Spider] Sector Clicked:", sector);
+            if (source !== 'grid') {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+    }
 
-        // Find all points served by this sector
-        const targetPoints = [];
-
-        // Calculate "Tip Top" (Outer Edge Center) based on Azimuth
-        // Use range from the event (current rendering range)
-        const range = sector.range || 200;
-        const rad = Math.PI / 180;
-        const azRad = (sector.azimuth || 0) * rad;
-        const latRad = sector.lat * rad;
-
-        const dy = Math.cos(azRad) * range;
-        const dx = Math.sin(azRad) * range;
-        const dLat = dy / 111111;
-        const dLng = dx / (111111 * Math.cos(latRad));
-
-        const startPt = {
-            lat: sector.lat + dLat,
-            lng: sector.lng + dLng
+    // 5. Update Signaling
+    if (source !== 'signaling') {
+        // Find closest signaling row by time logic (reuised from highlightPoint)
+        const targetTime = point.time;
+        const parseTime = (t) => {
+            const [h, m, s] = t.split(':');
+            return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;
         };
-
-        const norm = (v) => v !== undefined && v !== null ? String(v).trim() : '';
-        const isValid = (v) => v !== undefined && v !== null && v !== 'N/A' && v !== '';
-
-        loadedLogs.forEach(log => {
-            log.points.forEach(p => {
-                let isMatch = false;
-
-                // 1. Strict RNC/CID Match (Highest Priority)
-                if (isValid(sector.rnc) && isValid(sector.cid) && isValid(p.rnc) && isValid(p.cellId)) {
-                    if (norm(sector.rnc) === norm(p.rnc) && norm(sector.cid) === norm(p.cellId)) {
-                        isMatch = true;
-                    }
-                }
-
-                // 2. Generic CellID Match (Fallback)
-                if (!isMatch && sector.cellId && isValid(p.cellId)) {
-                    if (norm(sector.cellId) === norm(p.cellId)) {
-                        isMatch = true;
-                    }
-                    // Support "RNC/CID" format in sector.cellId
-                    else if (String(sector.cellId).includes('/')) {
-                        const parts = String(sector.cellId).split('/');
-                        const cid = parts[parts.length - 1];
-                        const rnc = parts.length > 1 ? parts[parts.length - 2] : null;
-
-                        if (rnc && isValid(p.rnc) && norm(p.rnc) === norm(rnc) && norm(p.cellId) === norm(cid)) {
-                            isMatch = true;
-                        } else if (norm(p.cellId) === norm(cid) && !isValid(p.rnc)) {
-                            isMatch = true;
-                        }
-                    }
-                }
-
-                // 3. SC Match (Secondary Fallback)
-                if (!isMatch && sector.sc !== undefined && isValid(p.sc)) {
-                    if (p.sc == sector.sc) {
-                        isMatch = true;
-                        // Refine with LAC if available
-                        if (sector.lac && isValid(p.lac) && norm(sector.lac) !== norm(p.lac)) {
-                            isMatch = false;
-                        }
-                    }
-                }
-
-                if (isMatch) {
-                    targetPoints.push({
-                        lat: p.lat,
-                        lng: p.lng,
-                        color: '#ffff00', // Yellow lines
-                        weight: 2,
-                        dashArray: '4, 4'
-                    });
-                }
-            });
+        const tTarget = parseTime(targetTime);
+        let bestIdx = null;
+        let minDiff = Infinity;
+        const rows = document.querySelectorAll('#signalingTableBody tr');
+        rows.forEach((row) => {
+            if (!row.pointData) return;
+            row.classList.remove('selected-row');
+            const t = parseTime(row.pointData.time);
+            const diff = Math.abs(t - tTarget);
+            if (diff < minDiff) {
+                minDiff = diff;
+                bestIdx = row;
+            }
         });
+        if (bestIdx && minDiff < 5000) {
+            bestIdx.classList.add('selected-row');
+            bestIdx.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+};
 
-        if (targetPoints.length > 0) {
-            console.log(`[Spider] Found ${targetPoints.length} points.`);
-            window.mapRenderer.drawConnections(startPt, targetPoints);
-            fileStatus.textContent = `Spider: Showing ${targetPoints.length} points for ${sector.cellId || sector.sc}`;
-        } else {
-            console.warn("[Spider] No matching points found.");
-            fileStatus.textContent = `Spider: No points found for ${sector.cellId || sector.sc}`;
-            window.mapRenderer.clearConnections();
+// Global Listener for Custom Legend Color Changes
+window.addEventListener('metric-color-changed', (e) => {
+    const { id, color } = e.detail;
+    console.log(`[App] Color overridden for ${id} -> ${color}`);
+
+    // Re-render ALL logs currently showing Discrete Metrics (CellId or CID)
+    loadedLogs.forEach(log => {
+        if (log.currentParam === 'cellId' || log.currentParam === 'cid') {
+            window.mapRenderer.addLogLayer(log.id, log.points, log.currentParam);
         }
     });
+});
 
-    fileInput.addEventListener('change', (e) => {
+// Global Sync Listener (Legacy Adapatation)
+// Global Sync Listener (Aligning with User Logic: Coordinator Pattern)
+window.addEventListener('map-point-clicked', (e) => {
+    const { logId, point, source } = e.detail;
+
+    const log = loadedLogs.find(l => l.id === logId);
+    if (log) {
+        // Prioritize ID match
+        let index = -1;
+        if (point.id !== undefined) {
+            index = log.points.findIndex(p => p.id === point.id);
+        }
+        // Fallback to Time
+        if (index === -1 && point.time) {
+            index = log.points.findIndex(p => p.time === point.time);
+        }
+        // Fallback to Coord (Tolerance 1e-5 for roughly 1m)
+        if (index === -1) {
+            index = log.points.findIndex(p => Math.abs(p.lat - point.lat) < 0.00001 && Math.abs(p.lng - point.lng) < 0.00001);
+        }
+
+        if (index !== -1) {
+            // The Coordinator: globalSync
+            // Logic: catches map-point-clicked and calls window.globalSync(). 
+            // It specifically invokes window.updateFloatingInfoPanel(point) (via skipPanel=false default)
+            window.globalSync(logId, index, source || 'map');
+        } else {
+            console.warn("[App] Sync Index not found for clicked point.");
+            // Fallback: If we can't sync index, just update the panel directly
+            if (window.updateFloatingInfoPanel) {
+                window.updateFloatingInfoPanel(point);
+            }
+        }
+    }
+});
+
+// SPIDER OPTION: Sector Click Listener
+window.addEventListener('site-sector-clicked', (e) => {
+    // GATED: Only run if Spider Mode is ON
+    if (!window.isSpiderMode) return;
+
+    const sector = e.detail;
+    if (!sector || !window.mapRenderer) return;
+
+    console.log("[Spider] Sector Clicked:", sector);
+
+    // Find all points served by this sector
+    const targetPoints = [];
+
+    // Calculate "Tip Top" (Outer Edge Center) based on Azimuth
+    // Use range from the event (current rendering range)
+    const range = sector.range || 200;
+    const rad = Math.PI / 180;
+    const azRad = (sector.azimuth || 0) * rad;
+    const latRad = sector.lat * rad;
+
+    const dy = Math.cos(azRad) * range;
+    const dx = Math.sin(azRad) * range;
+    const dLat = dy / 111111;
+    const dLng = dx / (111111 * Math.cos(latRad));
+
+    const startPt = {
+        lat: sector.lat + dLat,
+        lng: sector.lng + dLng
+    };
+
+    const norm = (v) => v !== undefined && v !== null ? String(v).trim() : '';
+    const isValid = (v) => v !== undefined && v !== null && v !== 'N/A' && v !== '';
+
+    loadedLogs.forEach(log => {
+        log.points.forEach(p => {
+            let isMatch = false;
+
+            // 1. Strict RNC/CID Match (Highest Priority)
+            if (isValid(sector.rnc) && isValid(sector.cid) && isValid(p.rnc) && isValid(p.cellId)) {
+                if (norm(sector.rnc) === norm(p.rnc) && norm(sector.cid) === norm(p.cellId)) {
+                    isMatch = true;
+                }
+            }
+
+            // 2. Generic CellID Match (Fallback)
+            if (!isMatch && sector.cellId && isValid(p.cellId)) {
+                if (norm(sector.cellId) === norm(p.cellId)) {
+                    isMatch = true;
+                }
+                // Support "RNC/CID" format in sector.cellId
+                else if (String(sector.cellId).includes('/')) {
+                    const parts = String(sector.cellId).split('/');
+                    const cid = parts[parts.length - 1];
+                    const rnc = parts.length > 1 ? parts[parts.length - 2] : null;
+
+                    if (rnc && isValid(p.rnc) && norm(p.rnc) === norm(rnc) && norm(p.cellId) === norm(cid)) {
+                        isMatch = true;
+                    } else if (norm(p.cellId) === norm(cid) && !isValid(p.rnc)) {
+                        isMatch = true;
+                    }
+                }
+            }
+
+            // 3. SC Match (Secondary Fallback)
+            if (!isMatch && sector.sc !== undefined && isValid(p.sc)) {
+                if (p.sc == sector.sc) {
+                    isMatch = true;
+                    // Refine with LAC if available
+                    if (sector.lac && isValid(p.lac) && norm(sector.lac) !== norm(p.lac)) {
+                        isMatch = false;
+                    }
+                }
+            }
+
+            if (isMatch) {
+                targetPoints.push({
+                    lat: p.lat,
+                    lng: p.lng,
+                    color: '#ffff00', // Yellow lines
+                    weight: 2,
+                    dashArray: '4, 4'
+                });
+            }
+        });
+    });
+
+    if (targetPoints.length > 0) {
+        console.log(`[Spider] Found ${targetPoints.length} points.`);
+        window.mapRenderer.drawConnections(startPt, targetPoints);
+        fileStatus.textContent = `Spider: Showing ${targetPoints.length} points for ${sector.cellId || sector.sc}`;
+    } else {
+        console.warn("[Spider] No matching points found.");
+        fileStatus.textContent = `Spider: No points found for ${sector.cellId || sector.sc}`;
+        window.mapRenderer.clearConnections();
+    }
+});
+
+fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    fileStatus.textContent = `Loading ${file.name}...`;
+
+
+    // TRP Zip Import
+    if (file.name.toLowerCase().endsWith('.trp')) {
+        handleTRPImport(file);
+        return;
+    }
+
+    // NMFS Binary Check
+    if (file.name.toLowerCase().endsWith('.nmfs')) {
+        const headerReader = new FileReader();
+        headerReader.onload = (event) => {
+            const arr = new Uint8Array(event.target.result);
+            // ASCII for NMFS is 78 77 70 83 (0x4e 0x4d 0x46 0x53)
+            // Check if starts with NMFS
+            let isNMFS = false;
+            if (arr.length >= 4) {
+                if (arr[0] === 0x4e && arr[1] === 0x4d && arr[2] === 0x46 && arr[3] === 0x53) {
+                    isNMFS = true;
+                }
+            }
+
+            if (isNMFS) {
+                alert("⚠️ SECURE FILE DETECTED\n\nThis is a proprietary Keysight Nemo 'Secure' Binary file (.nmfs).\n\nThis application can only parse TEXT log files (.nmf or .csv).\n\nPlease open this file in Nemo Outdoor/Analyze and export it as 'Nemo File Format (Text)'.");
+                fileStatus.textContent = 'Error: Encrypted NMFS file.';
+                e.target.value = ''; // Reset
+                return;
+            } else {
+                // Fallback: Maybe it's a text file named .nmfs? Try parsing as text.
+                console.warn("File named .nmfs but missing signature. Attempting text parse...");
+                parseTextLog(file);
+            }
+        };
+        headerReader.readAsArrayBuffer(file.slice(0, 10));
+        return;
+    }
+
+    // Excel / CSV Detection (Binary Read)
+    if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                fileStatus.textContent = 'Parsing Excel...';
+                const data = event.target.result;
+                const result = ExcelParser.parse(data);
+
+                handleParsedResult(result, file.name);
+
+            } catch (err) {
+                console.error('Excel Parse Error:', err);
+                fileStatus.textContent = 'Error parsing Excel: ' + err.message;
+            }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = '';
+        return;
+    }
+
+    // Standard Text Log
+    parseTextLog(file);
+
+    function parseTextLog(f) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const content = event.target.result;
+            fileStatus.textContent = 'Parsing...';
+
+            setTimeout(() => {
+                try {
+                    const result = NMFParser.parse(content);
+                    handleParsedResult(result, f.name);
+                } catch (err) {
+                    console.error('Parser Error:', err);
+                    fileStatus.textContent = 'Error parsing file: ' + err.message;
+                }
+            }, 100);
+        };
+        reader.readAsText(f);
+        e.target.value = '';
+    }
+
+    function getRandomColor() {
+        const letters = '0123456789ABCDEF';
+        let color = '#';
+        for (let i = 0; i < 6; i++) {
+            color += letters[Math.floor(Math.random() * 16)];
+        }
+        return color;
+    }
+
+    function handleParsedResult(result, fileName) {
+        // Handle new parser return format (object vs array)
+        const parsedData = Array.isArray(result) ? result : result.points;
+        const technology = Array.isArray(result) ? 'Unknown' : result.tech;
+        const signalingData = !Array.isArray(result) ? result.signaling : [];
+        const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel
+
+        console.log(`Parsed ${parsedData.length} measurement points and ${signalingData ? signalingData.length : 0} signaling messages.Tech: ${technology}`);
+
+        if (parsedData.length > 0 || (signalingData && signalingData.length > 0)) {
+            const id = Date.now().toString();
+            const name = fileName.replace(/\.[^/.]+$/, "");
+
+            // Add to Logs
+            loadedLogs.push({
+                id: id,
+                name: name,
+                points: parsedData,
+                signaling: signalingData,
+                tech: technology,
+                customMetrics: customMetrics,
+                color: getRandomColor(),
+                visible: true,
+                currentParam: 'level'
+            });
+
+            // Update UI
+            updateLogsList();
+
+            if (parsedData.length > 0) {
+                console.log('[App] Debug First Point:', parsedData[0]);
+                map.addLogLayer(id, parsedData, 'level');
+                const first = parsedData[0];
+                map.setView(first.lat, first.lng);
+            }
+
+            // Add Events Layer (HO Fail, Drop, etc.)
+            if (signalingData && signalingData.length > 0) {
+                map.addEventsLayer(id, signalingData);
+            }
+
+            fileStatus.textContent = `Loaded: ${name}(${parsedData.length} pts)`;
+
+
+        } else {
+            fileStatus.textContent = 'No valid data found.';
+        }
+    }
+});
+
+// Site Import Logic
+const siteInput = document.getElementById('siteInput');
+if (siteInput) {
+    siteInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
-        fileStatus.textContent = `Loading ${file.name}...`;
+        fileStatus.textContent = `Importing Sites...`;
 
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const data = new Uint8Array(event.target.result);
+                const workbook = XLSX.read(data, { type: 'array' });
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
+                const json = XLSX.utils.sheet_to_json(worksheet);
 
-        // TRP Zip Import
-        if (file.name.toLowerCase().endsWith('.trp')) {
-            handleTRPImport(file);
-            return;
-        }
+                console.log('Imported Rows:', json.length);
 
-        // NMFS Binary Check
-        if (file.name.toLowerCase().endsWith('.nmfs')) {
-            const headerReader = new FileReader();
-            headerReader.onload = (event) => {
-                const arr = new Uint8Array(event.target.result);
-                // ASCII for NMFS is 78 77 70 83 (0x4e 0x4d 0x46 0x53)
-                // Check if starts with NMFS
-                let isNMFS = false;
-                if (arr.length >= 4) {
-                    if (arr[0] === 0x4e && arr[1] === 0x4d && arr[2] === 0x46 && arr[3] === 0x53) {
-                        isNMFS = true;
-                    }
-                }
-
-                if (isNMFS) {
-                    alert("⚠️ SECURE FILE DETECTED\n\nThis is a proprietary Keysight Nemo 'Secure' Binary file (.nmfs).\n\nThis application can only parse TEXT log files (.nmf or .csv).\n\nPlease open this file in Nemo Outdoor/Analyze and export it as 'Nemo File Format (Text)'.");
-                    fileStatus.textContent = 'Error: Encrypted NMFS file.';
-                    e.target.value = ''; // Reset
+                if (json.length === 0) {
+                    fileStatus.textContent = 'No rows found in Excel.';
                     return;
-                } else {
-                    // Fallback: Maybe it's a text file named .nmfs? Try parsing as text.
-                    console.warn("File named .nmfs but missing signature. Attempting text parse...");
-                    parseTextLog(file);
-                }
-            };
-            headerReader.readAsArrayBuffer(file.slice(0, 10));
-            return;
-        }
-
-        // Excel / CSV Detection (Binary Read)
-        if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                try {
-                    fileStatus.textContent = 'Parsing Excel...';
-                    const data = event.target.result;
-                    const result = ExcelParser.parse(data);
-
-                    handleParsedResult(result, file.name);
-
-                } catch (err) {
-                    console.error('Excel Parse Error:', err);
-                    fileStatus.textContent = 'Error parsing Excel: ' + err.message;
-                }
-            };
-            reader.readAsArrayBuffer(file);
-            e.target.value = '';
-            return;
-        }
-
-        // Standard Text Log
-        parseTextLog(file);
-
-        function parseTextLog(f) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                const content = event.target.result;
-                fileStatus.textContent = 'Parsing...';
-
-                setTimeout(() => {
-                    try {
-                        const result = NMFParser.parse(content);
-                        handleParsedResult(result, f.name);
-                    } catch (err) {
-                        console.error('Parser Error:', err);
-                        fileStatus.textContent = 'Error parsing file: ' + err.message;
-                    }
-                }, 100);
-            };
-            reader.readAsText(f);
-            e.target.value = '';
-        }
-
-        function getRandomColor() {
-            const letters = '0123456789ABCDEF';
-            let color = '#';
-            for (let i = 0; i < 6; i++) {
-                color += letters[Math.floor(Math.random() * 16)];
-            }
-            return color;
-        }
-
-        function handleParsedResult(result, fileName) {
-            // Handle new parser return format (object vs array)
-            const parsedData = Array.isArray(result) ? result : result.points;
-            const technology = Array.isArray(result) ? 'Unknown' : result.tech;
-            const signalingData = !Array.isArray(result) ? result.signaling : [];
-            const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel
-
-            console.log(`Parsed ${parsedData.length} measurement points and ${signalingData ? signalingData.length : 0} signaling messages.Tech: ${technology}`);
-
-            if (parsedData.length > 0 || (signalingData && signalingData.length > 0)) {
-                const id = Date.now().toString();
-                const name = fileName.replace(/\.[^/.]+$/, "");
-
-                // Add to Logs
-                loadedLogs.push({
-                    id: id,
-                    name: name,
-                    points: parsedData,
-                    signaling: signalingData,
-                    tech: technology,
-                    customMetrics: customMetrics,
-                    color: getRandomColor(),
-                    visible: true,
-                    currentParam: 'level'
-                });
-
-                // Update UI
-                updateLogsList();
-
-                if (parsedData.length > 0) {
-                    console.log('[App] Debug First Point:', parsedData[0]);
-                    map.addLogLayer(id, parsedData, 'level');
-                    const first = parsedData[0];
-                    map.setView(first.lat, first.lng);
                 }
 
-                // Add Events Layer (HO Fail, Drop, etc.)
-                if (signalingData && signalingData.length > 0) {
-                    map.addEventsLayer(id, signalingData);
-                }
+                // Parse Sectors
+                // Try to match common headers
+                // Map needs: lat, lng, azimuth, name, cellId, tech, color
+                const sectors = json.map(row => {
+                    // Normalize helper: lowercase, remove ALL non-alphanumeric chars
+                    const normalize = (str) => String(str).toLowerCase().replace(/[^a-z0-9]/g, '');
+                    const rowKeys = Object.keys(row);
 
-                fileStatus.textContent = `Loaded: ${name}(${parsedData.length} pts)`;
+                    const getVal = (possibleNames) => {
+                        for (let name of possibleNames) {
+                            const target = normalize(name);
+                            // Check exact match of normalized keys
+                            const foundKey = rowKeys.find(k => normalize(k) === target);
+                            if (foundKey) return row[foundKey];
+                        }
+                        return undefined;
+                    };
 
+                    const lat = parseFloat(getVal(['lat', 'latitude', 'lat_decimal']));
+                    const lng = parseFloat(getVal(['long', 'lng', 'longitude', 'lon', 'long_decimal']));
+                    // Extended Azimuth keywords (including 'azimut' for French)
+                    const azimuth = parseFloat(getVal(['azimuth', 'azimut', 'dir', 'bearing', 'az']));
+                    const name = getVal(['nodeb name', 'nodeb_name', 'nodebname', 'site', 'sitename', 'site_name', 'name', 'site name']);
+                    const cellId = getVal(['cell', 'cellid', 'ci', 'cell_name', 'cell id', 'cell_id']);
 
-            } else {
-                fileStatus.textContent = 'No valid data found.';
-            }
-        }
-    });
+                    // New Fields for Strict Matching
+                    const lac = getVal(['lac', 'location area code']);
+                    const pci = getVal(['psc', 'sc', 'pci', 'physical cell id', 'physcial cell id', 'scrambling code', 'physicalcellid']);
+                    const freq = getVal(['downlink uarfcn', 'dl uarfcn', 'uarfcn', 'freq', 'frequency', 'dl freq', 'downlink earfcn', 'dl earfcn', 'earfcn', 'downlinkearfcn']);
+                    const band = getVal(['band', 'band name', 'freq band']);
 
-    // Site Import Logic
-    const siteInput = document.getElementById('siteInput');
-    if (siteInput) {
-        siteInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+                    // Specific Request: eNodeB ID-Cell ID
+                    const enodebCellIdRaw = getVal(['enodeb id-cell id', 'enodebid-cellid', 'enodebidcellid']);
 
-            fileStatus.textContent = `Importing Sites...`;
+                    let rnc = parseInt(getVal(['rnc', 'rncid', 'rnc_id', 'enodeb', 'enodebid', 'enodeb id', 'enodeb_id']));
+                    let cid = parseInt(getVal(['cid', 'c_id', 'ci', 'cell id', 'cell_id', 'cellid']));
 
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                try {
-                    const data = new Uint8Array(event.target.result);
-                    const workbook = XLSX.read(data, { type: 'array' });
-                    const firstSheetName = workbook.SheetNames[0];
-                    const worksheet = workbook.Sheets[firstSheetName];
-                    const json = XLSX.utils.sheet_to_json(worksheet);
+                    let calculatedEci = null;
+                    if (enodebCellIdRaw) {
+                        const parts = String(enodebCellIdRaw).split('-');
+                        if (parts.length === 2) {
+                            const enb = parseInt(parts[0]);
+                            const c = parseInt(parts[1]);
+                            if (!isNaN(enb) && !isNaN(c)) {
+                                // Standard LTE ECI Calculation: eNodeB * 256 + CellID
+                                calculatedEci = (enb * 256) + c;
 
-                    console.log('Imported Rows:', json.length);
-
-                    if (json.length === 0) {
-                        fileStatus.textContent = 'No rows found in Excel.';
-                        return;
-                    }
-
-                    // Parse Sectors
-                    // Try to match common headers
-                    // Map needs: lat, lng, azimuth, name, cellId, tech, color
-                    const sectors = json.map(row => {
-                        // Normalize helper: lowercase, remove ALL non-alphanumeric chars
-                        const normalize = (str) => String(str).toLowerCase().replace(/[^a-z0-9]/g, '');
-                        const rowKeys = Object.keys(row);
-
-                        const getVal = (possibleNames) => {
-                            for (let name of possibleNames) {
-                                const target = normalize(name);
-                                // Check exact match of normalized keys
-                                const foundKey = rowKeys.find(k => normalize(k) === target);
-                                if (foundKey) return row[foundKey];
+                                // Fallback: If RNC/CID columns were missing, use these
+                                if (isNaN(rnc)) rnc = enb;
+                                if (isNaN(cid)) cid = c;
                             }
-                            return undefined;
-                        };
+                        }
+                    }
 
-                        const lat = parseFloat(getVal(['lat', 'latitude', 'lat_decimal']));
-                        const lng = parseFloat(getVal(['long', 'lng', 'longitude', 'lon', 'long_decimal']));
-                        // Extended Azimuth keywords (including 'azimut' for French)
-                        const azimuth = parseFloat(getVal(['azimuth', 'azimut', 'dir', 'bearing', 'az']));
-                        const name = getVal(['nodeb name', 'nodeb_name', 'nodebname', 'site', 'sitename', 'site_name', 'name', 'site name']);
-                        const cellId = getVal(['cell', 'cellid', 'ci', 'cell_name', 'cell id', 'cell_id']);
+                    let tech = getVal(['tech', 'technology', 'system', 'rat']);
+                    const cellName = getVal(['cell name', 'cellname']) || '';
 
-                        // New Fields for Strict Matching
-                        const lac = getVal(['lac', 'location area code']);
-                        const pci = getVal(['psc', 'sc', 'pci', 'physical cell id', 'physcial cell id', 'scrambling code', 'physicalcellid']);
-                        const freq = getVal(['downlink uarfcn', 'dl uarfcn', 'uarfcn', 'freq', 'frequency', 'dl freq', 'downlink earfcn', 'dl earfcn', 'earfcn', 'downlinkearfcn']);
-                        const band = getVal(['band', 'band name', 'freq band']);
+                    // Infer Tech from Name if missing
+                    if (!tech) {
+                        const combinedName = (name + ' ' + cellName).toLowerCase();
+                        if (combinedName.includes('4g') || combinedName.includes('lte') || combinedName.includes('earfcn')) tech = '4G';
+                        else if (combinedName.includes('3g') || combinedName.includes('umts') || combinedName.includes('wcdma')) tech = '3G';
+                        else if (combinedName.includes('2g') || combinedName.includes('gsm')) tech = '2G';
+                        else if (combinedName.includes('5g') || combinedName.includes('nr')) tech = '5G';
+                    }
 
-                        // Specific Request: eNodeB ID-Cell ID
-                        const enodebCellIdRaw = getVal(['enodeb id-cell id', 'enodebid-cellid', 'enodebidcellid']);
-
-                        let rnc = parseInt(getVal(['rnc', 'rncid', 'rnc_id', 'enodeb', 'enodebid', 'enodeb id', 'enodeb_id']));
-                        let cid = parseInt(getVal(['cid', 'c_id', 'ci', 'cell id', 'cell_id', 'cellid']));
-
-                        let calculatedEci = null;
-                        if (enodebCellIdRaw) {
-                            const parts = String(enodebCellIdRaw).split('-');
-                            if (parts.length === 2) {
-                                const enb = parseInt(parts[0]);
-                                const c = parseInt(parts[1]);
-                                if (!isNaN(enb) && !isNaN(c)) {
-                                    // Standard LTE ECI Calculation: eNodeB * 256 + CellID
-                                    calculatedEci = (enb * 256) + c;
-
-                                    // Fallback: If RNC/CID columns were missing, use these
-                                    if (isNaN(rnc)) rnc = enb;
-                                    if (isNaN(cid)) cid = c;
+                    // Robust Fallback: Attempt to extract RNC from CellID or RawID if still missing
+                    if (isNaN(rnc) || !rnc) {
+                        const candidates = [String(enodebCellIdRaw), String(cellId), String(name)];
+                        for (let c of candidates) {
+                            if (c) {
+                                // Check if it's a Big Int (RNC+CID)
+                                const val = parseInt(c);
+                                if (!isNaN(val) && val > 65535) {
+                                    rnc = val >> 16;
+                                    cid = val & 0xFFFF;
+                                    break;
                                 }
-                            }
-                        }
 
-                        let tech = getVal(['tech', 'technology', 'system', 'rat']);
-                        const cellName = getVal(['cell name', 'cellname']) || '';
-
-                        // Infer Tech from Name if missing
-                        if (!tech) {
-                            const combinedName = (name + ' ' + cellName).toLowerCase();
-                            if (combinedName.includes('4g') || combinedName.includes('lte') || combinedName.includes('earfcn')) tech = '4G';
-                            else if (combinedName.includes('3g') || combinedName.includes('umts') || combinedName.includes('wcdma')) tech = '3G';
-                            else if (combinedName.includes('2g') || combinedName.includes('gsm')) tech = '2G';
-                            else if (combinedName.includes('5g') || combinedName.includes('nr')) tech = '5G';
-                        }
-
-                        // Robust Fallback: Attempt to extract RNC from CellID or RawID if still missing
-                        if (isNaN(rnc) || !rnc) {
-                            const candidates = [String(enodebCellIdRaw), String(cellId), String(name)];
-                            for (let c of candidates) {
-                                if (c) {
-                                    // Check if it's a Big Int (RNC+CID)
-                                    const val = parseInt(c);
-                                    if (!isNaN(val) && val > 65535) {
-                                        rnc = val >> 16;
-                                        cid = val & 0xFFFF;
-                                        break;
-                                    }
-
-                                    if (c.includes('-') || c.includes('/')) {
-                                        const parts = c.split(/[-/]/);
-                                        if (parts.length === 2) {
-                                            const p1 = parseInt(parts[0]);
-                                            if (!isNaN(p1) && p1 > 0 && p1 < 65535) {
-                                                rnc = p1;
-                                                // Also recover CID if missing
-                                                if (isNaN(cid)) cid = parseInt(parts[1]);
-                                                break;
-                                            }
+                                if (c.includes('-') || c.includes('/')) {
+                                    const parts = c.split(/[-/]/);
+                                    if (parts.length === 2) {
+                                        const p1 = parseInt(parts[0]);
+                                        if (!isNaN(p1) && p1 > 0 && p1 < 65535) {
+                                            rnc = p1;
+                                            // Also recover CID if missing
+                                            if (isNaN(cid)) cid = parseInt(parts[1]);
+                                            break;
                                         }
                                     }
                                 }
                             }
                         }
-
-                        // Determine Color
-                        let color = '#3b82f6';
-                        if (tech) {
-                            const t = tech.toString().toLowerCase();
-                            if (t.includes('3g') || t.includes('umts')) color = '#eab308'; // Yellow/Orange
-                            if (t.includes('4g') || t.includes('lte')) color = '#3b82f6'; // Blue
-                            if (t.includes('2g') || t.includes('gsm')) color = '#ef4444'; // Red
-                            if (t.includes('5g') || t.includes('nr')) color = '#a855f7'; // Purple
-                        }
-
-                        return {
-                            ...row, // Preserve ALL original columns
-                            lat, lng, azimuth: isNaN(azimuth) ? 0 : azimuth,
-                            name, siteName: name, // Ensure siteName is present
-                            cellName,
-                            cellId,
-                            lac,
-                            lac,
-                            pci: parseInt(pci), sc: parseInt(pci),
-                            freq: parseInt(freq),
-                            band,
-                            tech,
-                            color,
-                            rawEnodebCellId: enodebCellIdRaw,
-                            calculatedEci: calculatedEci,
-                            rnc: isNaN(rnc) ? undefined : rnc,
-                            cid: isNaN(cid) ? undefined : cid
-                        };
-                    })
-                    // Filter out invalid
-                    const validSectors = sectors.filter(s => s && s.lat && s.lng);
-
-                    if (validSectors.length > 0) {
-                        const id = Date.now().toString();
-                        const name = file.name.replace(/\.[^/.]+$/, "");
-
-                        console.log(`[Sites] Importing ${validSectors.length} sites as layer: ${name}`);
-
-                        // Add Layer
-                        try {
-                            if (window.mapRenderer) {
-                                console.log('[Sites] Calling mapRenderer.addSiteLayer...');
-                                window.mapRenderer.addSiteLayer(id, name, validSectors, false); // DO NOT FIT BOUNDS
-                                console.log('[Sites] addSiteLayer successful. Adding sidebar item...');
-                                addSiteLayerToSidebar(id, name, validSectors.length);
-                                console.log('[Sites] Sidebar item added.');
-                            } else {
-                                throw new Error("MapRenderer not initialized");
-                            }
-                            fileStatus.textContent = `Sites Imported: ${validSectors.length}(${name})`;
-                        } catch (innerErr) {
-                            console.error('[Sites] CRITICAL ERROR adding layer:', innerErr);
-                            alert(`Error adding site layer: ${innerErr.message}`);
-                            fileStatus.textContent = 'Error adding layer: ' + innerErr.message;
-                        }
-                    } else {
-                        fileStatus.textContent = 'No valid site data found (check Lat/Lng)';
                     }
-                    e.target.value = ''; // Reset input
-                } catch (err) {
-                    console.error('Site Import Error:', err);
-                    fileStatus.textContent = 'Error parsing sites: ' + err.message;
+
+                    // Determine Color
+                    let color = '#3b82f6';
+                    if (tech) {
+                        const t = tech.toString().toLowerCase();
+                        if (t.includes('3g') || t.includes('umts')) color = '#eab308'; // Yellow/Orange
+                        if (t.includes('4g') || t.includes('lte')) color = '#3b82f6'; // Blue
+                        if (t.includes('2g') || t.includes('gsm')) color = '#ef4444'; // Red
+                        if (t.includes('5g') || t.includes('nr')) color = '#a855f7'; // Purple
+                    }
+
+                    return {
+                        ...row, // Preserve ALL original columns
+                        lat, lng, azimuth: isNaN(azimuth) ? 0 : azimuth,
+                        name, siteName: name, // Ensure siteName is present
+                        cellName,
+                        cellId,
+                        lac,
+                        lac,
+                        pci: parseInt(pci), sc: parseInt(pci),
+                        freq: parseInt(freq),
+                        band,
+                        tech,
+                        color,
+                        rawEnodebCellId: enodebCellIdRaw,
+                        calculatedEci: calculatedEci,
+                        rnc: isNaN(rnc) ? undefined : rnc,
+                        cid: isNaN(cid) ? undefined : cid
+                    };
+                })
+                // Filter out invalid
+                const validSectors = sectors.filter(s => s && s.lat && s.lng);
+
+                if (validSectors.length > 0) {
+                    const id = Date.now().toString();
+                    const name = file.name.replace(/\.[^/.]+$/, "");
+
+                    console.log(`[Sites] Importing ${validSectors.length} sites as layer: ${name}`);
+
+                    // Add Layer
+                    try {
+                        if (window.mapRenderer) {
+                            console.log('[Sites] Calling mapRenderer.addSiteLayer...');
+                            window.mapRenderer.addSiteLayer(id, name, validSectors, false); // DO NOT FIT BOUNDS
+                            console.log('[Sites] addSiteLayer successful. Adding sidebar item...');
+                            addSiteLayerToSidebar(id, name, validSectors.length);
+                            console.log('[Sites] Sidebar item added.');
+                        } else {
+                            throw new Error("MapRenderer not initialized");
+                        }
+                        fileStatus.textContent = `Sites Imported: ${validSectors.length}(${name})`;
+                    } catch (innerErr) {
+                        console.error('[Sites] CRITICAL ERROR adding layer:', innerErr);
+                        alert(`Error adding site layer: ${innerErr.message}`);
+                        fileStatus.textContent = 'Error adding layer: ' + innerErr.message;
+                    }
+                } else {
+                    fileStatus.textContent = 'No valid site data found (check Lat/Lng)';
                 }
-            };
-            reader.readAsArrayBuffer(file);
-        });
+                e.target.value = ''; // Reset input
+            } catch (err) {
+                console.error('Site Import Error:', err);
+                fileStatus.textContent = 'Error parsing sites: ' + err.message;
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+// --- Site Layer Management UI ---
+window.siteLayersList = []; // Track UI state locally if needed, but renderer is source of truth
+
+function addSiteLayerToSidebar(id, name, count) {
+    const container = document.getElementById('sites-layer-list');
+    if (!container) {
+        console.error('[Sites] CRITICAL: Sidebar container #sites-layer-list NOT FOUND in DOM.');
+        return;
     }
 
-    // --- Site Layer Management UI ---
-    window.siteLayersList = []; // Track UI state locally if needed, but renderer is source of truth
+    // AUTO-SHOW SIDEBAR
+    const sidebar = document.getElementById('smartcare-sidebar');
+    if (sidebar) {
+        sidebar.style.display = 'flex';
+    }
 
-    function addSiteLayerToSidebar(id, name, count) {
-        const container = document.getElementById('sites-layer-list');
-        if (!container) {
-            console.error('[Sites] CRITICAL: Sidebar container #sites-layer-list NOT FOUND in DOM.');
-            return;
-        }
+    const item = document.createElement('div');
+    item.className = 'layer-item';
+    item.id = `site - layer - ${id}`;
 
-        // AUTO-SHOW SIDEBAR
-        const sidebar = document.getElementById('smartcare-sidebar');
-        if (sidebar) {
-            sidebar.style.display = 'flex';
-        }
-
-        const item = document.createElement('div');
-        item.className = 'layer-item';
-        item.id = `site - layer - ${id}`;
-
-        item.innerHTML = `
+    item.innerHTML = `
         <div class="layer-info">
             <span class="layer-name" title="${name}" style="font-size:13px;">${name}</span>
         </div>
@@ -5446,264 +5447,264 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
         `;
 
-        // Event Listeners
-        const settingsBtn = item.querySelector('.settings-btn');
-        settingsBtn.onclick = (e) => {
-            e.stopPropagation();
-            // Open Settings Panel in "Layer Mode"
-            const panel = document.getElementById('siteSettingsPanel');
-            if (panel) {
-                panel.style.display = 'block';
-                window.editingLayerId = id; // Set Context
+    // Event Listeners
+    const settingsBtn = item.querySelector('.settings-btn');
+    settingsBtn.onclick = (e) => {
+        e.stopPropagation();
+        // Open Settings Panel in "Layer Mode"
+        const panel = document.getElementById('siteSettingsPanel');
+        if (panel) {
+            panel.style.display = 'block';
+            window.editingLayerId = id; // Set Context
 
-                // Update Title to show we are editing a layer
-                const title = panel.querySelector('h3');
-                if (title) title.textContent = `Settings: ${name}`;
-            }
-        };
-        const visBtn = item.querySelector('.visibility-btn');
-        visBtn.onclick = () => {
-            const isVisible = visBtn.style.opacity !== '0.5';
-            const newState = !isVisible;
+            // Update Title to show we are editing a layer
+            const title = panel.querySelector('h3');
+            if (title) title.textContent = `Settings: ${name}`;
+        }
+    };
+    const visBtn = item.querySelector('.visibility-btn');
+    visBtn.onclick = () => {
+        const isVisible = visBtn.style.opacity !== '0.5';
+        const newState = !isVisible;
 
-            // UI Toggle
-            visBtn.style.opacity = newState ? '1' : '0.5';
-            if (!newState) visBtn.textContent = '━';
-            else visBtn.textContent = '👁️';
+        // UI Toggle
+        visBtn.style.opacity = newState ? '1' : '0.5';
+        if (!newState) visBtn.textContent = '━';
+        else visBtn.textContent = '👁️';
 
-            // Logic Toggle
+        // Logic Toggle
+        if (window.mapRenderer) {
+            window.mapRenderer.toggleSiteLayer(id, newState);
+        }
+    };
+
+    const removeBtn = item.querySelector('.remove-btn');
+    removeBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`Remove site layer "${name}" ? `)) {
             if (window.mapRenderer) {
-                window.mapRenderer.toggleSiteLayer(id, newState);
+                window.mapRenderer.removeSiteLayer(id);
             }
-        };
+            item.remove();
+        }
+    };
 
-        const removeBtn = item.querySelector('.remove-btn');
-        removeBtn.onclick = (e) => {
-            e.stopPropagation();
-            if (confirm(`Remove site layer "${name}" ? `)) {
-                if (window.mapRenderer) {
-                    window.mapRenderer.removeSiteLayer(id);
-                }
-                item.remove();
-            }
-        };
+    container.appendChild(item);
+}
 
-        container.appendChild(item);
-    }
+// Site Settings UI Logic
+const settingsBtn = document.getElementById('siteSettingsBtn');
+const settingsPanel = document.getElementById('siteSettingsPanel');
+const closeSettings = document.getElementById('closeSiteSettings');
+const siteColorBy = document.getElementById('siteColorBy'); // NEW
 
-    // Site Settings UI Logic
-    const settingsBtn = document.getElementById('siteSettingsBtn');
-    const settingsPanel = document.getElementById('siteSettingsPanel');
-    const closeSettings = document.getElementById('closeSiteSettings');
-    const siteColorBy = document.getElementById('siteColorBy'); // NEW
+if (settingsBtn && settingsPanel) {
+    settingsBtn.onclick = () => {
+        // Open in "Global Mode"
+        window.editingLayerId = null;
+        const title = settingsPanel.querySelector('h3');
+        if (title) title.textContent = 'Site Settings (Global)';
 
-    if (settingsBtn && settingsPanel) {
-        settingsBtn.onclick = () => {
-            // Open in "Global Mode"
-            window.editingLayerId = null;
-            const title = settingsPanel.querySelector('h3');
-            if (title) title.textContent = 'Site Settings (Global)';
+        settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
+    };
+    closeSettings.onclick = () => settingsPanel.style.display = 'none';
 
-            settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'block' : 'none';
-        };
-        closeSettings.onclick = () => settingsPanel.style.display = 'none';
+    const updateSiteStyles = () => {
+        const range = document.getElementById('rangeSiteDist').value;
+        const beam = document.getElementById('rangeIconBeam').value;
+        const opacity = document.getElementById('rangeSiteOpacity').value;
+        const color = document.getElementById('pickerSiteColor').value;
+        const useOverride = document.getElementById('checkSiteColorOverride').checked;
+        const showSiteNames = document.getElementById('checkShowSiteNames').checked;
+        const showCellNames = document.getElementById('checkShowCellNames').checked;
 
-        const updateSiteStyles = () => {
-            const range = document.getElementById('rangeSiteDist').value;
-            const beam = document.getElementById('rangeIconBeam').value;
-            const opacity = document.getElementById('rangeSiteOpacity').value;
-            const color = document.getElementById('pickerSiteColor').value;
-            const useOverride = document.getElementById('checkSiteColorOverride').checked;
-            const showSiteNames = document.getElementById('checkShowSiteNames').checked;
-            const showCellNames = document.getElementById('checkShowCellNames').checked;
+        const colorBy = siteColorBy ? siteColorBy.value : 'tech';
 
-            const colorBy = siteColorBy ? siteColorBy.value : 'tech';
-
-            // Context-Aware Update
-            if (window.editingLayerId) {
-                // Layer Specific
-                if (map) {
-                    map.updateLayerSettings(window.editingLayerId, {
-                        range: range,
-                        beamwidth: beam,
-                        opacity: opacity,
-                        color: color,
-                        useOverride: useOverride,
-                        showSiteNames: showSiteNames,
-                        showCellNames: showCellNames
-                    });
-                }
-            } else {
-                // Global
-                if (map) {
-                    map.updateSiteSettings({
-                        range: range,
-                        beamwidth: beam,
-                        opacity: opacity,
-                        color: color,
-                        useOverride: useOverride,
-                        showSiteNames: showSiteNames,
-                        showCellNames: showCellNames,
-                        colorBy: colorBy
-                    });
-                }
-            }
-
-            document.getElementById('valRange').textContent = range;
-            document.getElementById('valBeam').textContent = beam;
-            document.getElementById('valOpacity').textContent = opacity;
-
+        // Context-Aware Update
+        if (window.editingLayerId) {
+            // Layer Specific
             if (map) {
-                // Logic moved above
+                map.updateLayerSettings(window.editingLayerId, {
+                    range: range,
+                    beamwidth: beam,
+                    opacity: opacity,
+                    color: color,
+                    useOverride: useOverride,
+                    showSiteNames: showSiteNames,
+                    showCellNames: showCellNames
+                });
             }
-        };
-
-        // Listeners for Site Settings
-        document.getElementById('rangeSiteDist').addEventListener('input', updateSiteStyles);
-        document.getElementById('rangeIconBeam').addEventListener('input', updateSiteStyles);
-        document.getElementById('rangeSiteOpacity').addEventListener('input', updateSiteStyles);
-        document.getElementById('pickerSiteColor').addEventListener('input', updateSiteStyles);
-        document.getElementById('checkSiteColorOverride').addEventListener('change', updateSiteStyles);
-        document.getElementById('checkShowSiteNames').addEventListener('change', updateSiteStyles);
-        document.getElementById('checkShowCellNames').addEventListener('change', updateSiteStyles);
-        if (siteColorBy) siteColorBy.addEventListener('change', updateSiteStyles);
-
-        // Initial sync
-        setTimeout(updateSiteStyles, 100);
-    }
-
-    // Generic Modal Close
-    window.onclick = (event) => {
-        if (event.target == document.getElementById('gridModal')) {
-            document.getElementById('gridModal').style.display = "none";
-        }
-        if (event.target == document.getElementById('chartModal')) {
-            document.getElementById('chartModal').style.display = "none";
-        }
-        if (event.target == document.getElementById('signalingModal')) {
-            document.getElementById('signalingModal').style.display = "none";
-        }
-    }
-
-
-    window.closeSignalingModal = () => {
-        document.getElementById('signalingModal').style.display = 'none';
-    };
-
-
-
-    // Apply to Signaling Modal
-    const sigModal = document.getElementById('signalingModal');
-    const sigContent = sigModal.querySelector('.modal-content');
-    const sigHeader = sigModal.querySelector('.modal-header'); // We need to ensure header exists
-
-    if (sigContent && sigHeader) {
-        makeElementDraggable(sigHeader, sigContent);
-    }
-
-    window.showSignalingModal = (logId) => {
-        console.log('Opening Signaling Modal for Log ID:', logId);
-        const log = loadedLogs.find(l => l.id.toString() === logId.toString()); // Ensure string comparison
-
-        if (!log) {
-            console.error('Log not found for ID:', logId);
-            return;
-        }
-
-        currentSignalingLogId = log.id;
-        renderSignalingTable();
-
-        // Show modal
-        document.getElementById('signalingModal').style.display = 'block';
-
-        // Ensure visibility if it was closed or moved off screen?
-        // Reset position if first open? optional.
-    };
-
-    window.filterSignaling = () => {
-        renderSignalingTable();
-    };
-
-    function renderSignalingTable() {
-        if (!currentSignalingLogId) return;
-        const log = loadedLogs.find(l => l.id.toString() === currentSignalingLogId.toString());
-        if (!log) return;
-
-        const filterElement = document.getElementById('signalingFilter');
-        const filter = filterElement ? filterElement.value : 'ALL';
-        if (!filterElement) console.warn('Signaling Filter Dropdown not found in DOM!');
-
-        const tbody = document.getElementById('signalingTableBody');
-        const title = document.getElementById('signalingModalTitle');
-
-        tbody.innerHTML = '';
-        title.textContent = `Signaling Data - ${log.name}`; // Changed visual to verify update
-
-        // Filter Data
-        let sigPoints = log.signaling || [];
-        if (filter !== 'ALL') {
-            sigPoints = sigPoints.filter(p => p.category === filter);
-        }
-
-        if (sigPoints.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px;">No messages found matching filter.</td></tr>';
         } else {
-            const limit = 2000;
-            const displayPoints = sigPoints.slice(0, limit);
-
-            if (sigPoints.length > limit) {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `< td colspan = "5" style = "background:#552200; color:#fff; text-align:center;" > Showing first ${limit} of ${sigPoints.length} messages.</td > `;
-                tbody.appendChild(tr);
+            // Global
+            if (map) {
+                map.updateSiteSettings({
+                    range: range,
+                    beamwidth: beam,
+                    opacity: opacity,
+                    color: color,
+                    useOverride: useOverride,
+                    showSiteNames: showSiteNames,
+                    showCellNames: showCellNames,
+                    colorBy: colorBy
+                });
             }
+        }
 
-            displayPoints.forEach((p, index) => {
-                const tr = document.createElement('tr');
-                tr.id = `sig - row - ${p.time.replace(/[:.]/g, '')} - ${index}`; // Unique ID for scrolling
-                tr.className = 'signaling-row'; // Add class for selection
-                tr.style.cursor = 'pointer';
+        document.getElementById('valRange').textContent = range;
+        document.getElementById('valBeam').textContent = beam;
+        document.getElementById('valOpacity').textContent = opacity;
 
-                // Row Click = Sync (Map + Chart)
-                tr.onclick = (e) => {
-                    // Ignore clicks on buttons
-                    if (e.target.tagName === 'BUTTON') return;
+        if (map) {
+            // Logic moved above
+        }
+    };
 
-                    // 1. Sync Map
-                    if (p.lat && p.lng) {
-                        window.map.setView([p.lat, p.lng], 16);
+    // Listeners for Site Settings
+    document.getElementById('rangeSiteDist').addEventListener('input', updateSiteStyles);
+    document.getElementById('rangeIconBeam').addEventListener('input', updateSiteStyles);
+    document.getElementById('rangeSiteOpacity').addEventListener('input', updateSiteStyles);
+    document.getElementById('pickerSiteColor').addEventListener('input', updateSiteStyles);
+    document.getElementById('checkSiteColorOverride').addEventListener('change', updateSiteStyles);
+    document.getElementById('checkShowSiteNames').addEventListener('change', updateSiteStyles);
+    document.getElementById('checkShowCellNames').addEventListener('change', updateSiteStyles);
+    if (siteColorBy) siteColorBy.addEventListener('change', updateSiteStyles);
 
-                        // Dispatch event for Chart Sync
-                        const event = new CustomEvent('map-point-clicked', {
-                            detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
-                        });
-                        window.dispatchEvent(event);
-                    } else {
-                        // Try to find closest GPS point by time? 
-                        // For now, just try chart sync via time
-                        const event = new CustomEvent('map-point-clicked', {
-                            detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
-                        });
-                        window.dispatchEvent(event);
-                    }
+    // Initial sync
+    setTimeout(updateSiteStyles, 100);
+}
 
-                    // Low-level Visual Highlight (Overridden by highlightPoint later)
-                    // But good for immediate feedback
-                    document.querySelectorAll('.signaling-row').forEach(r => r.classList.remove('selected-row'));
-                    tr.classList.add('selected-row');
-                };
+// Generic Modal Close
+window.onclick = (event) => {
+    if (event.target == document.getElementById('gridModal')) {
+        document.getElementById('gridModal').style.display = "none";
+    }
+    if (event.target == document.getElementById('chartModal')) {
+        document.getElementById('chartModal').style.display = "none";
+    }
+    if (event.target == document.getElementById('signalingModal')) {
+        document.getElementById('signalingModal').style.display = "none";
+    }
+}
 
-                const mapBtn = (p.lat && p.lng)
-                    ? `< button onclick = "window.map.setView([${p.lat}, ${p.lng}], 16); event.stopPropagation();" class= "btn" style = "padding:2px 6px; font-size:10px; background-color:#3b82f6;" > Map</button > `
-                    : '<span style="color:#666; font-size:10px;">No GPS</span>';
 
-                // Store point data for the info button handler (simulated via dataset or just passing object index if we could, but stringifying is easier for this hack)
-                // Better: attach object to DOM element directly
-                tr.pointData = p;
+window.closeSignalingModal = () => {
+    document.getElementById('signalingModal').style.display = 'none';
+};
 
-                let typeClass = 'badge-rrc';
-                if (p.category === 'L3') typeClass = 'badge-l3';
 
-                tr.innerHTML = `
+
+// Apply to Signaling Modal
+const sigModal = document.getElementById('signalingModal');
+const sigContent = sigModal.querySelector('.modal-content');
+const sigHeader = sigModal.querySelector('.modal-header'); // We need to ensure header exists
+
+if (sigContent && sigHeader) {
+    makeElementDraggable(sigHeader, sigContent);
+}
+
+window.showSignalingModal = (logId) => {
+    console.log('Opening Signaling Modal for Log ID:', logId);
+    const log = loadedLogs.find(l => l.id.toString() === logId.toString()); // Ensure string comparison
+
+    if (!log) {
+        console.error('Log not found for ID:', logId);
+        return;
+    }
+
+    currentSignalingLogId = log.id;
+    renderSignalingTable();
+
+    // Show modal
+    document.getElementById('signalingModal').style.display = 'block';
+
+    // Ensure visibility if it was closed or moved off screen?
+    // Reset position if first open? optional.
+};
+
+window.filterSignaling = () => {
+    renderSignalingTable();
+};
+
+function renderSignalingTable() {
+    if (!currentSignalingLogId) return;
+    const log = loadedLogs.find(l => l.id.toString() === currentSignalingLogId.toString());
+    if (!log) return;
+
+    const filterElement = document.getElementById('signalingFilter');
+    const filter = filterElement ? filterElement.value : 'ALL';
+    if (!filterElement) console.warn('Signaling Filter Dropdown not found in DOM!');
+
+    const tbody = document.getElementById('signalingTableBody');
+    const title = document.getElementById('signalingModalTitle');
+
+    tbody.innerHTML = '';
+    title.textContent = `Signaling Data - ${log.name}`; // Changed visual to verify update
+
+    // Filter Data
+    let sigPoints = log.signaling || [];
+    if (filter !== 'ALL') {
+        sigPoints = sigPoints.filter(p => p.category === filter);
+    }
+
+    if (sigPoints.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px;">No messages found matching filter.</td></tr>';
+    } else {
+        const limit = 2000;
+        const displayPoints = sigPoints.slice(0, limit);
+
+        if (sigPoints.length > limit) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `< td colspan = "5" style = "background:#552200; color:#fff; text-align:center;" > Showing first ${limit} of ${sigPoints.length} messages.</td > `;
+            tbody.appendChild(tr);
+        }
+
+        displayPoints.forEach((p, index) => {
+            const tr = document.createElement('tr');
+            tr.id = `sig - row - ${p.time.replace(/[:.]/g, '')} - ${index}`; // Unique ID for scrolling
+            tr.className = 'signaling-row'; // Add class for selection
+            tr.style.cursor = 'pointer';
+
+            // Row Click = Sync (Map + Chart)
+            tr.onclick = (e) => {
+                // Ignore clicks on buttons
+                if (e.target.tagName === 'BUTTON') return;
+
+                // 1. Sync Map
+                if (p.lat && p.lng) {
+                    window.map.setView([p.lat, p.lng], 16);
+
+                    // Dispatch event for Chart Sync
+                    const event = new CustomEvent('map-point-clicked', {
+                        detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
+                    });
+                    window.dispatchEvent(event);
+                } else {
+                    // Try to find closest GPS point by time? 
+                    // For now, just try chart sync via time
+                    const event = new CustomEvent('map-point-clicked', {
+                        detail: { logId: currentSignalingLogId, point: p, source: 'signaling' }
+                    });
+                    window.dispatchEvent(event);
+                }
+
+                // Low-level Visual Highlight (Overridden by highlightPoint later)
+                // But good for immediate feedback
+                document.querySelectorAll('.signaling-row').forEach(r => r.classList.remove('selected-row'));
+                tr.classList.add('selected-row');
+            };
+
+            const mapBtn = (p.lat && p.lng)
+                ? `< button onclick = "window.map.setView([${p.lat}, ${p.lng}], 16); event.stopPropagation();" class= "btn" style = "padding:2px 6px; font-size:10px; background-color:#3b82f6;" > Map</button > `
+                : '<span style="color:#666; font-size:10px;">No GPS</span>';
+
+            // Store point data for the info button handler (simulated via dataset or just passing object index if we could, but stringifying is easier for this hack)
+            // Better: attach object to DOM element directly
+            tr.pointData = p;
+
+            let typeClass = 'badge-rrc';
+            if (p.category === 'L3') typeClass = 'badge-l3';
+
+            tr.innerHTML = `
 < td > ${p.time}</td >
                     <td><span class="${typeClass}">${p.category}</span></td>
                     <td>${p.direction}</td>
@@ -5713,20 +5714,20 @@ document.addEventListener('DOMContentLoaded', () => {
                         <button onclick="const p = this.parentElement.parentElement.pointData; showSignalingPayload(p); event.stopPropagation();" class="btn" style="padding:2px 6px; font-size:10px; background-color:#475569;">Info</button>
                     </td>
                 `;
-                tbody.appendChild(tr);
-            });
-        }
+            tbody.appendChild(tr);
+        });
     }
+}
 
-    // Payload Viewer
-    function showSignalingPayload(point) {
-        // Create Modal on the fly if not exists
-        let modal = document.getElementById('payloadModal');
-        if (!modal) {
-            modal = document.createElement('div');
-            modal.id = 'payloadModal';
-            modal.className = 'modal';
-            modal.innerHTML = `
+// Payload Viewer
+function showSignalingPayload(point) {
+    // Create Modal on the fly if not exists
+    let modal = document.getElementById('payloadModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'payloadModal';
+        modal.className = 'modal';
+        modal.innerHTML = `
     <div class= "modal-content" style = "max-width: 600px; background: #1f2937; color: #e5e7eb; border: 1px solid #374151;" >
                 <div class="modal-header" style="border-bottom: 1px solid #374151; padding: 10px 15px; display:flex; justify-content:space-between; align-items:center;">
                     <h3 style="margin:0; font-size:16px;">Signaling Details</h3>
@@ -5740,19 +5741,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             </div >
     `;
-            document.body.appendChild(modal);
-        }
+        document.body.appendChild(modal);
+    }
 
-        const content = document.getElementById('payloadContent');
-        const payloadRaw = point.payload || 'No Hex Payload Available';
+    const content = document.getElementById('payloadContent');
+    const payloadRaw = point.payload || 'No Hex Payload Available';
 
-        // Format Hex (Group by 2 bytes / 4 chars)
-        const formatHex = (str) => {
-            if (!str || str.includes(' ')) return str;
-            return str.replace(/(.{4})/g, '$1 ').trim();
-        };
+    // Format Hex (Group by 2 bytes / 4 chars)
+    const formatHex = (str) => {
+        if (!str || str.includes(' ')) return str;
+        return str.replace(/(.{4})/g, '$1 ').trim();
+    };
 
-        content.innerHTML = `
+    content.innerHTML = `
     <div style = "margin-bottom: 15px;" >
             <div style="font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 600;">Message Type</div>
             <div style="font-size: 14px; color: #fff; font-weight: bold;">${point.message}</div>
@@ -5779,300 +5780,300 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
     `;
 
-        modal.style.display = 'block';
+    modal.style.display = 'block';
+}
+window.showSignalingPayload = showSignalingPayload;
+
+// ---------------------------------------------------------
+// ---------------------------------------------------------
+// DOCKING SYSTEM
+// ---------------------------------------------------------
+let isChartDocked = false;
+let isSignalingDocked = false;
+window.isGridDocked = false; // Exposed global
+
+const bottomPanel = document.getElementById('bottomPanel');
+const bottomContent = document.getElementById('bottomContent');
+const bottomResizer = document.getElementById('bottomResizer');
+const dockedChart = document.getElementById('dockedChart');
+const dockedSignaling = document.getElementById('dockedSignaling');
+const dockedGrid = document.getElementById('dockedGrid');
+
+// Resizer Logic
+let isResizingBottom = false;
+
+bottomResizer.addEventListener('mousedown', (e) => {
+    isResizingBottom = true;
+    document.body.style.cursor = 'ns-resize';
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!isResizingBottom) return;
+    const containerHeight = document.getElementById('center-pane').offsetHeight;
+    const newHeight = containerHeight - (e.clientY - document.getElementById('center-pane').getBoundingClientRect().top);
+
+    // Min/Max constraints
+    if (newHeight > 50 && newHeight < containerHeight - 50) {
+        bottomPanel.style.height = newHeight + 'px';
     }
-    window.showSignalingPayload = showSignalingPayload;
+});
 
-    // ---------------------------------------------------------
-    // ---------------------------------------------------------
-    // DOCKING SYSTEM
-    // ---------------------------------------------------------
-    let isChartDocked = false;
-    let isSignalingDocked = false;
-    window.isGridDocked = false; // Exposed global
+document.addEventListener('mouseup', () => {
+    if (isResizingBottom) {
+        isResizingBottom = false;
+        document.body.style.cursor = 'default';
+        // Trigger Resize for Chart if needed
+        if (window.currentChartInstance) window.currentChartInstance.resize();
+    }
+});
 
+// Update Layout Visibility
+function updateDockedLayout() {
     const bottomPanel = document.getElementById('bottomPanel');
-    const bottomContent = document.getElementById('bottomContent');
-    const bottomResizer = document.getElementById('bottomResizer');
     const dockedChart = document.getElementById('dockedChart');
     const dockedSignaling = document.getElementById('dockedSignaling');
     const dockedGrid = document.getElementById('dockedGrid');
 
-    // Resizer Logic
-    let isResizingBottom = false;
-
-    bottomResizer.addEventListener('mousedown', (e) => {
-        isResizingBottom = true;
-        document.body.style.cursor = 'ns-resize';
-        e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (!isResizingBottom) return;
-        const containerHeight = document.getElementById('center-pane').offsetHeight;
-        const newHeight = containerHeight - (e.clientY - document.getElementById('center-pane').getBoundingClientRect().top);
-
-        // Min/Max constraints
-        if (newHeight > 50 && newHeight < containerHeight - 50) {
-            bottomPanel.style.height = newHeight + 'px';
-        }
-    });
-
-    document.addEventListener('mouseup', () => {
-        if (isResizingBottom) {
-            isResizingBottom = false;
-            document.body.style.cursor = 'default';
-            // Trigger Resize for Chart if needed
-            if (window.currentChartInstance) window.currentChartInstance.resize();
-        }
-    });
-
-    // Update Layout Visibility
-    function updateDockedLayout() {
-        const bottomPanel = document.getElementById('bottomPanel');
-        const dockedChart = document.getElementById('dockedChart');
-        const dockedSignaling = document.getElementById('dockedSignaling');
-        const dockedGrid = document.getElementById('dockedGrid');
-
-        if (!bottomPanel || !dockedChart || !dockedSignaling || !dockedGrid) {
-            console.warn('Docking elements missing, skipping layout update.');
-            return;
-        }
-
-        const anyDocked = isChartDocked || isSignalingDocked || window.isGridDocked;
-
-        if (anyDocked) {
-            bottomPanel.style.display = 'flex';
-            // Force flex basis to 0 0 300px to prevent #map from squashing it
-            bottomPanel.style.flex = '0 0 300px';
-            bottomPanel.style.height = '300px';
-            bottomPanel.style.minHeight = '100px'; // Prevent full collapse
-        } else {
-            bottomPanel.style.display = 'none';
-        }
-
-        dockedChart.style.display = isChartDocked ? 'flex' : 'none';
-        dockedSignaling.style.display = isSignalingDocked ? 'flex' : 'none';
-
-        // Explicitly handle Grid Display
-        if (window.isGridDocked) {
-            dockedGrid.style.display = 'flex';
-            dockedGrid.style.flexDirection = 'column'; // Ensure column layout
-        } else {
-            dockedGrid.style.display = 'none';
-        }
-
-        // Count active items
-        const activeItems = [isChartDocked, isSignalingDocked, window.isGridDocked].filter(Boolean).length;
-
-        if (activeItems > 0) {
-            const width = 100 / activeItems; // e.g. 50% or 33.3%
-            // Apply styles
-            [dockedChart, dockedSignaling, dockedGrid].forEach(el => {
-                // Ensure flex basis is reasonable
-                el.style.flex = '1 1 auto';
-                el.style.width = `${width} % `;
-                el.style.borderRight = '1px solid #444';
-                el.style.height = '100%'; // Full height of bottomPanel
-            });
-            // Remove last border
-            if (window.isGridDocked) dockedGrid.style.borderRight = 'none';
-            else if (isSignalingDocked) dockedSignaling.style.borderRight = 'none';
-            else dockedChart.style.borderRight = 'none';
-        }
-
-        // Trigger Chart Resize
-        if (isChartDocked && window.currentChartInstance) {
-            setTimeout(() => window.currentChartInstance.resize(), 50);
-        }
+    if (!bottomPanel || !dockedChart || !dockedSignaling || !dockedGrid) {
+        console.warn('Docking elements missing, skipping layout update.');
+        return;
     }
 
-    // Docking Actions
-    window.dockChart = () => {
-        isChartDocked = true;
+    const anyDocked = isChartDocked || isSignalingDocked || window.isGridDocked;
 
-        // Close Floating Modal if open
-        const modal = document.getElementById('chartModal');
-        if (modal) modal.remove();
-
-        updateDockedLayout();
-
-        // Re-open Chart in Docked Mode
-        if (window.currentChartLogId) {
-            // Ensure ID type match (string handling)
-            const log = loadedLogs.find(l => l.id.toString() === window.currentChartLogId.toString());
-
-            if (log && window.currentChartParam) {
-                openChartModal(log, window.currentChartParam);
-            } else {
-                console.error('Docking failed: Log or Param not valid', { log, param: window.currentChartParam });
-            }
-        }
-    };
-
-    window.undockChart = () => {
-        isChartDocked = false;
-        dockedChart.innerHTML = ''; // Clear docked
-        updateDockedLayout();
-
-        // Re-open as Modal
-        if (window.currentChartLogId && window.currentChartParam) {
-            const log = loadedLogs.find(l => l.id === window.currentChartLogId);
-            if (log) openChartModal(log, window.currentChartParam);
-        }
-    };
-
-    // ---------------------------------------------------------
-    // DOCKING SYSTEM - SIGNALING EXTENSION
-    // ---------------------------------------------------------
-
-    // Inject Dock Button into Signaling Modal Header if not present
-    function ensureSignalingDockButton() {
-        // Use a more specific selector or retry mechanism if needed, but for now standard check
-        const header = document.querySelector('#signalingModal .modal-header');
-        if (header && !header.querySelector('.dock-btn')) {
-            const dockBtn = document.createElement('button');
-            dockBtn.className = 'dock-btn';
-            dockBtn.textContent = 'Dock';
-            // Explicitly set onclick attribute to ensure it persists and isn't lost
-            dockBtn.setAttribute('onclick', "alert('Docking...'); window.dockSignaling();");
-            dockBtn.style.cssText = 'background:#3b82f6; color:white; border:none; padding:4px 10px; cursor:pointer; font-size:11px; margin-left: auto; margin-right: 15px; pointer-events: auto; z-index: 9999; position: relative;';
-
-            // Insert before the close button
-            const closeBtn = header.querySelector('.close');
-            header.insertBefore(dockBtn, closeBtn);
-        }
+    if (anyDocked) {
+        bottomPanel.style.display = 'flex';
+        // Force flex basis to 0 0 300px to prevent #map from squashing it
+        bottomPanel.style.flex = '0 0 300px';
+        bottomPanel.style.height = '300px';
+        bottomPanel.style.minHeight = '100px'; // Prevent full collapse
+    } else {
+        bottomPanel.style.display = 'none';
     }
-    // Call it once
-    ensureSignalingDockButton();
 
-    window.dockSignaling = () => {
-        if (isSignalingDocked) return;
-        isSignalingDocked = true;
+    dockedChart.style.display = isChartDocked ? 'flex' : 'none';
+    dockedSignaling.style.display = isSignalingDocked ? 'flex' : 'none';
 
-        // Move Content
-        const modalContent = document.querySelector('#signalingModal .modal-content');
-        if (!modalContent) {
-            console.error('Signaling modal content not found');
-            return;
-        }
-        const header = modalContent.querySelector('.modal-header');
-        const body = modalContent.querySelector('.modal-body');
+    // Explicitly handle Grid Display
+    if (window.isGridDocked) {
+        dockedGrid.style.display = 'flex';
+        dockedGrid.style.flexDirection = 'column'; // Ensure column layout
+    } else {
+        dockedGrid.style.display = 'none';
+    }
 
-        // Verify elements exist before moving
-        if (header && body) {
-            dockedSignaling.appendChild(header);
-            dockedSignaling.appendChild(body);
+    // Count active items
+    const activeItems = [isChartDocked, isSignalingDocked, window.isGridDocked].filter(Boolean).length;
 
-            // Modify Header for Docked State
-            header.style.borderBottom = '1px solid #444';
+    if (activeItems > 0) {
+        const width = 100 / activeItems; // e.g. 50% or 33.3%
+        // Apply styles
+        [dockedChart, dockedSignaling, dockedGrid].forEach(el => {
+            // Ensure flex basis is reasonable
+            el.style.flex = '1 1 auto';
+            el.style.width = `${width} % `;
+            el.style.borderRight = '1px solid #444';
+            el.style.height = '100%'; // Full height of bottomPanel
+        });
+        // Remove last border
+        if (window.isGridDocked) dockedGrid.style.borderRight = 'none';
+        else if (isSignalingDocked) dockedSignaling.style.borderRight = 'none';
+        else dockedChart.style.borderRight = 'none';
+    }
 
-            // Fix: Body needs to stretch in flex container
-            body.style.flex = '1';
-            body.style.overflowY = 'auto'; // Ensure scrollable
+    // Trigger Chart Resize
+    if (isChartDocked && window.currentChartInstance) {
+        setTimeout(() => window.currentChartInstance.resize(), 50);
+    }
+}
 
-            // Change Dock Button to Undock
-            const dockBtn = header.querySelector('.dock-btn');
-            if (dockBtn) {
-                dockBtn.textContent = 'Undock';
-                dockBtn.onclick = window.undockSignaling;
-                dockBtn.style.background = '#555';
-            }
+// Docking Actions
+window.dockChart = () => {
+    isChartDocked = true;
 
-            // Hide Close Button
-            const closeBtn = header.querySelector('.close');
-            if (closeBtn) closeBtn.style.display = 'none';
+    // Close Floating Modal if open
+    const modal = document.getElementById('chartModal');
+    if (modal) modal.remove();
 
-            // Hide Modal Wrapper
-            document.getElementById('signalingModal').style.display = 'none';
-
-            updateDockedLayout();
-        } else {
-            console.error('Signaling modal parts missing', { header, body });
-            isSignalingDocked = false; // Revert state if failed
-        }
-    };
-
-    window.undockSignaling = () => {
-        if (!isSignalingDocked) return;
-        isSignalingDocked = false;
-
-        const header = dockedSignaling.querySelector('.modal-header');
-        const body = dockedSignaling.querySelector('.modal-body');
-        const modalContent = document.querySelector('#signalingModal .modal-content');
-
-        if (header && body) {
-            modalContent.appendChild(header);
-            modalContent.appendChild(body);
-
-            // Restore Header
-            // Change Undock Button to Dock
-            const dockBtn = header.querySelector('.dock-btn');
-            if (dockBtn) {
-                dockBtn.textContent = 'Dock';
-                dockBtn.onclick = window.dockSignaling;
-                dockBtn.style.background = '#3b82f6';
-            }
-
-            // Show Close Button
-            const closeBtn = header.querySelector('.close');
-            if (closeBtn) closeBtn.style.display = 'block';
-        }
-
-        dockedSignaling.innerHTML = ''; // Should be empty anyway
-        updateDockedLayout();
-
-        // Show Modal
-        if (currentSignalingLogId) {
-            document.getElementById('signalingModal').style.display = 'block';
-        }
-    };
-
-    // Redefine showSignalingModal to handle visibility only (rendering is same ID based)
-    window.showSignalingModal = (logId) => {
-        console.log('Opening Signaling Modal for Log ID:', logId);
-        const log = loadedLogs.find(l => l.id.toString() === logId.toString());
-
-        if (!log) {
-            console.error('Log not found for ID:', logId);
-            return;
-        }
-
-        currentSignalingLogId = log.id;
-        renderSignalingTable();
-
-        if (isSignalingDocked) {
-            // Ensure docked view is visible
-            updateDockedLayout();
-        } else {
-            // Show modal
-            document.getElementById('signalingModal').style.display = 'block';
-            ensureSignalingDockButton();
-        }
-    };
-
-    // Initial call to update layout state
     updateDockedLayout();
 
-    // Global Function to Update Sidebar List
-    const updateLogsList = function () {
-        const container = document.getElementById('logsList');
-        if (!container) return; // Safety check
-        container.innerHTML = '';
+    // Re-open Chart in Docked Mode
+    if (window.currentChartLogId) {
+        // Ensure ID type match (string handling)
+        const log = loadedLogs.find(l => l.id.toString() === window.currentChartLogId.toString());
 
-        loadedLogs.forEach(log => {
-            // Exclude SmartCare layers (Excel/SHP) which are in the right sidebar
-            if (log.type === 'excel' || log.type === 'shp') return;
+        if (log && window.currentChartParam) {
+            openChartModal(log, window.currentChartParam);
+        } else {
+            console.error('Docking failed: Log or Param not valid', { log, param: window.currentChartParam });
+        }
+    }
+};
 
-            const item = document.createElement('div');
-            // REMOVED overflow:hidden to prevent clipping issues. FORCED display:block to override any cached flex rules.
-            item.style.cssText = 'background:#252525; margin-bottom:5px; border-radius:4px; border:1px solid #333; min-height: 50px; display: block !important;';
+window.undockChart = () => {
+    isChartDocked = false;
+    dockedChart.innerHTML = ''; // Clear docked
+    updateDockedLayout();
 
-            // Header
-            const header = document.createElement('div');
-            header.className = 'log-header';
-            header.style.cssText = 'padding:8px 10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:#2d2d2d; border-bottom:1px solid #333;';
-            header.innerHTML = `
+    // Re-open as Modal
+    if (window.currentChartLogId && window.currentChartParam) {
+        const log = loadedLogs.find(l => l.id === window.currentChartLogId);
+        if (log) openChartModal(log, window.currentChartParam);
+    }
+};
+
+// ---------------------------------------------------------
+// DOCKING SYSTEM - SIGNALING EXTENSION
+// ---------------------------------------------------------
+
+// Inject Dock Button into Signaling Modal Header if not present
+function ensureSignalingDockButton() {
+    // Use a more specific selector or retry mechanism if needed, but for now standard check
+    const header = document.querySelector('#signalingModal .modal-header');
+    if (header && !header.querySelector('.dock-btn')) {
+        const dockBtn = document.createElement('button');
+        dockBtn.className = 'dock-btn';
+        dockBtn.textContent = 'Dock';
+        // Explicitly set onclick attribute to ensure it persists and isn't lost
+        dockBtn.setAttribute('onclick', "alert('Docking...'); window.dockSignaling();");
+        dockBtn.style.cssText = 'background:#3b82f6; color:white; border:none; padding:4px 10px; cursor:pointer; font-size:11px; margin-left: auto; margin-right: 15px; pointer-events: auto; z-index: 9999; position: relative;';
+
+        // Insert before the close button
+        const closeBtn = header.querySelector('.close');
+        header.insertBefore(dockBtn, closeBtn);
+    }
+}
+// Call it once
+ensureSignalingDockButton();
+
+window.dockSignaling = () => {
+    if (isSignalingDocked) return;
+    isSignalingDocked = true;
+
+    // Move Content
+    const modalContent = document.querySelector('#signalingModal .modal-content');
+    if (!modalContent) {
+        console.error('Signaling modal content not found');
+        return;
+    }
+    const header = modalContent.querySelector('.modal-header');
+    const body = modalContent.querySelector('.modal-body');
+
+    // Verify elements exist before moving
+    if (header && body) {
+        dockedSignaling.appendChild(header);
+        dockedSignaling.appendChild(body);
+
+        // Modify Header for Docked State
+        header.style.borderBottom = '1px solid #444';
+
+        // Fix: Body needs to stretch in flex container
+        body.style.flex = '1';
+        body.style.overflowY = 'auto'; // Ensure scrollable
+
+        // Change Dock Button to Undock
+        const dockBtn = header.querySelector('.dock-btn');
+        if (dockBtn) {
+            dockBtn.textContent = 'Undock';
+            dockBtn.onclick = window.undockSignaling;
+            dockBtn.style.background = '#555';
+        }
+
+        // Hide Close Button
+        const closeBtn = header.querySelector('.close');
+        if (closeBtn) closeBtn.style.display = 'none';
+
+        // Hide Modal Wrapper
+        document.getElementById('signalingModal').style.display = 'none';
+
+        updateDockedLayout();
+    } else {
+        console.error('Signaling modal parts missing', { header, body });
+        isSignalingDocked = false; // Revert state if failed
+    }
+};
+
+window.undockSignaling = () => {
+    if (!isSignalingDocked) return;
+    isSignalingDocked = false;
+
+    const header = dockedSignaling.querySelector('.modal-header');
+    const body = dockedSignaling.querySelector('.modal-body');
+    const modalContent = document.querySelector('#signalingModal .modal-content');
+
+    if (header && body) {
+        modalContent.appendChild(header);
+        modalContent.appendChild(body);
+
+        // Restore Header
+        // Change Undock Button to Dock
+        const dockBtn = header.querySelector('.dock-btn');
+        if (dockBtn) {
+            dockBtn.textContent = 'Dock';
+            dockBtn.onclick = window.dockSignaling;
+            dockBtn.style.background = '#3b82f6';
+        }
+
+        // Show Close Button
+        const closeBtn = header.querySelector('.close');
+        if (closeBtn) closeBtn.style.display = 'block';
+    }
+
+    dockedSignaling.innerHTML = ''; // Should be empty anyway
+    updateDockedLayout();
+
+    // Show Modal
+    if (currentSignalingLogId) {
+        document.getElementById('signalingModal').style.display = 'block';
+    }
+};
+
+// Redefine showSignalingModal to handle visibility only (rendering is same ID based)
+window.showSignalingModal = (logId) => {
+    console.log('Opening Signaling Modal for Log ID:', logId);
+    const log = loadedLogs.find(l => l.id.toString() === logId.toString());
+
+    if (!log) {
+        console.error('Log not found for ID:', logId);
+        return;
+    }
+
+    currentSignalingLogId = log.id;
+    renderSignalingTable();
+
+    if (isSignalingDocked) {
+        // Ensure docked view is visible
+        updateDockedLayout();
+    } else {
+        // Show modal
+        document.getElementById('signalingModal').style.display = 'block';
+        ensureSignalingDockButton();
+    }
+};
+
+// Initial call to update layout state
+updateDockedLayout();
+
+// Global Function to Update Sidebar List
+const updateLogsList = function () {
+    const container = document.getElementById('logsList');
+    if (!container) return; // Safety check
+    container.innerHTML = '';
+
+    loadedLogs.forEach(log => {
+        // Exclude SmartCare layers (Excel/SHP) which are in the right sidebar
+        if (log.type === 'excel' || log.type === 'shp') return;
+
+        const item = document.createElement('div');
+        // REMOVED overflow:hidden to prevent clipping issues. FORCED display:block to override any cached flex rules.
+        item.style.cssText = 'background:#252525; margin-bottom:5px; border-radius:4px; border:1px solid #333; min-height: 50px; display: block !important;';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'log-header';
+        header.style.cssText = 'padding:8px 10px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:#2d2d2d; border-bottom:1px solid #333;';
+        header.innerHTML = `
 <span style="font-weight:bold; color:#ddd; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;">${log.name}</span>
 <div style="display:flex; gap:5px;">
     <!-- Export Button -->
@@ -6081,410 +6082,410 @@ document.addEventListener('DOMContentLoaded', () => {
 </div>
         `;
 
-            // Toggle Logic
-            header.onclick = () => {
-                const body = item.querySelector('.log-body');
-                // Check computed style or inline style
-                const isHidden = body.style.display === 'none';
-                body.style.display = isHidden ? 'block' : 'none';
-            };
+        // Toggle Logic
+        header.onclick = () => {
+            const body = item.querySelector('.log-body');
+            // Check computed style or inline style
+            const isHidden = body.style.display === 'none';
+            body.style.display = isHidden ? 'block' : 'none';
+        };
 
-            // Body (Default: Visible)
-            const body = document.createElement('div');
-            body.className = 'log-body';
-            body.style.cssText = 'padding:10px; display:block;';
+        // Body (Default: Visible)
+        const body = document.createElement('div');
+        body.className = 'log-body';
+        body.style.cssText = 'padding:10px; display:block;';
 
-            // Stats
-            const count = log.points.length;
-            const stats = document.createElement('div');
-            stats.style.cssText = 'font-size:10px; color:#888; margin-bottom:8px;';
-            stats.innerHTML = `
+        // Stats
+        const count = log.points.length;
+        const stats = document.createElement('div');
+        stats.style.cssText = 'font-size:10px; color:#888; margin-bottom:8px;';
+        stats.innerHTML = `
     <span style="background:#3b82f6; color:white; padding:2px 4px; border-radius:2px;">${log.tech}</span>
 <span style="margin-left:5px;">${count} pts</span>
         `;
 
-            // Actions
-            const actions = document.createElement('div');
-            actions.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
+        // Actions
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
 
-            const addAction = (label, param) => {
-                const btn = document.createElement('div');
-                btn.textContent = label;
-                btn.className = 'param-item'; // Add class for styling if needed
-                btn.draggable = true; // Make Draggable
-                btn.style.cssText = 'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;';
+        const addAction = (label, param) => {
+            const btn = document.createElement('div');
+            btn.textContent = label;
+            btn.className = 'param-item'; // Add class for styling if needed
+            btn.draggable = true; // Make Draggable
+            btn.style.cssText = 'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;';
 
-                btn.onmouseover = () => btn.style.background = '#444';
-                btn.onmouseout = () => btn.style.background = '#333';
+            btn.onmouseover = () => btn.style.background = '#444';
+            btn.onmouseout = () => btn.style.background = '#333';
 
-                // Drag Start Handler
-                btn.ondragstart = (e) => {
-                    e.dataTransfer.setData('application/json', JSON.stringify({
-                        logId: log.id,
-                        param: param,
-                        label: label
-                    }));
-                    e.dataTransfer.effectAllowed = 'copy';
-                };
-
-                // Left Click Handler - Opens Context Menu
-                btn.onclick = (e) => {
-                    window.showMetricOptions(e, log.id, param, 'regular');
-                };
-                return btn;
+            // Drag Start Handler
+            btn.ondragstart = (e) => {
+                e.dataTransfer.setData('application/json', JSON.stringify({
+                    logId: log.id,
+                    param: param,
+                    label: label
+                }));
+                e.dataTransfer.effectAllowed = 'copy';
             };
 
-            // Helper for Group Headers
-            const addHeader = (text) => {
-                const d = document.createElement('div');
-                d.textContent = text;
-                d.style.cssText = 'font-size:10px; color:#aaa; margin-top:8px; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;';
-                return d;
+            // Left Click Handler - Opens Context Menu
+            btn.onclick = (e) => {
+                window.showMetricOptions(e, log.id, param, 'regular');
             };
+            return btn;
+        };
 
-            // NEW: DYNAMIC METRICS VS FIXED METRICS
-            // If customMetrics exist, use them. Else use Fixed NMF list.
+        // Helper for Group Headers
+        const addHeader = (text) => {
+            const d = document.createElement('div');
+            d.textContent = text;
+            d.style.cssText = 'font-size:10px; color:#aaa; margin-top:8px; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px;';
+            return d;
+        };
 
-            if (log.customMetrics && log.customMetrics.length > 0) {
-                actions.appendChild(addHeader('Detected Metrics'));
+        // NEW: DYNAMIC METRICS VS FIXED METRICS
+        // If customMetrics exist, use them. Else use Fixed NMF list.
 
-                log.customMetrics.forEach(metric => {
-                    let label = metric;
-                    if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
-                    if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
-                    actions.appendChild(addAction(label, metric));
-                });
+        if (log.customMetrics && log.customMetrics.length > 0) {
+            actions.appendChild(addHeader('Detected Metrics'));
 
-                // Also add "Time" and "GPS" if they exist in basic points but maybe not in customMetrics list?
-                // The parser excludes Time/Lat/Lon from customMetrics.
-                // So we can re-add them if we want buttons for them (usually just Time/Speed).
-                actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-                actions.appendChild(addAction('Time', 'time'));
+            log.customMetrics.forEach(metric => {
+                let label = metric;
+                if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
+                if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
+                actions.appendChild(addAction(label, metric));
+            });
 
-            } else {
-                // FALLBACK: OLD STATIC NMF METRICS
+            // Also add "Time" and "GPS" if they exist in basic points but maybe not in customMetrics list?
+            // The parser excludes Time/Lat/Lon from customMetrics.
+            // So we can re-add them if we want buttons for them (usually just Time/Speed).
+            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
+            actions.appendChild(addAction('Time', 'time'));
 
-                // GROUP: Serving Cell
-                actions.appendChild(addHeader('Serving Cell'));
-                actions.appendChild(addAction('Serving RSCP/Level', 'rscp_not_combined'));
-                actions.appendChild(addAction('Serving EcNo', 'ecno'));
-                actions.appendChild(addAction('Serving SC/SC', 'sc'));
-                actions.appendChild(addAction('Serving RNC', 'rnc'));
-                actions.appendChild(addAction('Active Set', 'active_set'));
-                actions.appendChild(addAction('Serving Freq', 'freq'));
-                actions.appendChild(addAction('Serving Band', 'band'));
-                actions.appendChild(addAction('LAC', 'lac'));
-                actions.appendChild(addAction('Cell ID', 'cellId'));
-                actions.appendChild(addAction('Serving Cell Name', 'serving_cell_name'));
+        } else {
+            // FALLBACK: OLD STATIC NMF METRICS
 
-                // GROUP: Active Set (Individual)
-                actions.appendChild(addHeader('Active Set Members'));
-                actions.appendChild(addAction('A1 RSCP', 'active_set_A1_RSCP'));
-                actions.appendChild(addAction('A1 SC', 'active_set_A1_SC'));
-                actions.appendChild(addAction('A2 RSCP', 'active_set_A2_RSCP'));
-                actions.appendChild(addAction('A2 SC', 'active_set_A2_SC'));
-                actions.appendChild(addAction('A3 RSCP', 'active_set_A3_RSCP'));
-                actions.appendChild(addAction('A3 SC', 'active_set_A3_SC'));
+            // GROUP: Serving Cell
+            actions.appendChild(addHeader('Serving Cell'));
+            actions.appendChild(addAction('Serving RSCP/Level', 'rscp_not_combined'));
+            actions.appendChild(addAction('Serving EcNo', 'ecno'));
+            actions.appendChild(addAction('Serving SC/SC', 'sc'));
+            actions.appendChild(addAction('Serving RNC', 'rnc'));
+            actions.appendChild(addAction('Active Set', 'active_set'));
+            actions.appendChild(addAction('Serving Freq', 'freq'));
+            actions.appendChild(addAction('Serving Band', 'band'));
+            actions.appendChild(addAction('LAC', 'lac'));
+            actions.appendChild(addAction('Cell ID', 'cellId'));
+            actions.appendChild(addAction('Serving Cell Name', 'serving_cell_name'));
 
-                // GROUP: Neighbors
-                actions.appendChild(addHeader('Neighbors'));
-                // Neighbors Loop (N1 - N8)
-                for (let i = 1; i <= 8; i++) {
-                    actions.appendChild(addAction(`N${i} RSCP`, `n${i}_rscp`));
-                    actions.appendChild(addAction(`N${i} EcNo`, `n${i}_ecno`));
-                    actions.appendChild(addAction(`N${i} SC`, `n${i}_sc`));
-                }
+            // GROUP: Active Set (Individual)
+            actions.appendChild(addHeader('Active Set Members'));
+            actions.appendChild(addAction('A1 RSCP', 'active_set_A1_RSCP'));
+            actions.appendChild(addAction('A1 SC', 'active_set_A1_SC'));
+            actions.appendChild(addAction('A2 RSCP', 'active_set_A2_RSCP'));
+            actions.appendChild(addAction('A2 SC', 'active_set_A2_SC'));
+            actions.appendChild(addAction('A3 RSCP', 'active_set_A3_RSCP'));
+            actions.appendChild(addAction('A3 SC', 'active_set_A3_SC'));
 
-                // OUTSIDE GROUPS: Composite & General
-                actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-
-                actions.appendChild(addAction('Composite RSCP & Neighbors', 'rscp_not_combined'));
-
-                actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-
-                // GPS & Others
-                actions.appendChild(addAction('GPS Speed', 'speed'));
-                actions.appendChild(addAction('GPS Altitude', 'alt'));
-                actions.appendChild(addAction('Time', 'time'));
+            // GROUP: Neighbors
+            actions.appendChild(addHeader('Neighbors'));
+            // Neighbors Loop (N1 - N8)
+            for (let i = 1; i <= 8; i++) {
+                actions.appendChild(addAction(`N${i} RSCP`, `n${i}_rscp`));
+                actions.appendChild(addAction(`N${i} EcNo`, `n${i}_ecno`));
+                actions.appendChild(addAction(`N${i} SC`, `n${i}_sc`));
             }
 
-            // Resurrected Signaling Modal Button
-            const sigBtn = document.createElement('div');
-            sigBtn.className = 'metric-item';
-            sigBtn.style.padding = '4px 8px';
-            sigBtn.style.cursor = 'pointer';
-            sigBtn.style.margin = '2px 0';
-            sigBtn.style.fontSize = '11px';
-            sigBtn.style.color = '#ccc';
-            sigBtn.style.borderRadius = '4px';
-            sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)'; // Purple tint
-            sigBtn.style.border = '1px solid rgba(168, 85, 247, 0.2)';
-            sigBtn.textContent = 'Show Signaling';
-            sigBtn.onclick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (window.showSignalingModal) {
-                    window.showSignalingModal(log.id);
-                } else {
-                    alert('Signaling Modal function missing!');
-                }
-            };
-            sigBtn.onmouseover = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.2)';
-            sigBtn.onmouseout = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
-            actions.appendChild(sigBtn);
+            // OUTSIDE GROUPS: Composite & General
+            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
 
-            // Add components
-            body.appendChild(stats);
-            body.appendChild(actions);
-            item.appendChild(header);
-            item.appendChild(body);
-            container.appendChild(item);
-        });
+            actions.appendChild(addAction('Composite RSCP & Neighbors', 'rscp_not_combined'));
+
+            actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
+
+            // GPS & Others
+            actions.appendChild(addAction('GPS Speed', 'speed'));
+            actions.appendChild(addAction('GPS Altitude', 'alt'));
+            actions.appendChild(addAction('Time', 'time'));
+        }
+
+        // Resurrected Signaling Modal Button
+        const sigBtn = document.createElement('div');
+        sigBtn.className = 'metric-item';
+        sigBtn.style.padding = '4px 8px';
+        sigBtn.style.cursor = 'pointer';
+        sigBtn.style.margin = '2px 0';
+        sigBtn.style.fontSize = '11px';
+        sigBtn.style.color = '#ccc';
+        sigBtn.style.borderRadius = '4px';
+        sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)'; // Purple tint
+        sigBtn.style.border = '1px solid rgba(168, 85, 247, 0.2)';
+        sigBtn.textContent = 'Show Signaling';
+        sigBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (window.showSignalingModal) {
+                window.showSignalingModal(log.id);
+            } else {
+                alert('Signaling Modal function missing!');
+            }
+        };
+        sigBtn.onmouseover = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.2)';
+        sigBtn.onmouseout = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
+        actions.appendChild(sigBtn);
+
+        // Add components
+        body.appendChild(stats);
+        body.appendChild(actions);
+        item.appendChild(header);
+        item.appendChild(body);
+        container.appendChild(item);
+    });
+};
+
+// DEBUG EXPORT FOR TESTING
+window.loadedLogs = loadedLogs;
+window.updateLogsList = updateLogsList;
+window.openChartModal = openChartModal;
+window.showSignalingModal = showSignalingModal;
+window.dockChart = dockChart;
+window.dockSignaling = dockSignaling;
+window.undockChart = undockChart;
+window.undockSignaling = undockSignaling;
+
+// ----------------------------------------------------
+// EXPORT OPTIM FILE FEATURE
+// ----------------------------------------------------
+window.exportOptimFile = (logId) => {
+    const log = loadedLogs.find(l => l.id === logId);
+    if (!log) return;
+
+    const headers = [
+        'Date', 'Time', 'Latitude', 'Longitude',
+        'Serving Band', 'Serving RSCP', 'Serving EcNo', 'Serving SC', 'Serving LAC', 'Serving Freq',
+        'N1 Band', 'N1 RSCP', 'N1 EcNo', 'N1 SC', 'N1 LAC', 'N1 Freq',
+        'N2 Band', 'N2 RSCP', 'N2 EcNo', 'N2 SC', 'N2 LAC', 'N2 Freq',
+        'N3 Band', 'N3 RSCP', 'N3 EcNo', 'N3 SC', 'N3 LAC', 'N3 Freq'
+    ];
+
+    // Helper to guess band from freq (Simplified logic matching parser)
+    const getBand = (f) => {
+        if (!f) return '';
+        f = parseFloat(f);
+        if (f >= 10562 && f <= 10838) return 'B1 (2100)';
+        if (f >= 2937 && f <= 3088) return 'B8 (900)';
+        if (f > 10000) return 'High Band';
+        if (f < 4000) return 'Low Band';
+        return 'Unknown';
     };
 
-    // DEBUG EXPORT FOR TESTING
-    window.loadedLogs = loadedLogs;
-    window.updateLogsList = updateLogsList;
-    window.openChartModal = openChartModal;
-    window.showSignalingModal = showSignalingModal;
-    window.dockChart = dockChart;
-    window.dockSignaling = dockSignaling;
-    window.undockChart = undockChart;
-    window.undockSignaling = undockSignaling;
+    const rows = [];
+    rows.push(headers.join(','));
 
-    // ----------------------------------------------------
-    // EXPORT OPTIM FILE FEATURE
-    // ----------------------------------------------------
-    window.exportOptimFile = (logId) => {
-        const log = loadedLogs.find(l => l.id === logId);
+    log.points.forEach(p => {
+        if (!p.parsed) return;
+
+        const s = p.parsed.serving;
+        const n = p.parsed.neighbors || [];
+
+        const gn = (idx, field) => {
+            if (idx >= n.length) return '';
+            const nb = n[idx];
+            if (field === 'band') return getBand(nb.freq);
+            if (field === 'lac') return s.lac;
+            return nb[field] !== undefined ? nb[field] : '';
+        };
+
+        const row = [
+            new Date().toISOString().split('T')[0],
+            p.time,
+            p.lat,
+            p.lng,
+            getBand(s.freq),
+            s.level,
+            s.ecno !== null ? s.ecno : '',
+            s.sc,
+            s.lac,
+            s.freq,
+            gn(0, 'band'), gn(0, 'rscp'), gn(0, 'ecno'), gn(0, 'pci'), gn(0, 'lac'), gn(0, 'freq'),
+            gn(1, 'band'), gn(1, 'rscp'), gn(1, 'ecno'), gn(1, 'pci'), gn(1, 'lac'), gn(1, 'freq'),
+            gn(2, 'band'), gn(2, 'rscp'), gn(2, 'ecno'), gn(2, 'pci'), gn(2, 'lac'), gn(2, 'freq')
+        ];
+        rows.push(row.join(','));
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8," + rows.join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${log.name}_optim_export.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+};
+
+
+
+// ----------------------------------------------------
+// CONTEXT MENU LOGIC (Re-added)
+// ----------------------------------------------------
+window.currentContextLogId = null;
+window.currentContextParam = null;
+
+
+// DRAG AND DROP MAP HANDLERS
+window.allowDrop = (ev) => {
+    ev.preventDefault();
+};
+
+window.drop = (ev) => {
+    ev.preventDefault();
+    try {
+        const data = JSON.parse(ev.dataTransfer.getData("application/json"));
+        if (!data || !data.logId || !data.param) return;
+
+        console.log("Dropped Metric:", data);
+
+        const log = loadedLogs.find(l => l.id.toString() === data.logId.toString());
         if (!log) return;
 
-        const headers = [
-            'Date', 'Time', 'Latitude', 'Longitude',
-            'Serving Band', 'Serving RSCP', 'Serving EcNo', 'Serving SC', 'Serving LAC', 'Serving Freq',
-            'N1 Band', 'N1 RSCP', 'N1 EcNo', 'N1 SC', 'N1 LAC', 'N1 Freq',
-            'N2 Band', 'N2 RSCP', 'N2 EcNo', 'N2 SC', 'N2 LAC', 'N2 Freq',
-            'N3 Band', 'N3 RSCP', 'N3 EcNo', 'N3 SC', 'N3 LAC', 'N3 Freq'
-        ];
+        // 1. Determine Theme based on Metric
+        const p = data.param.toLowerCase();
+        const l = data.label.toLowerCase();
+        const themeSelect = document.getElementById('themeSelect');
+        let newTheme = 'level'; // Default
 
-        // Helper to guess band from freq (Simplified logic matching parser)
-        const getBand = (f) => {
-            if (!f) return '';
-            f = parseFloat(f);
-            if (f >= 10562 && f <= 10838) return 'B1 (2100)';
-            if (f >= 2937 && f <= 3088) return 'B8 (900)';
-            if (f > 10000) return 'High Band';
-            if (f < 4000) return 'Low Band';
-            return 'Unknown';
-        };
+        // Heuristic for Quality vs Coverage vs CellID
+        if (p === 'cellid' || p === 'cid' || p === 'cell_id') {
+            // Temporarily add option if missing or just hijack the value
+            let opt = Array.from(themeSelect.options).find(o => o.value === 'cellId');
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.value = 'cellId';
+                opt.text = 'Cell ID';
+                themeSelect.add(opt);
+            }
+            newTheme = 'cellId';
+        } else if (p.includes('qual') || p.includes('ecno') || p.includes('sinr')) {
+            newTheme = 'quality';
+        }
 
-        const rows = [];
-        rows.push(headers.join(','));
+        // 2. Apply Theme if detected
+        if (newTheme && themeSelect) {
+            themeSelect.value = newTheme;
+            console.log(`[Drop] Switched theme to: ${newTheme}`);
 
-        log.points.forEach(p => {
-            if (!p.parsed) return;
+            // Trigger any change handlers if strictly needed, but we usually just call render
+            if (window.renderThresholdInputs) {
+                window.renderThresholdInputs();
+            }
+            // Force Legend Update
+            // Force Legend Update (REMOVED: let Async event handle it)
+            // if (window.updateLegend) {
+            //    window.updateLegend();
+            // }
+        }
 
-            const s = p.parsed.serving;
-            const n = p.parsed.neighbors || [];
+        // 3. Visualize
+        if (window.mapRenderer) {
+            log.currentParam = data.param; // SYNC: Update active metric for this log
+            window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);
 
-            const gn = (idx, field) => {
-                if (idx >= n.length) return '';
-                const nb = n[idx];
-                if (field === 'band') return getBand(nb.freq);
-                if (field === 'lac') return s.lac;
-                return nb[field] !== undefined ? nb[field] : '';
-            };
+            // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
+            // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
+            // REMOVED: let Async event handle it to avoid "0 Cell IDs" flash
+            // setTimeout(() => {
+            //     if (window.updateLegend) window.updateLegend();
+            // }, 100);
+        } else {
+            console.error("[Drop] window.mapRenderer is undefined!");
+            alert("Internal Error: Map Renderer not initialized.");
+        }
 
-            const row = [
-                new Date().toISOString().split('T')[0],
-                p.time,
-                p.lat,
-                p.lng,
-                getBand(s.freq),
-                s.level,
-                s.ecno !== null ? s.ecno : '',
-                s.sc,
-                s.lac,
-                s.freq,
-                gn(0, 'band'), gn(0, 'rscp'), gn(0, 'ecno'), gn(0, 'pci'), gn(0, 'lac'), gn(0, 'freq'),
-                gn(1, 'band'), gn(1, 'rscp'), gn(1, 'ecno'), gn(1, 'pci'), gn(1, 'lac'), gn(1, 'freq'),
-                gn(2, 'band'), gn(2, 'rscp'), gn(2, 'ecno'), gn(2, 'pci'), gn(2, 'lac'), gn(2, 'freq')
-            ];
-            rows.push(row.join(','));
-        });
+    } catch (e) {
+        console.error("Drop failed:", e);
+        alert("Drop failed: " + e.message);
+    }
+};
 
-        const csvContent = "data:text/csv;charset=utf-8," + rows.join("\n");
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `${log.name}_optim_export.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    };
+// ----------------------------------------------------
+// USER POINT MANUAL ENTRY
+// ----------------------------------------------------
+const addPointBtn = document.getElementById('addPointBtn');
+const userPointModal = document.getElementById('userPointModal');
+const submitUserPoint = document.getElementById('submitUserPoint');
 
+if (addPointBtn && userPointModal) {
+    addPointBtn.onclick = () => {
+        userPointModal.style.display = 'block';
 
+        // Make Draggable
+        const upContent = userPointModal.querySelector('.modal-content');
+        const upHeader = userPointModal.querySelector('.modal-header');
+        if (typeof makeElementDraggable === 'function' && upContent && upHeader) {
+            makeElementDraggable(upHeader, upContent);
+        }
 
-    // ----------------------------------------------------
-    // CONTEXT MENU LOGIC (Re-added)
-    // ----------------------------------------------------
-    window.currentContextLogId = null;
-    window.currentContextParam = null;
-
-
-    // DRAG AND DROP MAP HANDLERS
-    window.allowDrop = (ev) => {
-        ev.preventDefault();
-    };
-
-    window.drop = (ev) => {
-        ev.preventDefault();
-        try {
-            const data = JSON.parse(ev.dataTransfer.getData("application/json"));
-            if (!data || !data.logId || !data.param) return;
-
-            console.log("Dropped Metric:", data);
-
-            const log = loadedLogs.find(l => l.id.toString() === data.logId.toString());
-            if (!log) return;
-
-            // 1. Determine Theme based on Metric
-            const p = data.param.toLowerCase();
-            const l = data.label.toLowerCase();
-            const themeSelect = document.getElementById('themeSelect');
-            let newTheme = 'level'; // Default
-
-            // Heuristic for Quality vs Coverage vs CellID
-            if (p === 'cellid' || p === 'cid' || p === 'cell_id') {
-                // Temporarily add option if missing or just hijack the value
-                let opt = Array.from(themeSelect.options).find(o => o.value === 'cellId');
-                if (!opt) {
-                    opt = document.createElement('option');
-                    opt.value = 'cellId';
-                    opt.text = 'Cell ID';
-                    themeSelect.add(opt);
+        // Optional: Auto-fill from Search Input if it looks like coords
+        const searchInput = document.getElementById('searchInput');
+        if (searchInput && searchInput.value) {
+            const parts = searchInput.value.split(',');
+            if (parts.length === 2) {
+                const lat = parseFloat(parts[0].trim());
+                const lng = parseFloat(parts[1].trim());
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    document.getElementById('upLat').value = lat;
+                    document.getElementById('upLng').value = lng;
                 }
-                newTheme = 'cellId';
-            } else if (p.includes('qual') || p.includes('ecno') || p.includes('sinr')) {
-                newTheme = 'quality';
             }
-
-            // 2. Apply Theme if detected
-            if (newTheme && themeSelect) {
-                themeSelect.value = newTheme;
-                console.log(`[Drop] Switched theme to: ${newTheme}`);
-
-                // Trigger any change handlers if strictly needed, but we usually just call render
-                if (window.renderThresholdInputs) {
-                    window.renderThresholdInputs();
-                }
-                // Force Legend Update
-                // Force Legend Update (REMOVED: let Async event handle it)
-                // if (window.updateLegend) {
-                //    window.updateLegend();
-                // }
-            }
-
-            // 3. Visualize
-            if (window.mapRenderer) {
-                log.currentParam = data.param; // SYNC: Update active metric for this log
-                window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);
-
-                // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
-                // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
-                // REMOVED: let Async event handle it to avoid "0 Cell IDs" flash
-                // setTimeout(() => {
-                //     if (window.updateLegend) window.updateLegend();
-                // }, 100);
-            } else {
-                console.error("[Drop] window.mapRenderer is undefined!");
-                alert("Internal Error: Map Renderer not initialized.");
-            }
-
-        } catch (e) {
-            console.error("Drop failed:", e);
-            alert("Drop failed: " + e.message);
         }
     };
+}
 
-    // ----------------------------------------------------
-    // USER POINT MANUAL ENTRY
-    // ----------------------------------------------------
-    const addPointBtn = document.getElementById('addPointBtn');
-    const userPointModal = document.getElementById('userPointModal');
-    const submitUserPoint = document.getElementById('submitUserPoint');
+if (submitUserPoint) {
+    submitUserPoint.onclick = () => {
+        const nameInput = document.getElementById('upName');
+        const latInput = document.getElementById('upLat');
+        const lngInput = document.getElementById('upLng');
 
-    if (addPointBtn && userPointModal) {
-        addPointBtn.onclick = () => {
-            userPointModal.style.display = 'block';
+        const name = nameInput.value.trim() || 'User Point';
+        const lat = parseFloat(latInput.value);
+        const lng = parseFloat(lngInput.value);
 
-            // Make Draggable
-            const upContent = userPointModal.querySelector('.modal-content');
-            const upHeader = userPointModal.querySelector('.modal-header');
-            if (typeof makeElementDraggable === 'function' && upContent && upHeader) {
-                makeElementDraggable(upHeader, upContent);
-            }
+        if (isNaN(lat) || isNaN(lng)) {
+            alert('Invalid Coordinates. Please enter valid numbers.');
+            return;
+        }
 
-            // Optional: Auto-fill from Search Input if it looks like coords
-            const searchInput = document.getElementById('searchInput');
-            if (searchInput && searchInput.value) {
-                const parts = searchInput.value.split(',');
-                if (parts.length === 2) {
-                    const lat = parseFloat(parts[0].trim());
-                    const lng = parseFloat(parts[1].trim());
-                    if (!isNaN(lat) && !isNaN(lng)) {
-                        document.getElementById('upLat').value = lat;
-                        document.getElementById('upLng').value = lng;
-                    }
+        if (!window.map) {
+            alert('Map not initialized.');
+            return;
+        }
+
+        // Add Marker via Leaflet
+        // Using a distinct icon color or style could be nice, but default blue is fine for now.
+        const marker = L.marker([lat, lng]).addTo(window.map);
+
+        // Assign a unique ID to the marker for removal
+        const markerId = 'user_point_' + Date.now();
+        marker._pointId = markerId;
+
+        // Store marker in a global map if not exists
+        if (!window.userMarkers) window.userMarkers = {};
+        window.userMarkers[markerId] = marker;
+
+        // Define global remover if not exists
+        if (!window.removeUserPoint) {
+            window.removeUserPoint = (id) => {
+                const m = window.userMarkers[id];
+                if (m) {
+                    m.remove();
+                    delete window.userMarkers[id];
                 }
-            }
-        };
-    }
+            };
+        }
 
-    if (submitUserPoint) {
-        submitUserPoint.onclick = () => {
-            const nameInput = document.getElementById('upName');
-            const latInput = document.getElementById('upLat');
-            const lngInput = document.getElementById('upLng');
-
-            const name = nameInput.value.trim() || 'User Point';
-            const lat = parseFloat(latInput.value);
-            const lng = parseFloat(lngInput.value);
-
-            if (isNaN(lat) || isNaN(lng)) {
-                alert('Invalid Coordinates. Please enter valid numbers.');
-                return;
-            }
-
-            if (!window.map) {
-                alert('Map not initialized.');
-                return;
-            }
-
-            // Add Marker via Leaflet
-            // Using a distinct icon color or style could be nice, but default blue is fine for now.
-            const marker = L.marker([lat, lng]).addTo(window.map);
-
-            // Assign a unique ID to the marker for removal
-            const markerId = 'user_point_' + Date.now();
-            marker._pointId = markerId;
-
-            // Store marker in a global map if not exists
-            if (!window.userMarkers) window.userMarkers = {};
-            window.userMarkers[markerId] = marker;
-
-            // Define global remover if not exists
-            if (!window.removeUserPoint) {
-                window.removeUserPoint = (id) => {
-                    const m = window.userMarkers[id];
-                    if (m) {
-                        m.remove();
-                        delete window.userMarkers[id];
-                    }
-                };
-            }
-
-            const popupContent = `
+        const popupContent = `
 <div style = "font-size:13px; min-width:150px;" >
                 <b>${name}</b><br>
                 <div style="color:#888; font-size:11px; margin-top:4px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
@@ -6492,22 +6493,22 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
          `;
 
-            marker.bindPopup(popupContent).openPopup();
+        marker.bindPopup(popupContent).openPopup();
 
-            // Close Modal
-            userPointModal.style.display = 'none';
+        // Close Modal
+        userPointModal.style.display = 'none';
 
-            // Pan to location
-            window.map.panTo([lat, lng]);
+        // Pan to location
+        window.map.panTo([lat, lng]);
 
-            // Clear Inputs (Optional, or keep for repeated entry?)
-            // Let's keep name but clear coords or clear all? 
-            // Clearing all is standard.
-            nameInput.value = '';
-            latInput.value = '';
-            lngInput.value = '';
-        };
-    }
+        // Clear Inputs (Optional, or keep for repeated entry?)
+        // Let's keep name but clear coords or clear all? 
+        // Clearing all is standard.
+        nameInput.value = '';
+        latInput.value = '';
+        lngInput.value = '';
+    };
+}
 
 });
 
