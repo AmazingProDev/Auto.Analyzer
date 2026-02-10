@@ -61,7 +61,7 @@ class MapRenderer {
         // CUSTOM PANE FOR SITES & LOG POINTS (Interactive Top Layer)
         this.map.createPane('sitesPane');
         this.map.getPane('sitesPane').style.zIndex = 650;
-        this.map.getPane('sitesPane').style.pointerEvents = 'none'; // Critical: Allow clicks to pass through empty areas
+        this.map.getPane('sitesPane').style.pointerEvents = 'auto';
         this.sitesRenderer = L.canvas({ pane: 'sitesPane', tolerance: 5 });
         // SVG Renderer for Sites (Sectors) to allow click-through transparency
         this.sitesSvgRenderer = L.svg({ pane: 'sitesPane' });
@@ -71,6 +71,11 @@ class MapRenderer {
         this.map.getPane('labelsPane').style.zIndex = 700;
         this.map.getPane('labelsPane').style.pointerEvents = 'none'; // Don't block clicks
 
+        // CUSTOM PANE FOR EVENTS (Above log points, below labels)
+        this.map.createPane('eventsPane');
+        this.map.getPane('eventsPane').style.zIndex = 680;
+        this.map.getPane('eventsPane').style.pointerEvents = 'auto';
+
         // CUSTOM PANE FOR SMARTCARE GRIDS (Polygons) - zIndex 640 (Below sitesPane 650)
         this.map.createPane('smartCarePane');
         this.map.getPane('smartCarePane').style.zIndex = 640;
@@ -78,7 +83,6 @@ class MapRenderer {
         this.smartCareRenderer = L.canvas({ pane: 'smartCarePane', tolerance: 5 });
 
 
-        this.connectionsLayer = L.layerGroup().addTo(this.map); // Layer for lines
         this.connectionsLayer = L.layerGroup().addTo(this.map); // Layer for lines
         this.customDiscreteColors = {}; // User-overridden colors (ID -> Color)
         this.siteLayers = new Map(); // Store layers by ID: { id, name, sectors, visible, polygonLayer, labelLayer }
@@ -253,11 +257,13 @@ class MapRenderer {
     getColor(val, metric = 'level') {
         if (val === undefined || val === null || val === 'N/A' || val === '') return '#888';
 
-        // 1. Priority: Discrete Identity Metrics
-        // (Moved up to prevent 'Cell ID' being matched as 'level' by getThresholdKey default)
         const discreteMetrics = [
             'cellId', 'cid', 'pci', 'sc', 'lac', 'serving_cell_name', 'Cell ID',
-            'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name'
+            'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name',
+            'RRC State', 'AS Event', 'HO Command', 'HO Completion', 'Active Set Size',
+            'RLF indication', 'UL sync loss (UE can’t reach NodeB)', 'DL sync loss (Interference / coverage)', 'T310', 'T312',
+            'rrc_rel_cause', 'cs_rel_cause', 'iucs_status',
+            'freq', 'Freq', 'earfcn', 'EARFCN', 'uarfcn', 'UARFCN', 'channel', 'Channel'
         ];
         if (discreteMetrics.includes(metric) || metric.toLowerCase().includes('name') || metric.toLowerCase().includes('id-cell')) {
             return this.getDiscreteColor(val);
@@ -337,6 +343,24 @@ class MapRenderer {
 
         // Normalize: Remove whitespace to match Index keys
         const str = sVal.replace(/\s/g, '');
+
+        // RRC State Fixed Colors
+        if (sVal === 'CELL_DCH') return '#00ff00'; // Green
+        if (sVal === 'CELL_FACH') return '#ffff00'; // Yellow
+        if (sVal === 'IDLE') return '#808080'; // Gray
+        if (sVal === 'CELL_PCH' || sVal === 'URA_PCH') return '#ff00ff'; // Magenta
+
+        // HO / AS Events
+        if (sVal === 'AS Add') return '#22c55e'; // Green
+        if (sVal === 'AS Remove') return '#ef4444'; // Red
+        if (sVal === 'HO Command') return '#f97316'; // Orange
+        if (sVal === 'HO Completion') return '#0000ff'; // Blue
+
+        // RLF / Sync Events
+        if (sVal === 'RLF indication') return '#ff0000'; // Bright Red
+        if (sVal === 'UL sync loss (UE can’t reach NodeB)') return '#eab308'; // Yellow/Gold
+        if (sVal === 'DL sync loss (Interference / coverage)') return '#f87171'; // Light Red/Coral
+        if (sVal.startsWith('T310') || sVal.startsWith('T312')) return '#a855f7'; // Purple
 
         // Custom 12-color palette from user image
         const palette = [
@@ -633,6 +657,15 @@ class MapRenderer {
         const validLocations = [];
         const idsCollection = new Map(); // Accumulate IDs for Legend here
         let totalValidsForMetric = 0;
+        const isIdentityMetric = (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID' ||
+            metric === 'RRC State' || metric === 'Active Set Size' || metric === 'AS Event' ||
+            metric === 'HO Command' || metric === 'HO Completion' ||
+            metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' ||
+            metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel');
+        const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
+        const thresholds = (rangeKey && window.themeConfig && window.themeConfig.thresholds)
+            ? window.themeConfig.thresholds[rangeKey]
+            : null;
 
         const processChunk = () => {
             const end = Math.min(pIdx + CHUNK_SIZE, totalPoints);
@@ -641,7 +674,7 @@ class MapRenderer {
                 const val = this.getMetricValue(p, metric);
 
                 // Handle Identity Metrics Collection for Legend
-                if (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID') {
+                if (isIdentityMetric) {
                     if (val !== undefined && val !== null) {
                         const sVal = String(val);
                         idsCollection.set(sVal, (idsCollection.get(sVal) || 0) + 1);
@@ -652,23 +685,21 @@ class MapRenderer {
 
                 // Collect Stats for Thematic Metrics (RSRP, RSRQ, etc.)
                 // If it's not cellId/cid, it might be a thematic metric mapping to level or quality
-                if (metric !== 'cellId' && metric !== 'cid' && metric !== 'Cell ID' && window.getThresholdKey) {
-                    const rangeKey = window.getThresholdKey(metric);
-                    if (rangeKey && window.themeConfig) {
-                        const thresholds = window.themeConfig.thresholds[rangeKey];
-                        if (thresholds && val !== undefined && val !== null) {
-                            // Find matching label
-                            let matched = false;
-                            for (const t of thresholds) {
-                                if (t.min !== undefined && val <= t.min) continue;
-                                if (t.max !== undefined && val > t.max) continue;
-                                idsCollection.set(t.label, (idsCollection.get(t.label) || 0) + 1);
-                                matched = true;
-                                break;
-                            }
-                            if (matched) totalValidsForMetric++;
-                        }
+                if (!isIdentityMetric && thresholds && val !== undefined && val !== null) {
+                    // Find matching label
+                    let matched = false;
+                    for (const t of thresholds) {
+                        if (t.min !== undefined && val <= t.min) continue;
+                        if (t.max !== undefined && val > t.max) continue;
+                        idsCollection.set(t.label, (idsCollection.get(t.label) || 0) + 1);
+                        matched = true;
+                        break;
                     }
+                    if (matched) totalValidsForMetric++;
+                }
+
+                if (metric !== 'level' && metric !== 'quality') { // Only skip for specific metrics
+                    if (val === undefined || val === null || val === 'N/A' || val === '') continue;
                 }
 
                 const color = this.getColor(val, metric);
@@ -677,6 +708,11 @@ class MapRenderer {
                     validLocations.push([p.lat, p.lng]);
 
                     let layer;
+                    const isEvent = p.type === 'EVENT';
+                    let radius = isEvent ? 7 : 4; // Events are larger
+
+
+                    const weight = isEvent ? 2 : 1; // Thicker border for events
 
                     // CHECK FOR POLYGON GEOMETRY (Imported SHP Grid)
                     if (p.geometry && (p.geometry.type === 'Polygon' || p.geometry.type === 'MultiPolygon')) {
@@ -698,12 +734,12 @@ class MapRenderer {
                     } else {
                         // Default Point Rendering
                         layer = L.circleMarker([p.lat, p.lng], {
-                            radius: 4,
+                            radius: radius,
                             fillColor: color,
-                            color: "#000",
-                            weight: 1,
+                            color: isEvent ? "#fff" : "#000",
+                            weight: weight,
                             opacity: 1,
-                            fillOpacity: 0.8,
+                            fillOpacity: isEvent ? 1 : 0.8,
                             pane: 'sitesPane',
                             renderer: this.sitesSvgRenderer,
                             interactive: true
@@ -737,17 +773,19 @@ class MapRenderer {
                     totalActiveSamples: totalValidsForMetric
                 };
 
-                if (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID') {
+                if (isIdentityMetric) {
                     this.activeMetricIds = Array.from(idsCollection.keys()).sort(); // Legacy global array
                     this.activeMetricStats = idsCollection;
                     this.totalActiveSamples = totalValidsForMetric;
 
                     statsObj.activeMetricIds = this.activeMetricIds;
 
-                    // HIGHLIGHT PASS TRIGGER
-                    // Pass the Set of IDs directly for O(1) lookups in renderSites
-                    const activeSet = new Set(idsCollection.keys());
-                    this.renderSites(false, activeSet);
+                    if (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID') {
+                        // HIGHLIGHT PASS TRIGGER
+                        // Pass the Set of IDs directly for O(1) lookups in renderSites
+                        const activeSet = new Set(idsCollection.keys());
+                        this.renderSites(false, activeSet);
+                    }
                 } else {
                     // For thematic metrics (level, quality), we also expose stats
                     this.activeMetricStats = idsCollection;
@@ -771,6 +809,13 @@ class MapRenderer {
 
         // Start Processing
         processChunk();
+
+        // Set render order (higher zIndex = on top)
+        if (typeof this.layerZ === 'number') {
+            layerGroup.eachLayer(l => {
+                if (typeof l.setZIndexOffset === 'function') l.setZIndexOffset(this.layerZ);
+            });
+        }
     }
 
     highlightMarker(logId, index) {
@@ -852,6 +897,12 @@ class MapRenderer {
             this.activeMetricIds = null;
         }
 
+        // OVERLAY MODE for RRC/CS
+        if (metric === 'rrc_rel_cause' || metric === 'cs_rel_cause' || metric === 'iucs_status') {
+            this.addOverlayLayer(id, points, metric);
+            return;
+        }
+
         this.removeLogLayer(id);
         this.addLogLayer(id, points, metric, true);
     }
@@ -864,11 +915,18 @@ class MapRenderer {
         this.removeEventsLayer(id);
     }
 
-    addEventsLayer(id, points) {
+    addEventsLayer(id, points, options = {}) {
         if (!this.eventLayers) this.eventLayers = {};
         if (this.eventLayers[id]) this.map.removeLayer(this.eventLayers[id]);
 
         const layerGroup = L.layerGroup();
+        const useIcon = options && options.iconUrl;
+        const iconObj = useIcon ? L.icon({
+            iconUrl: options.iconUrl,
+            iconSize: options.iconSize || [32, 32],
+            iconAnchor: options.iconAnchor || [16, 16],
+            className: options.iconClass || ''
+        }) : null;
 
         points.forEach(p => {
             if (!p.event) return;
@@ -909,29 +967,24 @@ class MapRenderer {
                     break;
             }
 
-            const marker = L.circleMarker([p.lat, p.lng], {
-                radius: radius,
-                color: '#fff', // White border for contrast
-                weight: 2,
-                fillColor: fillColor,
-                fillOpacity: 1,
-                className: 'event-marker'
-            }).bindTooltip(label, {
-                permanent: false,
-                direction: 'top',
-                offset: [0, -5]
-            });
+            const marker = useIcon
+                ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: false })
+                : L.circleMarker([p.lat, p.lng], {
+                    radius: radius,
+                    color: '#fff', // White border for contrast
+                    weight: 2,
+                    fillColor: fillColor,
+                    fillOpacity: 1,
+                    pane: 'eventsPane',
+                    className: 'event-marker',
+                    interactive: false
+                });
 
-            // Add popup with details
-            const latStr = (p.lat !== undefined && p.lat !== null) ? p.lat.toFixed(5) : 'N/A';
-            const lngStr = (p.lng !== undefined && p.lng !== null) ? p.lng.toFixed(5) : 'N/A';
+            if (typeof this.layerZ === 'number') {
+                if (typeof marker.setZIndexOffset === 'function') marker.setZIndexOffset(this.layerZ);
+            }
 
-            marker.bindPopup(`
-                <b>${label}</b><br>
-                Time: ${p.time}<br>
-                Cause: ${p.message}<br>
-                lat: ${latStr}, lng: ${lngStr}
-             `);
+            // Note: interactive disabled to allow clicking underlying DT points
 
             layerGroup.addLayer(marker);
         });
@@ -967,6 +1020,60 @@ class MapRenderer {
 
         this.rebuildSiteIndex();
         this.renderSites(fitBounds);
+    }
+
+    addOverlayLayer(id, points, metric) {
+        // Overlay for RRC/CS Release Causes (Red Flags)
+        // Do not clear existing logLayers. Just add a new specific layer.
+        const overlayId = id + '_overlay_' + metric;
+
+        if (this.logLayers[overlayId]) {
+            this.map.removeLayer(this.logLayers[overlayId]);
+        }
+
+        const layerGroup = L.layerGroup();
+        let count = 0;
+
+        points.forEach(p => {
+            if (!p.lat || !p.lng) return;
+
+            // EVENT ONLY: To prevent drawing flags on every measurement point (sticky state)
+            if (p.type !== 'EVENT') return;
+
+            const val = this.getMetricValue(p, metric);
+
+            // Filter Invalid Data for Overlay
+            // Allow "Normal" and "Normal Clearing" as per user request to see "valid data"
+            if (!val || val === 'N/A' || val === '-') return;
+
+            const isNormal = val.toString().toLowerCase().includes('normal');
+
+            // Color Logic: Red for Abnormal, Green (Hue Rotated) for Normal
+            // 🚩 is Red (0deg). Rotating ~100deg-120deg makes it Green.
+            const colorStyle = isNormal ? 'filter: hue-rotate(110deg);' : '';
+
+            // RED/GREEN FLAG ICON
+            const flagIcon = L.divIcon({
+                className: 'custom-flag-icon',
+                html: `<div style="font-size: 24px; color: red; text-shadow: 2px 2px 0px white; ${colorStyle}">🚩</div>`,
+                iconSize: [24, 24],
+                iconAnchor: [4, 20] // Bottom-left corner roughly
+            });
+
+            const marker = L.marker([p.lat, p.lng], { icon: flagIcon, zIndexOffset: 1000 })
+                .addTo(layerGroup);
+
+            marker.bindPopup(`<b>${metric}</b><br>${val}<br>Time: ${p.time}`);
+            count++;
+        });
+
+        if (count > 0) {
+            layerGroup.addTo(this.map);
+            this.logLayers[overlayId] = layerGroup; // Track it to allow removal later if needed
+            console.log(`[MapRenderer] Added Overlay ${metric}: ${count} points.`);
+        } else {
+            alert(`No abnormal ${metric} events found.`);
+        }
     }
 
     removeSiteLayer(id) {
@@ -1056,13 +1163,18 @@ class MapRenderer {
 
         // AUTO-ZOOM (Fix for "Dots only" issue)
         if (fitBounds) {
-            const lats = visibleSectors.map(s => s.lat).filter(l => !isNaN(l));
-            const lngs = visibleSectors.map(s => s.lng).filter(l => !isNaN(l));
-            if (lats.length > 0 && lngs.length > 0) {
-                const minLat = Math.min(...lats);
-                const maxLat = Math.max(...lats);
-                const minLng = Math.min(...lngs);
-                const maxLng = Math.max(...lngs);
+            let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+            for (let i = 0; i < visibleSectors.length; i++) {
+                const s = visibleSectors[i];
+                const lat = s.lat;
+                const lng = s.lng;
+                if (isNaN(lat) || isNaN(lng)) continue;
+                if (lat < minLat) minLat = lat;
+                if (lat > maxLat) maxLat = lat;
+                if (lng < minLng) minLng = lng;
+                if (lng > maxLng) maxLng = lng;
+            }
+            if (minLat !== Infinity && minLng !== Infinity) {
                 this.map.fitBounds([[minLat, minLng], [maxLat, maxLng]], { padding: [50, 50] });
             }
         }

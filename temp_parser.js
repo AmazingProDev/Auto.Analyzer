@@ -558,11 +558,8 @@ const NMFParser = {
                     activeSetCount = parseInt(parts[5]) || 1;
                     monitoredSetCount = parseInt(parts[6]) || 0;
 
-                    if (isNaN(servingFreq) || servingFreq <= 0) servingFreq = null;
-                    if (servingFreq !== null) {
-                        if (servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
-                        else if (servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
-                    }
+                    if (servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
+                    else if (servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
 
                     // RSSI calculation for 3G
                     if (!isNaN(servingLevel) && !isNaN(servingEcNo)) {
@@ -600,13 +597,11 @@ const NMFParser = {
                     }
                 } else if (techId === 7) {
                     // LTE/HSPA+ (Tech 7)
-                    // LTE format: [cellId?, earfcn, pci, rssi, rsrp, rsrq, cellId]
-                    servingFreq = parseFloat(parts[9]);
+                    servingFreq = parseFloat(parts[8]);
                     servingLevel = parseFloat(parts[12]); // RSRP
                     servingSc = parseInt(parts[10]) || 'N/A'; // PCI
                     servingEcNo = parseFloat(parts[13]); // RSRQ
                     valRssi = parseFloat(parts[11]); // RSSI
-                    if (isNaN(servingFreq) || servingFreq <= 0) servingFreq = null;
                     servingBand = parts[14];
                     activeSetCount = 1;
                     monitoredSetCount = parseInt(parts[6]) || 0;
@@ -614,7 +609,7 @@ const NMFParser = {
                     // Neighbors: Robust Scanning (Tech 7)
                     for (let k = 15; k < parts.length - 6; k++) {
                         const type = parseInt(parts[k]);
-                        const freq = parseFloat(parts[k + 2]);
+                        const freq = parseFloat(parts[k + 1]);
                         const pci = parseInt(parts[k + 3]);
                         const rsrp = parseFloat(parts[k + 4]);
                         const rssi = parseFloat(parts[k + 5]);
@@ -673,7 +668,7 @@ const NMFParser = {
                         'RNC': rnc,
                         'CID': cid,
                         'LAC': state.lac,
-                        'Freq': (servingFreq !== null ? servingFreq : 'N/A'),
+                        'Freq': servingFreq,
                         'RNC/CID': (rnc !== null && cid !== null) ? `${rnc}/${cid}` : 'N/A',
                         [techId === 5 ? 'Serving RSCP' : 'Serving RSRP']: servingLevel,
                         'Serving SC': servingSc,
@@ -815,88 +810,18 @@ const NMFParser = {
                 allPoints.push(point);
 
             } else if (header.toUpperCase().includes('RRC') || header.toUpperCase().includes('L3')) {
-                const inferDirectionFromMessage = (msg) => {
-                    const m = String(msg || '').toUpperCase();
-                    if (m.includes('UPLINK')) return 'UL';
-                    if (m.includes('DOWNLINK')) return 'DL';
-                    if (m.includes('SERVICE_REQUEST')) return 'UL';
-                    if (m.includes('SERVICE_ACCEPT')) return 'DL';
-                    if (m.includes('PDP_CONTEXT_REQUEST')) return 'UL';
-                    if (m.includes('PDP_CONTEXT_ACCEPT')) return 'DL';
-                    if (m.includes('MODIFY_PDP_CONTEXT_REQUEST')) return 'UL';
-                    if (m.includes('MODIFY_PDP_CONTEXT_ACCEPT')) return 'DL';
-                    if (m.includes('RRC_CONNECTION_REQUEST')) return 'UL';
-                    if (m.includes('RRC_CONNECTION_SETUP')) return 'DL';
-                    if (m.includes('RRC_CONNECTION_SETUP_COMPLETE')) return 'UL';
-                    if (m.includes('RRC_CONNECTION_RELEASE')) return 'DL';
-                    if (m.includes('SYSTEM_INFORMATION')) return 'DL';
-                    if (m.includes('MEASUREMENT_CONTROL')) return 'DL';
-                    if (m.includes('MEASUREMENT_REPORT')) return 'UL';
-                    if (m.includes('SECURITY_MODE_COMMAND')) return 'DL';
-                    if (m.includes('SECURITY_MODE_COMPLETE')) return 'UL';
-                    if (m.includes('IDENTITY_REQUEST')) return 'DL';
-                    if (m.includes('IDENTITY_RESPONSE')) return 'UL';
-                    if (m.includes('AUTHENTICATION_REQUEST')) return 'DL';
-                    if (m.includes('AUTHENTICATION_RESPONSE')) return 'UL';
-                    if (m.includes('LOCATION_UPDATE_REQUEST')) return 'UL';
-                    if (m.includes('LOCATION_UPDATE_ACCEPT')) return 'DL';
-                    if (m.includes('ROUTING_AREA_UPDATE_REQUEST')) return 'UL';
-                    if (m.includes('ROUTING_AREA_UPDATE_ACCEPT')) return 'DL';
-                    if (m.includes('CM_SERVICE_REQUEST')) return 'UL';
-                    if (m.includes('CALL_PROCEEDING')) return 'DL';
-                    if (m.includes('SETUP') && !m.includes('SETUP_COMPLETE')) return 'UL';
-                    return undefined;
-                };
                 // Heuristic for message name
                 let message = 'Unknown';
                 for (let k = 2; k < parts.length; k++) {
                     const p = parts[k].trim();
                     if (p.length > 5 && !/^\d+$/.test(p)) { message = p; break; }
                 }
-                if (parts[5]) {
-                    const m = parts[5].replace(/^"|"$/g, '');
-                    if (m && !/^\d+$/.test(m)) message = m;
-                }
-
-                const channel = parts[6] ? parts[6].replace(/^"|"$/g, '') : undefined;
-                const freq = parts[7] ? parseFloat(parts[7]) : undefined;
-                const sc = parts[8] ? parseInt(parts[8]) : undefined;
-                // Direction: try from raw line or infer from message
-                let direction = null;
-                const lineUpper = line.toUpperCase();
-                if (lineUpper.includes('UPLINK')) direction = 'UL';
-                else if (lineUpper.includes('DOWNLINK')) direction = 'DL';
-                if (!direction && parts.length > 2) {
-                    if (parts[2] === '0') direction = 'DL';
-                    if (parts[2] === '1') direction = 'UL';
-                }
-                if (!direction && parts.length > 4) {
-                    if (parts[4] === '1') direction = 'UL';
-                    if (parts[4] === '2') direction = 'DL';
-                }
-                if (!direction) direction = inferDirectionFromMessage(message);
 
                 allPoints.push({
                     lat: gps ? gps.lat : null, lng: gps ? gps.lng : null,
                     time, type: 'SIGNALING', message, details: line,
                     radioSnapshot: { cellId: state.cid, lac: state.lac, psc: state.psc, rnc: state.rnc, neighbors: currentNeighbors.slice(0, 8) },
-                    rrc_rel_cause: state.rrc_cause || 'N/A',
-                    cs_rel_cause: state.cs_cause || 'N/A',
-                    direction: direction || 'N/A',
-                    channel: channel || 'N/A',
-                    freq: !isNaN(freq) ? freq : 'N/A',
-                    sc: !isNaN(sc) ? sc : 'N/A',
-                    properties: {
-                        'Time': time,
-                        'Type': 'SIGNALING',
-                        'Message': message,
-                        'RRC Release Cause': state.rrc_cause || 'N/A',
-                        'CS Release Cause': state.cs_cause || 'N/A',
-                        'Direction': direction || 'N/A',
-                        'Channel': channel || 'N/A',
-                        'Freq': !isNaN(freq) ? freq : 'N/A',
-                        'SC': !isNaN(sc) ? sc : 'N/A'
-                    }
+                    properties: { 'Time': time, 'Type': 'SIGNALING', 'Message': message }
                 });
             } else if (upperHeader === 'RLCBLER' || upperHeader === 'MACBLER') {
                 if (gps && parts.length > 10) {
@@ -1326,3 +1251,5 @@ const ExcelParser = {
         };
     }
 };
+
+module.exports = { NMFParser };
