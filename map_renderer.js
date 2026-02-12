@@ -617,7 +617,7 @@ class MapRenderer {
     addLogLayer(id, points, metric = 'level', preventZoom = false) {
         this.activeLogId = id;
         this.activeMetric = metric;
-        this.preventZoom = preventZoom;
+        const allowZoom = !preventZoom;
 
         // Store for Heatmap use
         this.currentPoints = points;
@@ -761,7 +761,7 @@ class MapRenderer {
                 setTimeout(processChunk, 0);
             } else {
                 // Done
-                if (!this.preventZoom && validLocations.length > 0) {
+                if (allowZoom && validLocations.length > 0) {
                     this.map.fitBounds(validLocations);
                 }
 
@@ -1306,6 +1306,8 @@ class MapRenderer {
 
                 let polygon;
                 if (s.beam > 300) { // Omni
+                    s.tipLat = s.lat;
+                    s.tipLng = s.lng;
                     polygon = L.circle(center, {
                         radius: range + radiusOffset,
                         color: color,
@@ -1317,6 +1319,9 @@ class MapRenderer {
                         renderer: this.sitesSvgRenderer
                     }).addTo(this.sitesLayer);
                 } else {
+                    const tip = getPoint(s.lat, s.lng, azimuth, range + radiusOffset);
+                    s.tipLat = tip[0];
+                    s.tipLng = tip[1];
                     const p1 = getPoint(s.lat, s.lng, azimuth - beam / 2, range + radiusOffset);
                     const p2 = getPoint(s.lat, s.lng, azimuth + beam / 2, range + radiusOffset);
 
@@ -1540,8 +1545,13 @@ class MapRenderer {
             let destLat = t.lat;
             let destLng = t.lng;
 
-            // 1. Precise Tip Calculation via Azimuth (Preferred)
-            if (t.azimuth !== undefined && t.range !== undefined) {
+            // 1. Precise Tip Calculation via precomputed tip (preferred)
+            if (t.tipLat !== undefined && t.tipLng !== undefined) {
+                destLat = t.tipLat;
+                destLng = t.tipLng;
+            }
+            // 2. Precise Tip Calculation via Azimuth
+            else if (t.azimuth !== undefined && t.range !== undefined) {
                 const rad = Math.PI / 180;
                 const latRad = t.lat * rad;
                 const azRad = t.azimuth * rad;
@@ -1555,7 +1565,7 @@ class MapRenderer {
                 destLat = t.lat + dLat;
                 destLng = t.lng + dLng;
             }
-            // 2. Fallback: Polygon Centroid Logic
+            // 3. Fallback: Polygon Centroid Logic
             else if (t.cellId && this.sitePolygons[t.cellId]) {
                 const poly = this.sitePolygons[t.cellId];
                 // Polygon structure: [center, p1, p2]

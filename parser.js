@@ -1,3 +1,587 @@
+const CallSessionBuilder = {
+    build(records, options = {}) {
+        const timeWindowMs = Number.isFinite(options.timeWindowMs) ? options.timeWindowMs : 30000;
+        const rrcNasFollowMs = Number.isFinite(options.rrcNasFollowMs) ? options.rrcNasFollowMs : 5000;
+        const minValidAttemptMs = Number.isFinite(options.minValidAttemptMs) ? options.minValidAttemptMs : 2000;
+        const maxSetupWindowMs = Number.isFinite(options.maxSetupWindowMs) ? options.maxSetupWindowMs : 30000;
+
+        const parseTimeToMs = (timeValue) => {
+            if (!timeValue) return NaN;
+            const txt = String(timeValue).trim();
+            const isoMs = Date.parse(txt);
+            if (!Number.isNaN(isoMs)) return isoMs;
+
+            const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (!m) return NaN;
+            const hh = parseInt(m[1], 10);
+            const mm = parseInt(m[2], 10);
+            const ss = parseInt(m[3], 10);
+            const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+            return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+        };
+
+        const normalizeIdValue = (value) => {
+            if (value === undefined || value === null) return null;
+            const txt = String(value).trim();
+            if (!txt || txt.toUpperCase() === 'N/A' || txt.toUpperCase() === 'UNKNOWN') return null;
+            return txt;
+        };
+
+        const readKeyByPattern = (obj, patterns) => {
+            if (!obj || typeof obj !== 'object') return null;
+            for (const [k, v] of Object.entries(obj)) {
+                const key = String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (patterns.some(p => p.test(key))) {
+                    const normalized = normalizeIdValue(v);
+                    if (normalized) return normalized;
+                }
+            }
+            return null;
+        };
+
+        const extractFromText = (text, pattern) => {
+            if (!text) return null;
+            const m = String(text).match(pattern);
+            return m ? normalizeIdValue(m[1]) : null;
+        };
+
+        const extractIdentifiers = (record) => {
+            const props = record && record.properties ? record.properties : {};
+            const txtPool = [record?.details, record?.message, props?.Message].filter(Boolean).join(' | ');
+
+            const callId = normalizeIdValue(
+                readKeyByPattern(record, [/^callid$/, /^callidentifier$/, /^transactionid$/, /^transid$/, /^tid$/]) ||
+                readKeyByPattern(props, [/^callid$/, /^callidentifier$/, /^transactionid$/, /^transid$/, /^tid$/]) ||
+                extractFromText(txtPool, /\b(?:call\s*id|transaction\s*id|trans(?:action)?\s*id|tid)\s*[:=]\s*([A-Za-z0-9_-]+)/i)
+            );
+
+            const imsi = normalizeIdValue(
+                readKeyByPattern(record, [/^imsi$/]) ||
+                readKeyByPattern(props, [/^imsi$/]) ||
+                extractFromText(txtPool, /\bimsi\s*[:=]\s*([0-9]{5,20})\b/i)
+            );
+
+            const tmsi = normalizeIdValue(
+                readKeyByPattern(record, [/^tmsi$/]) ||
+                readKeyByPattern(props, [/^tmsi$/]) ||
+                extractFromText(txtPool, /\btmsi\s*[:=]\s*([A-Fa-f0-9]{4,16})\b/i)
+            );
+
+            return { callId, imsi, tmsi };
+        };
+
+        const isRrcState = (value) => {
+            if (!value) return false;
+            const txt = String(value).toUpperCase();
+            return ['IDLE', 'CELL_DCH', 'CELL_FACH', 'CELL_PCH', 'URA_PCH', 'CONNECTED', 'INACTIVE'].includes(txt);
+        };
+
+        const parseRrcFromRecord = (record) => {
+            const props = record?.properties || {};
+            const explicitState = normalizeIdValue(record?.['RRC State'] || props['RRC State'] || record?.rrcState);
+            if (isRrcState(explicitState)) return explicitState;
+
+            const msg = String(record?.message || props?.Message || '').toUpperCase();
+            if (msg.includes('RRC_CONNECTION_RELEASE') || msg.includes('RRC RELEASE')) return 'IDLE';
+            if (msg.includes('CELL_UPDATE')) return 'CELL_FACH';
+            if (msg.includes('PAGING')) return 'CELL_PCH';
+            if (msg.includes('RRC_CONNECTION_SETUP') || msg.includes('RADIO_BEARER_SETUP')) return 'CONNECTED';
+            return null;
+        };
+
+        const parseRabEvent = (record) => {
+            const source = String(record?.event || record?.message || record?.properties?.Message || '').toUpperCase();
+            if (!source.includes('RAB')) return null;
+            let phase = 'UPDATE';
+            if (source.includes('SETUP') || source.includes('ASSIGN') || source.includes('ESTABLISH') || source.includes('ADD')) phase = 'START';
+            if (source.includes('RELEASE') || source.includes('REMOVE') || source.includes('DELETE')) phase = 'END';
+            return {
+                time: record.time || null,
+                phase,
+                event: record.event || record.message || 'RAB Event',
+                detail: record.message || record.details || null
+            };
+        };
+
+        const parseMeasurement = (record) => {
+            if (record?.type !== 'MEASUREMENT') return null;
+            const props = record.properties || {};
+            const pick = (...vals) => {
+                for (const v of vals) {
+                    if (v === undefined || v === null || v === '' || Number.isNaN(v)) continue;
+                    return v;
+                }
+                return null;
+            };
+            const m = {
+                time: record.time || null,
+                rscp: pick(record.level, props['Serving RSCP'], props['RSCP']),
+                rsrp: pick(props['Serving RSRP'], props['RSRP']),
+                ecno: pick(record.ecno, props['EcNo'], props['Serving EcNo']),
+                rsrq: pick(props['RSRQ']),
+                rssi: pick(record.rssi, props['RSSI']),
+                blerDl: pick(record.bler_dl, props['BLER DL']),
+                blerUl: pick(record.bler_ul, props['BLER UL']),
+                freq: pick(record.freq, props['Freq'])
+            };
+            const hasSignal = Object.values(m).some(v => v !== null && v !== m.time);
+            return hasSignal ? m : null;
+        };
+
+        const getCorrelationKey = (ids) => {
+            if (ids.callId) return `CALL:${ids.callId}`;
+            if (ids.imsi && ids.tmsi) return `IMSI:${ids.imsi}|TMSI:${ids.tmsi}`;
+            if (ids.imsi) return `IMSI:${ids.imsi}`;
+            if (ids.tmsi) return `TMSI:${ids.tmsi}`;
+            return '__ANON__';
+        };
+
+        const isIdleState = (rrc) => ['IDLE', 'CELL_PCH', 'URA_PCH'].includes(String(rrc || '').toUpperCase());
+
+        const getMessageEnvelope = (record) => {
+            const parts = [
+                record?.event,
+                record?.message,
+                record?.details,
+                record?.properties?.Message,
+                record?.properties?.Event
+            ].filter(Boolean).map(v => String(v).toUpperCase());
+            return parts.join(' | ');
+        };
+
+        const parseSemanticFlags = (record) => {
+            const msg = getMessageEnvelope(record);
+            const props = record?.properties || {};
+            const rrcCause = String(record?.rrc_rel_cause || props['RRC Release Cause'] || props['rrc_rel_cause'] || '').toUpperCase();
+            const csCause = String(record?.cs_rel_cause || props['CS Release Cause'] || props['cs_rel_cause'] || '').toUpperCase();
+            const causeEnvelope = `${rrcCause} ${csCause}`;
+
+            const has = (s) => msg.includes(s);
+            const hasWord = (s) => new RegExp(`\\b${s}\\b`, 'i').test(msg);
+
+            const isCmServiceRequest = has('CM_SERVICE_REQUEST') || has('CM SERVICE REQUEST');
+            const isSetupMoMt = (hasWord('SETUP') && !has('SETUP_COMPLETE') && !has('RRC_CONNECTION_SETUP') && !has('RRC SETUP'));
+            const isRrcConnectionRequest = has('RRC_CONNECTION_REQUEST') || has('RRC CONNECTION REQUEST');
+            const isRabAssignmentRequest = has('RAB_ASSIGNMENT_REQUEST') || has('RAB ASSIGNMENT REQUEST') || has('RAB_ASSIGNMENT_REQ');
+            const isCallProceeding = has('CALL_PROCEEDING') || has('CALL PROCEEDING');
+
+            const isNasCallControl = (
+                isCmServiceRequest ||
+                isSetupMoMt ||
+                isCallProceeding ||
+                has('CC ') ||
+                has('CALL CONTROL')
+            );
+
+            const isRrcSetupComplete = has('RRC_CONNECTION_SETUP_COMPLETE') || has('RRC CONNECTION SETUP COMPLETE');
+            const isRabAssignComplete = has('RAB_ASSIGNMENT_COMPLETE') || has('RAB ASSIGNMENT COMPLETE') || has('RAB ASSIGN COMPLETE');
+            const isRrcConnectionReject = has('RRC_CONNECTION_REJECT') || has('RRC CONNECTION REJECT');
+            const isRabAssignmentFailure = has('RAB_ASSIGNMENT_FAILURE') || has('RAB ASSIGNMENT FAILURE') || has('RAB ASSIGN FAIL');
+            const isConnect = hasWord('CONNECT') && !has('RRC_CONNECTION') && !has('SETUP_COMPLETE');
+            const isDisconnect = hasWord('DISCONNECT');
+            const isRelease = hasWord('RELEASE');
+            const isRrcRelease = has('RRC_CONNECTION_RELEASE') || has('RRC CONNECTION RELEASE');
+
+            const isRlf = has('RADIO LINK FAILURE') || has('RLF');
+            const isIuRelease = has('IU RELEASE') || has('IU-CS RELEASE') || has('IUCS RELEASE');
+            const isCmServiceReject = has('CM_SERVICE_REJECT') || has('CM SERVICE REJECT');
+            const isCallReject = has('CALL_REJECT') || has('CALL REJECT');
+            const isRabRelease = has('RAB RELEASE');
+            const isHoFailure = has('HANDOVER FAILURE') || has('HO FAILURE') || has('HO_FAIL') || has('HOF') || has('INTER-RAT HO FAILURE') || has('IRAT HO FAILURE');
+
+            const isNormalCause = causeEnvelope.includes('NORMAL');
+            const isAbnormalCause = (
+                causeEnvelope.includes('ABNORMAL') ||
+                causeEnvelope.includes('FAIL') ||
+                causeEnvelope.includes('ERROR') ||
+                causeEnvelope.includes('RLF')
+            );
+
+            return {
+                isCmServiceRequest,
+                isSetupMoMt,
+                isRrcConnectionRequest,
+                isRabAssignmentRequest,
+                isCallProceeding,
+                isNasCallControl,
+                isRrcSetupComplete,
+                isRabAssignComplete,
+                isRrcConnectionReject,
+                isRabAssignmentFailure,
+                isConnect,
+                isDisconnect,
+                isRelease,
+                isRrcRelease,
+                isRlf,
+                isIuRelease,
+                isCmServiceReject,
+                isCallReject,
+                isRabRelease,
+                isHoFailure,
+                isRrcReleaseNormal: isRrcRelease && isNormalCause,
+                isRrcReleaseAbnormal: isRrcRelease && isAbnormalCause,
+                isIuReleaseAbnormal: isIuRelease && isAbnormalCause
+            };
+        };
+
+        const sortedRecords = (Array.isArray(records) ? records : [])
+            .filter(r => r && r.time)
+            .slice()
+            .sort((a, b) => {
+                const ta = parseTimeToMs(a.time);
+                const tb = parseTimeToMs(b.time);
+                if (Number.isNaN(ta) && Number.isNaN(tb)) return String(a.time).localeCompare(String(b.time));
+                if (Number.isNaN(ta)) return 1;
+                if (Number.isNaN(tb)) return -1;
+                return ta - tb;
+            });
+
+        const sessions = [];
+        let seq = 1;
+        const stateByKey = new Map();
+
+        const ensureKeyState = (key) => {
+            if (!stateByKey.has(key)) {
+                stateByKey.set(key, {
+                    ueRrcState: 'IDLE',
+                    activeSession: null,
+                    pendingRrcRequestMs: null,
+                    pendingRrcRequestTime: null
+                });
+            }
+            return stateByKey.get(key);
+        };
+
+        const appendToSession = (session, rec, ids) => {
+            if (!session.callTransactionId && ids.callId) session.callTransactionId = ids.callId;
+            if (!session.imsi && ids.imsi) session.imsi = ids.imsi;
+            if (!session.tmsi && ids.tmsi) session.tmsi = ids.tmsi;
+
+            session.recordsCount += 1;
+            const recMs = parseTimeToMs(rec.time);
+            if (Number.isNaN(parseTimeToMs(session.startTime)) || (!Number.isNaN(recMs) && recMs < parseTimeToMs(session.startTime))) session.startTime = rec.time;
+            if (Number.isNaN(parseTimeToMs(session.endTime)) || (!Number.isNaN(recMs) && recMs > parseTimeToMs(session.endTime))) session.endTime = rec.time;
+
+            const rrcState = parseRrcFromRecord(rec);
+            if (rrcState) {
+                const last = session.rrcStates[session.rrcStates.length - 1];
+                if (!last || last.state !== rrcState) {
+                    session.rrcStates.push({ time: rec.time, state: rrcState });
+                }
+            }
+
+            const rabEvent = parseRabEvent(rec);
+            if (rabEvent) session.rabLifecycle.push(rabEvent);
+
+            const measurement = parseMeasurement(rec);
+            if (measurement) session.radioMeasurementsTimeline.push(measurement);
+        };
+
+        const createSession = (startTime, ids, startTrigger) => {
+            const s = {
+                sessionId: `call-session-${seq++}`,
+                callTransactionId: ids.callId,
+                imsi: ids.imsi,
+                tmsi: ids.tmsi,
+                timeWindowMs,
+                startTime,
+                endTime: startTime,
+                rrcStates: [],
+                rabLifecycle: [],
+                radioMeasurementsTimeline: [],
+                recordsCount: 0,
+                state: 'CALL_ATTEMPT',
+                startTrigger,
+                endTrigger: null,
+                endType: null,
+                drop: false,
+                setupFailure: false,
+                callFailed: false,
+                hasConnect: false,
+                callSetupSuccess: false,
+                attemptStarted: true,
+                ignored: false,
+                incomplete: false,
+                sawRrcSetupComplete: false,
+                sawRrcConnectionReject: false,
+                sawCmServiceReject: false,
+                sawCallReject: false,
+                sawRabAssignmentFailure: false,
+                sawRabReleaseBeforeConnect: false,
+                sawRlfBeforeConnect: false,
+                failureReason: null,
+                hasCsRab: false,
+                disconnectSeen: false,
+                normalClearingSeen: false
+            };
+            sessions.push(s);
+            return s;
+        };
+
+        const classifyFailureReason = (session) => {
+            if (!session || !session.setupFailure || session.hasConnect) return null;
+
+            if (session.sawRrcConnectionReject && !session.sawRrcSetupComplete) {
+                return {
+                    code: 'RRC_FAILURE',
+                    label: 'RRC Failure',
+                    cause: 'overage / access congestion'
+                };
+            }
+            if (session.sawCmServiceReject && session.sawCallReject) {
+                return {
+                    code: 'CORE_NAS_REJECT',
+                    label: 'Core / NAS Reject',
+                    cause: 'authentication, MSC congestion, no circuit'
+                };
+            }
+            if (session.sawRabAssignmentFailure && session.sawRabReleaseBeforeConnect) {
+                return {
+                    code: 'RAB_SETUP_FAILURE',
+                    label: 'RAB Setup Failure',
+                    cause: 'code shortage, power congestion'
+                };
+            }
+            if (session.sawRlfBeforeConnect) {
+                return {
+                    code: 'EARLY_RADIO_FAILURE',
+                    label: 'Early Radio Failure',
+                    cause: 'very poor RSCP / EcNo'
+                };
+            }
+            return {
+                code: 'UNKNOWN_FAILURE',
+                label: 'Unknown Failure',
+                cause: 'unclassified call setup failure'
+            };
+        };
+
+        const endSession = (session, endTime, endTrigger, endType, asDrop) => {
+            if (!session || session.state === 'ENDED') return;
+            session.state = 'ENDED';
+            session.endTime = endTime || session.endTime;
+            session.endTrigger = endTrigger || session.endTrigger;
+            session.endType = endType || session.endType || 'UNKNOWN';
+            session.drop = !!asDrop;
+            session.callFailed = false;
+            session.callSetupSuccess = false;
+            session.failureReason = null;
+
+            const startMs = parseTimeToMs(session.startTime);
+            const endMs = parseTimeToMs(session.endTime);
+            const durationMs = (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) ? (endMs - startMs) : null;
+            session.durationMs = durationMs;
+
+            if (session.hasConnect) {
+                session.callSetupSuccess = true;
+                session.setupFailure = false;
+                session.failureReason = null;
+                return;
+            }
+
+            // Single truth rule: attempt started + no CONNECT + ended => Call Setup Failure.
+            if (session.attemptStarted) {
+                if (durationMs !== null && durationMs < minValidAttemptMs) {
+                    session.ignored = true;
+                    session.setupFailure = false;
+                    session.callFailed = false;
+                    session.endType = 'IGNORED_SHORT_ATTEMPT';
+                    session.drop = false;
+                    session.failureReason = null;
+                    return;
+                }
+
+                if (durationMs !== null && durationMs > maxSetupWindowMs) {
+                    session.incomplete = true;
+                    session.setupFailure = false;
+                    session.callFailed = false;
+                    session.endType = 'INCOMPLETE_OR_ONGOING';
+                    session.drop = false;
+                    session.failureReason = null;
+                    return;
+                }
+
+                session.setupFailure = true;
+                session.callFailed = true;
+                session.endType = 'CALL_SETUP_FAILURE';
+                session.drop = false;
+                session.failureReason = classifyFailureReason(session);
+            }
+        };
+
+        const moveState = (session, nextState) => {
+            if (!session || !nextState) return;
+            session.state = nextState;
+        };
+
+        const resolveRuntimeKey = (baseKey) => {
+            if (baseKey !== '__ANON__') return baseKey;
+            const activeKeys = Array.from(stateByKey.entries())
+                .filter(([k, st]) => k !== '__ANON__' && st.activeSession && st.activeSession.state !== 'ENDED')
+                .map(([k]) => k);
+            if (activeKeys.length === 1) return activeKeys[0];
+            return '__ANON__';
+        };
+
+        for (const rec of sortedRecords) {
+            const ids = extractIdentifiers(rec);
+            const key = resolveRuntimeKey(getCorrelationKey(ids));
+            const keyState = ensureKeyState(key);
+            const sem = parseSemanticFlags(rec);
+            const recMs = parseTimeToMs(rec.time);
+
+            const prevRrc = keyState.ueRrcState;
+            const parsedRrc = parseRrcFromRecord(rec);
+            if (parsedRrc) keyState.ueRrcState = parsedRrc;
+            const isIdleNow = isIdleState(keyState.ueRrcState);
+            const wasIdle = isIdleState(prevRrc);
+            const active = keyState.activeSession && keyState.activeSession.state !== 'ENDED' ? keyState.activeSession : null;
+
+            if (!active && wasIdle && sem.isRrcConnectionRequest) {
+                keyState.pendingRrcRequestMs = recMs;
+                keyState.pendingRrcRequestTime = rec.time;
+            }
+
+            let session = active;
+
+            const primaryStart = wasIdle && (sem.isCmServiceRequest || sem.isSetupMoMt);
+            const secondaryStart = wasIdle && (sem.isRabAssignmentRequest || sem.isCallProceeding);
+            const startFromRrcThenNas = (
+                !session &&
+                keyState.pendingRrcRequestMs !== null &&
+                !Number.isNaN(recMs) &&
+                sem.isNasCallControl &&
+                recMs >= keyState.pendingRrcRequestMs &&
+                (recMs - keyState.pendingRrcRequestMs) <= rrcNasFollowMs
+            );
+
+            if (!session && (primaryStart || secondaryStart || startFromRrcThenNas)) {
+                let trigger = 'START_FALLBACK';
+                let startTime = rec.time;
+                if (primaryStart) trigger = sem.isCmServiceRequest ? 'CM_SERVICE_REQUEST' : 'SETUP';
+                else if (secondaryStart) trigger = sem.isRabAssignmentRequest ? 'RAB_ASSIGNMENT_REQUEST' : 'CALL_PROCEEDING';
+                else if (startFromRrcThenNas) {
+                    trigger = 'RRC_CONNECTION_REQUEST_PLUS_NAS_CC';
+                    startTime = keyState.pendingRrcRequestTime || rec.time;
+                }
+
+                session = createSession(startTime, ids, trigger);
+                keyState.activeSession = session;
+                keyState.pendingRrcRequestMs = null;
+                keyState.pendingRrcRequestTime = null;
+            }
+
+            if (session) {
+                appendToSession(session, rec, ids);
+
+                const recEndMs = parseTimeToMs(rec.time);
+                const sessionEndMs = parseTimeToMs(session.endTime);
+                if (!Number.isNaN(recEndMs) && !Number.isNaN(sessionEndMs) && recEndMs > sessionEndMs + timeWindowMs) {
+                    endSession(session, session.endTime, 'TIME_WINDOW_EXCEEDED', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+
+                if (sem.isRrcSetupComplete) moveState(session, 'RRC_CONNECTED');
+                if (sem.isRrcSetupComplete) session.sawRrcSetupComplete = true;
+                if (sem.isRrcConnectionReject) session.sawRrcConnectionReject = true;
+                if (sem.isCmServiceReject) session.sawCmServiceReject = true;
+                if (sem.isCallReject) session.sawCallReject = true;
+                if (sem.isRabAssignmentFailure) session.sawRabAssignmentFailure = true;
+                if (sem.isRabRelease && !session.hasConnect) session.sawRabReleaseBeforeConnect = true;
+                if (sem.isRlf && !session.hasConnect) session.sawRlfBeforeConnect = true;
+                if (sem.isRabAssignComplete) {
+                    session.hasCsRab = true;
+                    moveState(session, 'RAB_ESTABLISHED');
+                }
+                if (sem.isConnect) {
+                    session.hasConnect = true;
+                    moveState(session, 'ACTIVE_CALL');
+                }
+                if (sem.isDisconnect) {
+                    session.disconnectSeen = true;
+                    moveState(session, 'RELEASING');
+                }
+                if (session.hasCsRab && !isIdleNow && session.state !== 'ENDED' && !session.hasConnect) {
+                    moveState(session, 'RAB_ESTABLISHED');
+                }
+
+                const connectEstablished = !!session.hasConnect;
+                const abnormalAfterConnect = connectEstablished && !session.normalClearingSeen;
+
+                if (sem.isRlf) {
+                    endSession(session, rec.time, 'RADIO_LINK_FAILURE', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isIuReleaseAbnormal) {
+                    endSession(session, rec.time, 'IU_RELEASE_ABNORMAL', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRrcReleaseAbnormal) {
+                    endSession(session, rec.time, 'RRC_CONNECTION_RELEASE_ABNORMAL', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isHoFailure && (sem.isRelease || sem.isRrcRelease || sem.isIuRelease)) {
+                    endSession(session, rec.time, 'HANDOVER_FAILURE_RELEASE', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (connectEstablished && sem.isIuRelease && !session.disconnectSeen && !session.normalClearingSeen) {
+                    endSession(session, rec.time, 'MSC_RELEASE_WITHOUT_DISCONNECT', 'DROP', true);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRrcReleaseNormal || (sem.isRrcRelease && session.disconnectSeen)) {
+                    session.normalClearingSeen = true;
+                    endSession(session, rec.time, 'RRC_CONNECTION_RELEASE_NORMAL', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isCmServiceReject) {
+                    endSession(session, rec.time, 'CM_SERVICE_REJECT', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isCallReject) {
+                    endSession(session, rec.time, 'CALL_REJECT', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isRabRelease && !session.hasConnect) {
+                    endSession(session, rec.time, 'RAB_RELEASE', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isIuRelease && !session.hasConnect) {
+                    endSession(session, rec.time, 'IU_RELEASE', 'CALL_SETUP_FAILURE', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+                if (sem.isDisconnect && sem.isRelease) {
+                    session.normalClearingSeen = true;
+                    endSession(session, rec.time, 'DISCONNECT_RELEASE', 'NORMAL', false);
+                    keyState.activeSession = null;
+                    continue;
+                }
+
+                const transitionedToIdle = !isIdleState(prevRrc) && isIdleNow;
+                if (transitionedToIdle) {
+                    const expected = session.disconnectSeen || sem.isRelease || sem.isRrcReleaseNormal;
+                    if (expected) endSession(session, rec.time, 'RETURN_TO_IDLE', 'NORMAL', false);
+                    else endSession(session, rec.time, 'UNEXPECTED_IDLE_TRANSITION', abnormalAfterConnect ? 'DROP' : 'CALL_SETUP_FAILURE', abnormalAfterConnect);
+                    keyState.activeSession = null;
+                    continue;
+                }
+            }
+        }
+
+        return sessions;
+    }
+};
+
 const NMFParser = {
     parse(content) {
         const lines = content.split(/\r?\n/);
@@ -1023,11 +1607,13 @@ const NMFParser = {
         });
 
         const customMetrics = Array.from(metricSet);
+        const callSessions = CallSessionBuilder.build(measurementPoints.concat(eventPoints, signalingPoints));
 
         return {
             points: measurementPoints.concat(eventPoints),
             signaling: signalingPoints,
             events: eventPoints,
+            callSessions,
             tech: detectedTech,
             config: this.detected1AConfig || null,
             configHistory: this.event1AHistory || [],

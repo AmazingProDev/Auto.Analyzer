@@ -14,8 +14,152 @@ document.addEventListener('DOMContentLoaded', () => {
     window.map = map.map; // Expose Leaflet instance globally for inline onclicks
     window.mapRenderer = map; // Expose Renderer helper for debugging/verification
 
+    // ------------------------------
+    // Dynamic SmartCare Thresholds
+    // ------------------------------
+    const normalizeKey = (k) => k.toLowerCase().replace(/[\s\-_()%]/g, '');
+
+    const resolveMetricKeys = (points, metricAliases) => {
+        const keyMap = {};
+        if (!points || points.length === 0) return keyMap;
+        const sample = points.find(p => p && typeof p === 'object') || points[0];
+        if (!sample) return keyMap;
+        const keys = Object.keys(sample);
+        const norm = keys.map(k => [k, normalizeKey(k)]);
+
+        Object.entries(metricAliases).forEach(([metric, aliases]) => {
+            for (const a of aliases) {
+                const na = normalizeKey(a);
+                const found = norm.find(([, nk]) => nk === na || nk.includes(na));
+                if (found) {
+                    keyMap[metric] = found[0];
+                    break;
+                }
+            }
+        });
+        return keyMap;
+    };
+
+    const collectMetric = (points, key) => {
+        const arr = [];
+        if (!key) return arr;
+        for (let i = 0; i < points.length; i++) {
+            const v = parseFloat(points[i][key]);
+            if (!Number.isNaN(v)) arr.push(v);
+        }
+        return arr;
+    };
+
+    const quantile = (arr, q) => {
+        if (!arr || arr.length === 0) return null;
+        const a = arr.slice().sort((x, y) => x - y);
+        const pos = (a.length - 1) * q;
+        const base = Math.floor(pos);
+        const rest = pos - base;
+        if (a[base + 1] !== undefined) {
+            return a[base] + rest * (a[base + 1] - a[base]);
+        }
+        return a[base];
+    };
+
+    const computeSmartCareThresholds = (points) => {
+        const aliases = {
+            rsrp: ['Dominant RSRP (dBm)'],
+            rsrq: ['Dominant RSRQ (dB)'],
+            cqi: ['Average DL Wideband CQI', 'Average DL Wideband CQI (Code Word 0)'],
+            dlLow: ['DL Low-Throughput Ratio (%)'],
+            ulLow: ['UL Low-Throughput Ratio (%)'],
+            dlSpecEff: ['DL Spectrum Efficiency (Kbps/MHz)'],
+            ulSpecEff: ['UL Spectrum Efficiency (Kbps/MHz)'],
+            dlRB: ['Average DL RB Quantity'],
+            ulRB: ['Average UL RB Quantity'],
+            dlBler: ['DL IBLER (%)'],
+            ulBler: ['UL IBLER (%)'],
+            traffic: ['Total Traffic Volume (MB)']
+        };
+
+        const keys = resolveMetricKeys(points, aliases);
+        const data = {};
+        Object.keys(keys).forEach(k => { data[k] = collectMetric(points, keys[k]); });
+
+        return {
+            rsrp: { good: quantile(data.rsrp, 0.6), fair: quantile(data.rsrp, 0.3) },
+            rsrq: { good: quantile(data.rsrq, 0.6), degraded: quantile(data.rsrq, 0.3) },
+            cqi: { good: quantile(data.cqi, 0.6), moderate: quantile(data.cqi, 0.3) },
+            dlLow: { severe: quantile(data.dlLow, 0.8), degraded: quantile(data.dlLow, 0.6) },
+            ulLow: { severe: quantile(data.ulLow, 0.8), degraded: quantile(data.ulLow, 0.6) },
+            dlSpecEff: { veryLow: quantile(data.dlSpecEff, 0.2), low: quantile(data.dlSpecEff, 0.4) },
+            ulSpecEff: { low: quantile(data.ulSpecEff, 0.4) },
+            dlRB: { veryLow: quantile(data.dlRB, 0.2), moderate: quantile(data.dlRB, 0.6), congested: quantile(data.dlRB, 0.8) },
+            ulRB: { veryLow: quantile(data.ulRB, 0.2), moderate: quantile(data.ulRB, 0.6), congested: quantile(data.ulRB, 0.8) },
+            bler: { degraded: quantile(data.dlBler, 0.7), unstable: quantile(data.dlBler, 0.85) },
+            traffic: { veryLow: quantile(data.traffic, 0.1), low: quantile(data.traffic, 0.2) }
+        };
+    };
+
+    // Prevent click-selection during map drag (avoids snap-back)
+    window.__mapDragInProgress = false;
+    if (window.map) {
+        window.map.on('movestart', () => { window.__mapDragInProgress = true; });
+        window.map.on('moveend', () => {
+            setTimeout(() => { window.__mapDragInProgress = false; }, 80);
+        });
+    }
+
+    // Sidebar resizers (logs + SmartCare)
+    const resizers = document.querySelectorAll('.sidebar-resizer');
+    let activeResize = null;
+
+    resizers.forEach((resizer) => {
+        resizer.addEventListener('mousedown', (e) => {
+            const targetId = resizer.getAttribute('data-target');
+            const targetEl = document.getElementById(targetId);
+            if (!targetEl) return;
+
+            activeResize = {
+                target: targetEl,
+                startX: e.clientX,
+                startWidth: targetEl.getBoundingClientRect().width,
+                side: resizer.classList.contains('sidebar-resizer-left') ? 'left' : 'right'
+            };
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!activeResize) return;
+        const dx = e.clientX - activeResize.startX;
+        let newWidth = activeResize.startWidth;
+        if (activeResize.side === 'right') {
+            newWidth = activeResize.startWidth + dx;
+        } else {
+            newWidth = activeResize.startWidth - dx;
+        }
+
+        const minW = 220;
+        const maxW = 520;
+        newWidth = Math.max(minW, Math.min(maxW, newWidth));
+        activeResize.target.style.width = newWidth + 'px';
+
+        if (window.map && typeof window.map.invalidateSize === 'function') {
+            window.map.invalidateSize(false);
+        }
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (activeResize) {
+            activeResize = null;
+            document.body.style.cursor = 'default';
+            document.body.style.userSelect = '';
+        }
+    });
+
     // Fallback map click -> nearest DT point (in case markers are not clickable)
     window.map.on('click', (e) => {
+        if (window.__mapDragInProgress) return;
         try {
             if (!window.metricLegendEntries) return;
             const order = window.dtLayerOrder || [];
@@ -64,6 +208,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (mapEl) {
             mapEl.addEventListener('click', (ev) => {
                 try {
+                    if (window.__mapDragInProgress) return;
                     const target = ev.target;
                     if (target && (
                         target.closest('#draggable-legend') ||
@@ -231,7 +376,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 lat: servingCell.lat,
                 lng: servingCell.lng,
                 azimuth: servingCell.azimuth, // Pass Azimuth
-                range: 0, // Go to Sector Vertex (Tip/Center)
+                range: (servingCell.currentRadius || servingCell.range || 100), // Go to Sector Tip (uses rendered radius)
+                tipLat: servingCell.tipLat,
+                tipLng: servingCell.tipLng,
                 color: color || '#3b82f6', // Default Blue
                 cellId: servingCell.cellId // For polygon centroid logic (legacy fallback)
             };
@@ -993,6 +1140,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const fileName = file.name.split('.')[0];
             const logId = 'excel_' + (Date.now());
 
+            points.forEach(p => { p.__logId = logId; });
             const newLog = {
                 id: logId,
                 name: fileName,
@@ -1003,6 +1151,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 customMetrics: customMetrics,
                 currentParam: 'level' // Default
             };
+            newLog.dynamicThresholds = computeSmartCareThresholds(points);
 
             loadedLogs.push(newLog);
             updateLogsList();
@@ -1087,6 +1236,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const fileName = nameList.length > 3 ? (nameList[0]) + '_plus_' + (nameList.length - 1) + '_merged' : nameList.join('_');
             const logId = 'smartcare_merged_' + (Date.now());
 
+            pooledPoints.forEach(p => { p.__logId = logId; });
             const newLog = {
                 id: logId,
                 name: fileName + " (Merged)",
@@ -1097,6 +1247,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 customMetrics: Array.from(allMetrics),
                 currentParam: 'level'
             };
+            newLog.dynamicThresholds = computeSmartCareThresholds(pooledPoints);
 
             loadedLogs.push(newLog);
             updateLogsList();
@@ -1139,6 +1290,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let allPoints = [];
             let allSignaling = [];
+            let allCallSessions = [];
             let detectedConfig = null;
 
             for (const logFile of channelLogs) {
@@ -1159,6 +1311,9 @@ document.addEventListener('DOMContentLoaded', () => {
                             console.log('[TRP] Parsed ' + (parserResult.points.length) + ' points from ' + (logFile.name));
                             allPoints = allPoints.concat(parserResult.points);
                             allSignaling = allSignaling.concat(parserResult.signaling);
+                            if (Array.isArray(parserResult.callSessions) && parserResult.callSessions.length > 0) {
+                                allCallSessions = allCallSessions.concat(parserResult.callSessions);
+                            }
                             if (parserResult.config && !detectedConfig) detectedConfig = parserResult.config;
                         }
                     } else {
@@ -1195,6 +1350,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 name: file.name,
                 points: allPoints,
                 signaling: allSignaling,
+                callSessions: allCallSessions,
                 color: '#8b5cf6', // Violet
                 visible: true,
                 type: 'nmf', // Treat as NMF-like standard log
@@ -1484,6 +1640,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 visible: true,
                 color: '#38bdf8'
             };
+            points.forEach(p => { p.__logId = logId; });
+            newLog.dynamicThresholds = computeSmartCareThresholds(points);
 
             loadedLogs.push(newLog);
             updateLogsList();
@@ -1777,7 +1935,64 @@ document.addEventListener('DOMContentLoaded', () => {
         return true;
     };
 
+    window.getSessionDropPoints = (log) => {
+        if (!log || !Array.isArray(log.callSessions) || !Array.isArray(log.points)) return [];
+        const droppedSessions = log.callSessions.filter(s => {
+            if (!s) return false;
+            if (s.drop === true) return true;
+            const et = String(s.endType || '').toUpperCase();
+            return et === 'DROP' || et.includes('ABNORMAL') || et.includes('RLF') || et.includes('UNEXPECTED_IDLE');
+        });
+        if (droppedSessions.length === 0) return [];
+
+        const result = [];
+        droppedSessions.forEach((s) => {
+            const targetTime = s.endTime || s.startTime;
+            const targetMs = parsePointTimeMs(targetTime);
+            let best = null;
+            let minDiff = Infinity;
+
+            for (let i = 0; i < log.points.length; i++) {
+                const p = log.points[i];
+                if (!p || !p.time) continue;
+                const pMs = parsePointTimeMs(p.time);
+                const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
+                if (p.time === targetTime) {
+                    best = p;
+                    minDiff = 0;
+                    break;
+                }
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    best = p;
+                }
+            }
+
+            if (best) {
+                const mergedProps = Object.assign({}, best.properties || {}, {
+                    'Event': 'Drop Call',
+                    'Session ID': s.sessionId || 'N/A',
+                    'End Type': s.endType || 'DROP',
+                    'Drop': 'Yes'
+                });
+                result.push(Object.assign({}, best, {
+                    type: 'EVENT',
+                    event: 'Drop Call',
+                    message: 'Drop Call',
+                    sessionId: s.sessionId,
+                    endType: s.endType || 'DROP',
+                    drop: true,
+                    properties: mergedProps
+                }));
+            }
+        });
+
+        return result;
+    };
+
     window.filter3gDropCalls = (log) => {
+        const sessionDropPoints = window.getSessionDropPoints(log);
+        if (sessionDropPoints.length > 0) return sessionDropPoints;
         if (!log || !log.events) return [];
         return log.events.filter(p => {
             if (!p || !p.event) return false;
@@ -1800,7 +2015,73 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+    const parsePointTimeMs = (t) => {
+        if (!t) return NaN;
+        const txt = String(t).trim();
+        const iso = Date.parse(txt);
+        if (!Number.isNaN(iso)) return iso;
+        const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+        if (!m) return NaN;
+        const hh = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        const ss = parseInt(m[3], 10);
+        const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+        return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+    };
+
+    window.getCallSetupFailurePoints = (log) => {
+        if (!log || !Array.isArray(log.callSessions) || !Array.isArray(log.points)) return [];
+        const failedSessions = log.callSessions.filter(s => s && (s.setupFailure || String(s.endType || '').toUpperCase() === 'CALL_SETUP_FAILURE'));
+        if (failedSessions.length === 0) return [];
+
+        const result = [];
+        failedSessions.forEach((s) => {
+            const targetTime = s.endTime || s.startTime;
+            const targetMs = parsePointTimeMs(targetTime);
+            let best = null;
+            let minDiff = Infinity;
+
+            for (let i = 0; i < log.points.length; i++) {
+                const p = log.points[i];
+                if (!p || !p.time) continue;
+                const pMs = parsePointTimeMs(p.time);
+                const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
+                if (p.time === targetTime) {
+                    best = p;
+                    minDiff = 0;
+                    break;
+                }
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    best = p;
+                }
+            }
+
+            if (best) {
+                const mergedProps = Object.assign({}, best.properties || {}, {
+                    'Event': 'Call Setup Failure',
+                    'Session ID': s.sessionId || 'N/A',
+                    'End Type': s.endType || 'CALL_SETUP_FAILURE',
+                    'Setup Failure': 'Yes'
+                });
+                result.push(Object.assign({}, best, {
+                    type: 'EVENT',
+                    event: 'Call Setup Failure',
+                    message: 'Call Setup Failure',
+                    sessionId: s.sessionId,
+                    endType: s.endType || 'CALL_SETUP_FAILURE',
+                    setupFailure: true,
+                    properties: mergedProps
+                }));
+            }
+        });
+
+        return result;
+    };
+
     window.filter3gCallFailure = (log) => {
+        const setupFailPoints = window.getCallSetupFailurePoints(log);
+        if (setupFailPoints.length > 0) return setupFailPoints;
         if (!log || !log.events) return [];
         return log.events.filter(p => {
             if (!p || !p.event) return false;
@@ -1841,7 +2122,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (window.updateLegend) window.updateLegend();
                         if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
                     }
-                    if (data.param === '3g_dropcall' && log.events) {
+                    if (data.param === '3g_dropcall' && log) {
                         const drops = window.filter3gDropCalls(log);
                         const layerId = 'event__' + log.id + '__3g_dropcall';
                         map.addEventsLayer(layerId, drops, {
@@ -1863,7 +2144,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (window.updateLegend) window.updateLegend();
                         if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
                     }
-                    if (data.param === '3g_call_failure' && log.events) {
+                    if (data.param === '3g_call_failure' && log) {
                         const fails = window.filter3gCallFailure(log);
                         const layerId = 'event__' + log.id + '__3g_call_failure';
                         map.addEventsLayer(layerId, fails, {
@@ -1965,6 +2246,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const loadedLogs = [];
     let currentSignalingLogId = null;
+    let currentCallSessionLogId = null;
 
 
     function openChartModal(log, param) {
@@ -3279,13 +3561,21 @@ document.addEventListener('DOMContentLoaded', () => {
             container.id = 'draggable-legend';
 
             // Map Bounds for Initial Placement
-            let topPos = 80;
-            let rightPos = 20;
+            let topPos = 10;
+            let rightPos = 10;
             const mapEl = document.getElementById('map');
+            const scSidebar = document.getElementById('smartcare-sidebar');
             if (mapEl) {
                 const rect = mapEl.getBoundingClientRect();
                 topPos = rect.top + 10;
-                rightPos = (window.innerWidth - rect.right) + 10;
+                rightPos = Math.max(10, (window.innerWidth - rect.right) + 10);
+            }
+            if (scSidebar) {
+                const sidebarStyle = window.getComputedStyle(scSidebar);
+                if (sidebarStyle.display !== 'none') {
+                    const sbRect = scSidebar.getBoundingClientRect();
+                    rightPos = Math.max(rightPos, (window.innerWidth - sbRect.left) + 10);
+                }
             }
 
             container.setAttribute('style', '\n' +
@@ -4595,6 +4885,7 @@ document.addEventListener('DOMContentLoaded', () => {
             '                \n' +
             '                <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:10px;">\n' +
             '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>\n' +
+            '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>\n' +
             '                    <button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>\n' +
             '                </div>\n' +
             '                    <!-- Hidden data stash for the analyzer -->\n' +
@@ -4690,7 +4981,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 <input type="number" step="1" value="${val}" 
                     onchange="updateThreshold('${path}', this.value)"
                     style="width:60px; background:#333; border:1px solid #555; color:#fff; padding:2px 5px; border-radius:3px;">
-            </div>
         `;
 
         const html = `
@@ -4729,7 +5019,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         <button onclick="document.querySelector('.analysis-settings-overlay').remove();" style="background:#2563eb; color:white; border:none; padding:6px 15px; border-radius:4px; cursor:pointer;">Done</button>
                     </div>
                 </div>
-            </div>
         `;
 
         const div = document.createElement('div');
@@ -4784,8 +5073,11 @@ document.addEventListener('DOMContentLoaded', () => {
             rsrp: getVal('dominant rsrp'),
             rsrq: getVal('dominant rsrq'),
             cqi: getVal('average dl wideband cqi'),
+            cqi0: getVal('average dl wideband cqi (code word 0)', 'average dl wideband cqi code word 0'),
+            cqi1: getVal('average dl wideband cqi (code word 1)', 'average dl wideband cqi code word 1'),
             dlLow: getVal('dl low-throughput ratio'),
             dlSpecEff: getVal('dl spectrum efficiency'),
+            ulSpecEff: getVal('ul spectrum efficiency'),
             dlRB: getVal('average dl rb quantity'),
             ulLow: getVal('ul low-throughput ratio'),
             ulRB: getVal('average ul rb quantity'),
@@ -5210,6 +5502,472 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         return `Strong received signal strength ${val} indicates good coverage conditions.`;
     }
+
+    function deepGetVal(data, ...aliases) {
+        for (const a of aliases) {
+            const na = a.toLowerCase().replace(/[\s\-_()%]/g, '');
+            for (const k in data) {
+                const nk = k.toLowerCase().replace(/[\s\-_()%]/g, '');
+                if (nk === na || nk.includes(na)) {
+                    const v = parseFloat(data[k]);
+                    if (!Number.isNaN(v)) return v;
+                }
+            }
+        }
+        return null;
+    }
+
+    function buildDeepAnalysisScenarios(data, result) {
+        const { kpi, status } = result;
+        const traffic = kpi.traffic ?? 0;
+        const cqi = (kpi.cqi0 ?? kpi.cqi);
+        const dlThp = kpi.avgDlThp;
+        const dlBler = (kpi.dlBler ?? 0);
+        const dlRb = (kpi.dlRB ?? 0);
+        const rank1 = (kpi.rank1Pct ?? 0);
+        const dl1cc = (kpi.dl1cc ?? 0);
+        const users = deepGetVal(data, 'rrc connected users', 'average users', 'number of subscribers', 'subscriber count');
+        const packetLoss = deepGetVal(data, 'dl packet loss rate', 'packet loss', 'pl', 'ip packet loss') ?? 0;
+        const dlBigPacketThp = deepGetVal(data, 'dl big-packet throughput', 'dl big packet throughput', 'dl large packet throughput');
+        const ulSmallPktTraffic = deepGetVal(data, 'ul small-packet traffic', 'ul small packet traffic', 'ul small packet volume');
+        const ulTrafficVol = deepGetVal(data, 'ul traffic volume', 'total ul traffic volume', 'ul total traffic');
+        const sccRsrp = deepGetVal(data, 'scc rsrp', 'scc1 rsrp', 'scc2 rsrp', 'secondary carrier rsrp');
+        const qci8 = deepGetVal(data, 'qci8 traffic', 'qci 8 traffic', 'qci8 percentage', 'qci 8 percentage');
+        const qci9 = deepGetVal(data, 'qci9 traffic', 'qci 9 traffic', 'qci9 percentage', 'qci 9 percentage');
+
+        const DL_TRAFFIC_MIN_MB = 1;
+        const DL_THP_LOW_THRESHOLD = 2000;
+        const SUBSCRIBERS_HIGH_THRESHOLD = 20;
+        const SCC_RSRP_THRESHOLD = -110;
+
+        const ulSmallPktRatio = (ulSmallPktTraffic !== null && ulTrafficVol !== null && ulTrafficVol > 0)
+            ? ((ulSmallPktTraffic / ulTrafficVol) * 100)
+            : null;
+        const qci8qci9Share = (qci8 !== null || qci9 !== null) ? ((qci8 || 0) + (qci9 || 0)) : null;
+
+        const dlThpIsLow = dlThp !== null && dlThp < DL_THP_LOW_THRESHOLD;
+        const toConfidence = (base) => Math.max(0.05, Math.min(0.98, Number(base.toFixed(2))));
+        const scenarios = [];
+        const allRcas = [];
+
+        const fmtVal = (v, unit = '') => (v === null || v === undefined || Number.isNaN(v)) ? 'N/A' : `${v}${unit}`;
+        const kpiSnapshot = [
+            `DL Traffic=${fmtVal(Number(traffic.toFixed(3)), ' MB')}`,
+            `DL Throughput=${fmtVal(dlThp, ' Kbps')}`,
+            `DL Big-Packet Throughput=${fmtVal(dlBigPacketThp, ' Kbps')}`,
+            `UL Small-Packet Ratio=${fmtVal(ulSmallPktRatio !== null ? Number(ulSmallPktRatio.toFixed(1)) : null, '%')}`,
+            `RSRP=${fmtVal(kpi.rsrp, ' dBm')}`,
+            `RSRQ=${fmtVal(kpi.rsrq, ' dB')}`,
+            `CQI=${fmtVal(cqi)}`,
+            `DL IBLER=${fmtVal(Number(dlBler.toFixed(2)), '%')}`,
+            `DL RB=${fmtVal(Number(dlRb.toFixed(1)), '%')}`,
+            `Subscribers=${fmtVal(users)}`,
+            `Packet Loss=${fmtVal(packetLoss, '%')}`,
+            `Rank1=${fmtVal(Number(rank1.toFixed(1)), '%')}`,
+            `DL 1CC=${fmtVal(Number(dl1cc.toFixed(1)), '%')}`,
+            `SCC RSRP=${fmtVal(sccRsrp, ' dBm')}`,
+            `QCI8+QCI9=${fmtVal(qci8qci9Share !== null ? Number(qci8qci9Share.toFixed(1)) : null, '%')}`
+        ];
+        const buildNotMatchedText = (reasons) => {
+            const checks = reasons.filter(Boolean).map((r, i) => `${i + 1}. ${r}`).join('\n');
+            return [
+                'This RCA is not the cause for this sample.',
+                `Why not matched (actual vs required):\n${checks || 'No failed conditions captured.'}`
+            ].join('\n\n');
+        };
+
+        const pushRca = (entry, matched, notMatchedReasons) => {
+            if (matched) scenarios.push(entry);
+            allRcas.push({
+                ...entry,
+                matched,
+                suppressed: false,
+                interpretation: matched ? entry.interpretation : 'Not matched: this RCA is not the cause for this sample.',
+                technicalExplanation: matched ? entry.technicalExplanation : buildNotMatchedText(notMatchedReasons)
+            });
+        };
+
+        // RCA-01: low-traffic indicator (does not suppress other RCA checks)
+        const rca01 = (traffic < DL_TRAFFIC_MIN_MB) || (dlBigPacketThp === null && traffic < DL_TRAFFIC_MIN_MB);
+        const rca01Entry = {
+            scenarioId: 'RCA-01',
+            scenarioName: 'Low Traffic – Throughput KPI Not Representative',
+            domain: 'Traffic',
+            interpretation: 'Throughput KPIs are statistically invalid due to insufficient payload.',
+            technicalExplanation: `DL Traffic Volume is ${traffic.toFixed(3)} MB (< ${DL_TRAFFIC_MIN_MB} MB)${dlBigPacketThp === null ? ' and DL Big-Packet Throughput is N/A' : ''}.`,
+            recommendedActions: [
+                'Suppress all throughput degradation alarms.',
+                'Mark cell as "Low Traffic / KPI Not Representative".',
+                'Exclude from optimization actions.'
+            ],
+            confidenceScore: 0.98,
+            severity: 'INFO'
+        };
+        pushRca(
+            rca01Entry,
+            rca01,
+            [
+                `DL Traffic Volume ${traffic.toFixed(3)} MB is >= ${DL_TRAFFIC_MIN_MB} MB`,
+                'DL Big-Packet Throughput is available or traffic is not low'
+            ],
+        );
+
+        const rca02Match =
+            ulSmallPktRatio !== null && ulSmallPktRatio > 70 &&
+            dlBigPacketThp === null &&
+            dlThpIsLow;
+        pushRca({
+            scenarioId: 'RCA-02',
+            scenarioName: 'Small-Packet Dominated Traffic (DL)',
+            domain: 'Traffic',
+            interpretation: 'Traffic pattern (signaling / IoT / keep-alive) prevents meaningful throughput.',
+            technicalExplanation: `UL Small-Packet ratio is ${ulSmallPktRatio !== null ? ulSmallPktRatio.toFixed(1) : 'N/A'}% (>70%), DL Big-Packet Throughput is N/A, and DL Throughput is low (${dlThp ?? 'N/A'} Kbps).`,
+            recommendedActions: [
+                'Classify as application-driven behavior.',
+                'Do not apply radio or capacity optimization.',
+                'Inform KPI consumer that throughput is misleading.'
+            ],
+            confidenceScore: toConfidence(0.9),
+            severity: 'INFO'
+        }, rca02Match, [
+            `UL Small-Packet ratio is ${ulSmallPktRatio === null ? 'N/A' : ulSmallPktRatio.toFixed(1) + '%'} (needs > 70%)`,
+            `DL Big-Packet Throughput is ${dlBigPacketThp === null ? 'N/A' : 'available'}`,
+            `DL Throughput is ${dlThp === null ? 'N/A' : dlThp + ' Kbps'} (needs < ${DL_THP_LOW_THRESHOLD})`
+        ]);
+
+        const rca03Match = (kpi.rsrp !== null && kpi.rsrp < -110) && (cqi !== null && cqi < 7) && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-03',
+            scenarioName: 'Coverage-Limited Throughput',
+            domain: 'Radio',
+            interpretation: 'Weak signal forces low MCS, limiting throughput.',
+            technicalExplanation: `RSRP ${kpi.rsrp} dBm (< -110), Average DL CQI ${cqi} (< 7), DL Traffic ${traffic.toFixed(3)} MB (>= 1 MB).`,
+            recommendedActions: [
+                'Coverage optimization (tilt, power, azimuth).',
+                'Indoor solution or small cell.',
+                'Monitor edge-user distribution.'
+            ],
+            confidenceScore: toConfidence(0.78),
+            severity: 'MAJOR'
+        }, rca03Match, [
+            `RSRP ${kpi.rsrp ?? 'N/A'} dBm (needs < -110)`,
+            `Average DL CQI ${cqi ?? 'N/A'} (needs < 7)`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca04Match = (kpi.rsrp !== null && kpi.rsrp >= -100) && (kpi.rsrq !== null && kpi.rsrq < -13) && dlBler > 10 && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-04',
+            scenarioName: 'Interference-Limited Throughput',
+            domain: 'Radio',
+            interpretation: 'Interference reduces SINR causing retransmissions.',
+            technicalExplanation: `RSRP ${kpi.rsrp} dBm (>= -100), RSRQ ${kpi.rsrq} dB (< -13), DL IBLER ${dlBler.toFixed(2)}% (>10), DL Traffic ${traffic.toFixed(3)} MB.`,
+            recommendedActions: [
+                'Interference audit.',
+                'PCI / neighbor optimization.',
+                'ICIC / eICIC tuning.'
+            ],
+            confidenceScore: toConfidence(0.8),
+            severity: 'MAJOR'
+        }, rca04Match, [
+            `RSRP ${kpi.rsrp ?? 'N/A'} dBm (needs >= -100)`,
+            `RSRQ ${kpi.rsrq ?? 'N/A'} dB (needs < -13)`,
+            `DL IBLER ${dlBler.toFixed(2)}% (needs > 10)`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca05Match = dlRb > 80 && users !== null && users >= SUBSCRIBERS_HIGH_THRESHOLD && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-05',
+            scenarioName: 'Congestion / Capacity Limitation',
+            domain: 'Capacity',
+            interpretation: 'Radio resources are exhausted due to high load.',
+            technicalExplanation: `Average DL RB Quantity ${dlRb.toFixed(1)}% (>80), subscribers ${users} (high), DL Traffic ${traffic.toFixed(3)} MB.`,
+            recommendedActions: [
+                'Add carrier or bandwidth.',
+                'Load balancing.',
+                'Small cell deployment.'
+            ],
+            confidenceScore: toConfidence(0.85),
+            severity: 'CRITICAL'
+        }, rca05Match, [
+            `Average DL RB Quantity ${dlRb.toFixed(1)}% (needs > 80)`,
+            `Subscribers ${users ?? 'N/A'} (needs >= ${SUBSCRIBERS_HIGH_THRESHOLD})`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca06Match = (kpi.rsrp !== null && kpi.rsrp >= -100) && (cqi !== null && cqi >= 10) && packetLoss > 0;
+        pushRca({
+            scenarioId: 'RCA-06',
+            scenarioName: 'Transport / Backhaul Bottleneck',
+            domain: 'Transport',
+            interpretation: 'Backhaul limits throughput despite good radio.',
+            technicalExplanation: `RSRP ${kpi.rsrp} dBm (>= -100), Average DL CQI ${cqi} (>=10), DL Packet Loss Rate ${packetLoss}% (>0).`,
+            recommendedActions: [
+                'Upgrade backhaul capacity.',
+                'Check QoS policing.',
+                'Inspect S1 transport congestion.'
+            ],
+            confidenceScore: toConfidence(0.86),
+            severity: 'CRITICAL'
+        }, rca06Match, [
+            `RSRP ${kpi.rsrp ?? 'N/A'} dBm (needs >= -100)`,
+            `Average DL CQI ${cqi ?? 'N/A'} (needs >= 10)`,
+            `DL Packet Loss Rate ${packetLoss}% (needs > 0)`
+        ]);
+
+        const rca07Match = dlBler > 15 && packetLoss <= 0.0001 && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-07',
+            scenarioName: 'High Retransmissions (BLER Issue)',
+            domain: 'Radio',
+            interpretation: 'Excessive HARQ retransmissions reduce effective throughput.',
+            technicalExplanation: `DL IBLER ${dlBler.toFixed(2)}% (>15), DL Packet Loss Rate ${packetLoss}% (=0), DL Traffic ${traffic.toFixed(3)} MB.`,
+            recommendedActions: [
+                'Tune link adaptation.',
+                'Power control optimization.',
+                'Interference mitigation.'
+            ],
+            confidenceScore: toConfidence(0.79),
+            severity: 'MAJOR'
+        }, rca07Match, [
+            `DL IBLER ${dlBler.toFixed(2)}% (needs > 15)`,
+            `DL Packet Loss Rate ${packetLoss}% (needs = 0)`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca08Match = rank1 > 80 && (kpi.rsrp !== null && kpi.rsrp >= -100) && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-08',
+            scenarioName: 'MIMO Under-Utilization',
+            domain: 'Radio',
+            interpretation: 'Spatial multiplexing not achieved.',
+            technicalExplanation: `Rank 1 Percentage ${rank1.toFixed(1)}% (>80), RSRP ${kpi.rsrp} dBm (>= -100), DL Traffic ${traffic.toFixed(3)} MB.`,
+            recommendedActions: [
+                'Antenna calibration.',
+                'Cross-polarization check.',
+                'Improve SINR.'
+            ],
+            confidenceScore: toConfidence(0.66),
+            severity: 'MINOR'
+        }, rca08Match, [
+            `Rank 1 Percentage ${rank1.toFixed(1)}% (needs > 80)`,
+            `RSRP ${kpi.rsrp ?? 'N/A'} dBm (needs >= -100)`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca09Match = dl1cc === 100 && sccRsrp !== null && sccRsrp >= SCC_RSRP_THRESHOLD && traffic >= DL_TRAFFIC_MIN_MB;
+        pushRca({
+            scenarioId: 'RCA-09',
+            scenarioName: 'Carrier Aggregation Not Effective',
+            domain: 'Capacity',
+            interpretation: 'Bandwidth not fully utilized.',
+            technicalExplanation: `DL 1CC Percentage is 100%, SCC RSRP ${sccRsrp} dBm (>= ${SCC_RSRP_THRESHOLD}), DL Traffic ${traffic.toFixed(3)} MB.`,
+            recommendedActions: [
+                'Verify CA configuration.',
+                'Optimize SCC activation thresholds.',
+                'License/config check.'
+            ],
+            confidenceScore: toConfidence(0.64),
+            severity: 'MINOR'
+        }, rca09Match, [
+            `DL 1CC Percentage ${dl1cc.toFixed(1)}% (needs = 100%)`,
+            `SCC RSRP ${sccRsrp ?? 'N/A'} dBm (needs >= ${SCC_RSRP_THRESHOLD})`,
+            `DL Traffic ${traffic.toFixed(3)} MB (needs >= 1 MB)`
+        ]);
+
+        const rca10Match = qci8qci9Share !== null && qci8qci9Share > 80 && dlRb < 50 && dlThpIsLow;
+        pushRca({
+            scenarioId: 'RCA-10',
+            scenarioName: 'QoS-Limited Throughput',
+            domain: 'QoS',
+            interpretation: 'Scheduler prioritization limits best-effort traffic.',
+            technicalExplanation: `QCI 8+9 share is ${qci8qci9Share !== null ? qci8qci9Share.toFixed(1) : 'N/A'}% (>80), Average DL RB Quantity ${dlRb.toFixed(1)}% (<50), DL Throughput ${dlThp ?? 'N/A'} Kbps (low).`,
+            recommendedActions: [
+                'Review QoS policies.',
+                'Adjust scheduler fairness.',
+                'Capacity planning if persistent.'
+            ],
+            confidenceScore: toConfidence(0.62),
+            severity: 'MINOR'
+        }, rca10Match, [
+            `QCI 8+9 share ${qci8qci9Share === null ? 'N/A' : qci8qci9Share.toFixed(1) + '%'} (needs > 80%)`,
+            `Average DL RB Quantity ${dlRb.toFixed(1)}% (needs < 50%)`,
+            `DL Throughput ${dlThp === null ? 'N/A' : dlThp + ' Kbps'} (needs < ${DL_THP_LOW_THRESHOLD})`
+        ]);
+
+        if (!scenarios.length) {
+            scenarios.push({
+                scenarioId: 'RCA-00',
+                scenarioName: 'No Matching Throughput RCA',
+                domain: 'Traffic',
+                interpretation: 'No RCA rule matched this sample.',
+                technicalExplanation: 'All configured RCA trigger conditions were evaluated in priority order without a match.',
+                recommendedActions: [
+                    'Keep monitoring with larger time windows.',
+                    'Correlate with complaint and service-level data.'
+                ],
+                confidenceScore: toConfidence(0.5),
+                severity: 'INFO'
+            });
+        }
+
+        return {
+            scenarios,
+            allRcas,
+            meta: {
+                guardTriggered: rca01,
+                throughputRepresentative: !(rca01 || scenarios.some(s => s.scenarioId === 'RCA-02')),
+                suppressionApplied: false,
+                mrMinThreshold: 'N/A',
+                kpiSnapshot
+            }
+        };
+    }
+
+    window.deepAnalyzePoint = (btn) => {
+        try {
+            let script = document.getElementById('point-data-stash');
+            if (!script && btn) {
+                const container = btn.closest('.panel, .card, .modal') || btn.parentNode;
+                script = container?.querySelector('#point-data-stash');
+            }
+            if (!script) {
+                alert('Smartcare analysis data missing.');
+                return;
+            }
+
+            const data = JSON.parse(script.textContent);
+            const result = analyzeSmartCarePoint(data);
+            const { kpi, status, identity, confidence } = result;
+            const deepResult = buildDeepAnalysisScenarios(data, result);
+            const scenarios = deepResult.scenarios;
+            const orderedRcas = Array.isArray(deepResult.allRcas) && deepResult.allRcas.length ? deepResult.allRcas : scenarios;
+
+            // Expose structured output for debugging/export integrations.
+            window.lastDeepAnalysisResults = scenarios;
+            window.lastDeepAnalysisAllRcas = orderedRcas;
+
+            const severityColor = (sev) => (
+                sev === 'CRITICAL' ? '#ef4444' :
+                    sev === 'MAJOR' ? '#f97316' :
+                        sev === 'MINOR' ? '#eab308' : '#22c55e'
+            );
+
+            const esc = (v) => String(v ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+
+            const stripHtml = (txt) => String(txt ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+            const sectionTitle = (num, title) => `
+                <div style="display:flex; align-items:center; gap:10px; margin-top:14px;">
+                    <span style="min-width:30px; height:30px; border-radius:8px; background:linear-gradient(180deg,#9ec5ff,#6b8fcf); color:#f8fafc; font-weight:700; display:inline-flex; align-items:center; justify-content:center; font-size:20px;">${num}</span>
+                    <h4 style="margin:0; color:#60a5fa; font-size:clamp(24px,4vw,44px); font-weight:800; line-height:1.05;">${title}</h4>
+                </div>
+                <div style="height:1px; background:#334155; margin:12px 0 16px;"></div>
+            `;
+
+            const coverageLabel = status?.coverage || 'Unknown';
+            const qualityLabel = status?.signalQuality || 'Unknown';
+            const cqiLabel = status?.channelQuality || 'Unknown';
+            const dlExpLabel = status?.dlUserExperience || 'Unknown';
+            const loadLabel = status?.load || 'Unknown';
+            const seLabel = status?.spectralEfficiency || 'Unknown';
+
+            const dlAvgMbps = kpi.avgDlThp !== null && kpi.avgDlThp !== undefined ? (kpi.avgDlThp / 1000).toFixed(2) : 'N/A';
+            const dlMaxMbps = kpi.maxDlThp !== null && kpi.maxDlThp !== undefined ? (kpi.maxDlThp / 1000).toFixed(2) : 'N/A';
+            const spectralText = stripHtml(explainSpectralEfficiency(status || {}, kpi || {}));
+
+            const scenarioCards = orderedRcas.map((s) => `
+                <div style="background:#0f172a; border:1px solid #1f2937; border-radius:8px; padding:12px; margin-bottom:10px;">
+                    <div style="display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:6px;">
+                        <div style="font-size:13px; color:#e5e7eb; font-weight:700;">${esc(s.scenarioId)} - ${esc(s.scenarioName)}</div>
+                        <div style="display:flex; gap:6px; align-items:center;">
+                            <span style="font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; color:#fff; background:${s.matched ? '#15803d' : '#475569'};">${s.matched ? 'MATCHED' : 'NOT MATCHED'}</span>
+                            <span style="font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; color:#fff; background:${severityColor(s.severity)};">${esc(s.severity)}</span>
+                        </div>
+                    </div>
+                    <div style="font-size:11px; color:#94a3b8; margin-bottom:8px;">
+                        <b>Domain:</b> ${esc(s.domain)} | <b>Confidence:</b> ${esc(s.confidenceScore)}
+                    </div>
+                    <div style="font-size:12px; color:#e5e7eb; margin-bottom:6px;">${esc(s.interpretation)}</div>
+                    <div style="font-size:12px; color:#cbd5e1; margin-bottom:6px; white-space:pre-wrap;">${esc(s.technicalExplanation)}</div>
+                    <ul style="margin:6px 0 0 18px; color:#d1d5db; font-size:12px;">
+                        ${(s.recommendedActions || []).map(a => `<li>${esc(a)}</li>`).join('') || '<li>No actions</li>'}
+                    </ul>
+                </div>
+            `).join('');
+
+            const existing = document.querySelector('.deep-analysis-modal');
+            if (existing) existing.remove();
+
+            const modalHtml = `
+                <div class="analysis-modal-overlay deep-analysis-modal" style="z-index:10003;" onclick="if(event.target===this && this.dataset.dragging!=='true') this.remove()">
+                    <div class="analysis-modal" style="width: 760px; max-width: 95vw; position:fixed; z-index:10004;">
+                        <div class="analysis-header" style="background:#0b2447; cursor:grab;">
+                            <h3>Deep SmartCare Analysis</h3>
+                            <button class="analysis-close-btn" onclick="this.closest('.analysis-modal-overlay').remove()">×</button>
+                        </div>
+                        <div class="analysis-content" style="padding:18px; background:#071326; color:#e5e7eb; max-height:78vh; overflow-y:auto;">
+                            <div style="margin-bottom:10px;">
+                                ${identity && identity.enbName ? `<div style="color:#e5e7eb; font-size:14px;"><b>eNodeB:</b> ${esc(identity.enbName)}</div>` : ''}
+                                ${identity && identity.enbId ? `<div style="color:#9ca3af; font-size:12px;"><b>ID:</b> ${esc(identity.enbId)}</div>` : ''}
+                            </div>
+                            ${sectionTitle('1', 'Data Confidence Assessment')}
+                            <ul style="margin:0 0 8px 18px; color:#e5e7eb; font-size:15px; line-height:1.8;">
+                                <li><b>MR Count:</b> ${kpi.mrCount ?? 'N/A'}</li>
+                                <li><b>Total Traffic:</b> ${kpi.traffic ?? 'N/A'} MB</li>
+                                <li><b>Confidence Score:</b> ${confidence ?? 'N/A'}%</li>
+                            </ul>
+
+                            ${sectionTitle('2', 'Coverage Status')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>Coverage:</b> <span style="color:${getStatusColor(coverageLabel)}; font-weight:700;">${esc(coverageLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">${esc(explainCoverage(status || {}, kpi || {}))}</p>
+
+                            ${sectionTitle('3', 'Signal Quality')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>Signal Quality:</b> <span style="color:${getStatusColor(qualityLabel)}; font-weight:700;">${esc(qualityLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">${esc(explainSignalQuality(status || {}, kpi || {}))}</p>
+
+                            ${sectionTitle('4', 'Channel Quality')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>CQI Status:</b> <span style="color:${getStatusColor(cqiLabel)}; font-weight:700;">${esc(cqiLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">${esc(explainCQI(status || {}, kpi || {}))}</p>
+
+                            ${sectionTitle('5', 'Downlink User Experience')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>DL Experience:</b> <span style="color:${getStatusColor(dlExpLabel)}; font-weight:700;">${esc(dlExpLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">User experience summary. Low-throughput ratio: ${kpi.dlLow ?? 'N/A'}% | Avg Thp: ${dlAvgMbps} Mbps, Max: ${dlMaxMbps} Mbps.</p>
+
+                            ${sectionTitle('6', 'Load & Capacity')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>Cell Load:</b> <span style="color:${getStatusColor(loadLabel)}; font-weight:700;">${esc(loadLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">${esc(explainLoad(status || {}, kpi || {}))}</p>
+
+                            ${sectionTitle('7', 'Spectrum Efficiency')}
+                            <p style="margin:0 0 6px; font-size:15px;"><b>Spectral Efficiency:</b> <span style="color:${getStatusColor(seLabel)}; font-weight:700;">${esc(seLabel)}</span></p>
+                            <p style="margin:0 0 12px; color:#cbd5e1; font-size:14px;">${esc(spectralText || 'Spectral efficiency details unavailable.')}</p>
+
+                            ${sectionTitle('8', 'All RCA Rules (Ordered Execution)')}
+                            ${scenarioCards}
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            const overlay = document.querySelector('.deep-analysis-modal');
+            const modal = overlay?.querySelector('.analysis-modal');
+            const header = overlay?.querySelector('.analysis-header');
+            if (header && modal && typeof makeElementDraggable === 'function') {
+                makeElementDraggable(header, modal);
+            }
+
+            return scenarios;
+        } catch (err) {
+            console.error('Deep analysis error:', err);
+            return [];
+        }
+    };
 
     function explainSignalQuality(status, kpi) {
         if (!status.signalQuality) return 'Signal quality data unavailable.';
@@ -5725,6 +6483,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderAnalysisResult(result, container) {
         const { kpi, status, interpretation, diagnosis, actions, confidence } = result;
+        const ulLow = kpi.ulLow ?? null;
+        const ulExp = ulLow === null ? 'Unknown' : (ulLow >= 20 ? 'Degraded' : 'Good');
 
         container.innerHTML = `
             <style>
@@ -5749,76 +6509,76 @@ document.addEventListener('DOMContentLoaded', () => {
             </ul>
 
             <h4>2️⃣ Coverage Status</h4>
-            <p><b>Coverage:</b> <span style="color:${getStatusColor(status.coverage)}">${status.coverage || 'Unknown'}</span></p>
-            <p>${explainCoverage(status, kpi)}</p>
+                <p><b>Coverage:</b> <span style="color:${getStatusColor(status.coverage)}">${status.coverage || 'Unknown'}</span></p>
+                <p>${explainCoverage(status, kpi)}</p>
 
             <h4>3️⃣ Signal Quality</h4>
-            <p><b>Signal Quality:</b> <span style="color:${getStatusColor(status.signalQuality)}">${status.signalQuality || 'Unknown'}</span></p>
-            <p>${explainSignalQuality(status, kpi)}</p>
+                <p><b>Signal Quality:</b> <span style="color:${getStatusColor(status.signalQuality)}">${status.signalQuality || 'Unknown'}</span></p>
+                <p>${explainSignalQuality(status, kpi)}</p>
 
             <h4>4️⃣ Channel Quality</h4>
-            <p><b>CQI Status:</b> <span style="color:${getStatusColor(status.channelQuality)}">${status.channelQuality || 'Unknown'}</span></p>
-            <p>${explainCQI(status, kpi)}</p>
+                <p><b>CQI Status:</b> <span style="color:${getStatusColor(status.channelQuality)}">${status.channelQuality || 'Unknown'}</span></p>
+                <p>${explainCQI(status, kpi)}</p>
 
             <h4>5️⃣ Downlink User Experience</h4>
-            <p><b>DL Experience:</b> <span style="color:${status.dlUserExperience === 'Degraded' ? '#ef4444' : getStatusColor(status.dlUserExperience)}">${status.dlUserExperience || 'Unknown'}</span></p>
-            <p>${explainDLUserExperience(status, kpi)}</p>
+                <p><b>DL Experience:</b> <span style="color:${status.dlUserExperience === 'Degraded' ? '#ef4444' : getStatusColor(status.dlUserExperience)}">${status.dlUserExperience || 'Unknown'}</span></p>
+                <p>${explainDLUserExperience(status, kpi)}</p>
 
             <h4>6️⃣ Load & Capacity</h4>
-            <p><b>Cell Load:</b> <span style="color:${getStatusColor(status.load)}">${status.load || 'Unknown'}</span></p>
-            <p>${explainLoad(status, kpi)}</p>
+                <p><b>Cell Load:</b> <span style="color:${getStatusColor(status.load)}">${status.load || 'Unknown'}</span></p>
+                <p>${explainLoad(status, kpi)}</p>
 
             <h4>7️⃣ Spectrum Efficiency</h4>
-            <p><b>Spectral Efficiency:</b> <span style="color:${status.spectralEfficiency === 'Very Low' ? '#ef4444' : getStatusColor(status.spectralEfficiency)}">${status.spectralEfficiency || 'Unknown'}</span></p>
-            <p>${explainSpectralEfficiency(status, kpi)}</p>
+                <p><b>Spectral Efficiency:</b> <span style="color:${status.spectralEfficiency === 'Very Low' ? '#ef4444' : getStatusColor(status.spectralEfficiency)}">${status.spectralEfficiency || 'Unknown'}</span></p>
+                <p>${explainSpectralEfficiency(status, kpi)}</p>
 
             <h4>8️⃣ MIMO Performance</h4>
-            <p><b>MIMO Status:</b> <span style="color:${getStatusColor(status.mimo)}">${status.mimo || 'N/A'}</span></p>
-            <p>${explainMimo(status, kpi)}</p>
+                <p><b>MIMO Status:</b> <span style="color:${getStatusColor(status.mimo)}">${status.mimo || 'N/A'}</span></p>
+                <p>${explainMimo(status, kpi)}</p>
 
             <h4>9️⃣ Carrier Aggregation</h4>
-            <p><b>CA Status:</b> <span style="color:${getStatusColor(status.ca)}">${status.ca || 'N/A'}</span></p>
-            <p>${explainCA(status, kpi)}</p>
+                <p><b>CA Status:</b> <span style="color:${getStatusColor(status.ca)}">${status.ca || 'N/A'}</span></p>
+                <p>${explainCA(status, kpi)}</p>
 
             <h4>🔟 Link Stability (BLER)</h4>
-            <p><b>Link Status:</b> <span style="color:${status.dlLink === 'Degraded' ? '#ef4444' : getStatusColor(status.dlLink)}">${status.dlLink || 'N/A'}</span></p>
-            <p>${explainLinkStability(status, kpi)}</p>
+                <p><b>Link Status:</b> <span style="color:${status.dlLink === 'Degraded' ? '#ef4444' : getStatusColor(status.dlLink)}">${status.dlLink || 'N/A'}</span></p>
+                <p>${explainLinkStability(status, kpi)}</p>
 
             <h4>1️⃣1️⃣ Interpretation (WHY)</h4>
-            <ul>
-                ${interpretation.length
-                ? interpretation.map(i => `<li>${i}</li>`).join('')
-                : '<li>No dominant interpretation identified.</li>'}
-            </ul>
+                <ul>
+                    ${interpretation.length
+                    ? interpretation.map(i => `<li>${i}</li>`).join('')
+                    : '<li>No dominant interpretation identified.</li>'}
+                </ul>
 
             <h4>🔍 1️⃣2️⃣ Throughput Degradation Analysis</h4>
-            <ul>
-                ${result.throughputRootCauses.length
-                ? result.throughputRootCauses.map(c => `<li>${c}</li>`).join('')
-                : '<li>No dominant throughput degradation factor identified.</li>'}
-            </ul>
+                <ul>
+                    ${result.throughputRootCauses.length
+                    ? result.throughputRootCauses.map(c => `<li>${c}</li>`).join('')
+                    : '<li>No dominant throughput degradation factor identified.</li>'}
+                </ul>
 
             <h4>1️⃣3️⃣ Expert Diagnosis (WHAT)</h4>
-            <ul>
-                ${diagnosis.length
-                ? diagnosis.map(d => `<li><b>${d}</b></li>`).join('')
-                : '<li>No Specific Root Cause Identified</li>'}
-            </ul>
+                <ul>
+                    ${diagnosis.length
+                    ? diagnosis.map(d => `<li><b>${d}</b></li>`).join('')
+                    : '<li>No Specific Root Cause Identified</li>'}
+                </ul>
 
             <h4>🛠️ 1️⃣4️⃣ Optimization Actions</h4>
-            <ul>
-                ${actions.length
-                ? actions.map(a => `<li>${a}</li>`).join('')
-                : '<li>Monitor KPI Trend for degradation</li>'}
-            </ul>
+                <ul>
+                    ${actions.length
+                    ? actions.map(a => `<li>${a}</li>`).join('')
+                    : '<li>Monitor KPI Trend for degradation</li>'}
+                </ul>
 
             <h4>📊 1️⃣5️⃣ Diagnosis Confidence</h4>
-            <p>
-                <b>${confidence}%</b> –
-                ${confidence >= 70 ? 'High confidence' :
-                confidence >= 50 ? 'Medium confidence' :
-                    'Low confidence'}
-            </p>
+                <p>
+                    <b>${confidence}%</b> –
+                    ${confidence >= 70 ? 'High confidence' :
+                    confidence >= 50 ? 'Medium confidence' :
+                        'Low confidence'}
+                </p>
 
             <div class="summary-box">
                 <h4>🧠 Executive Summary</h4>
@@ -5830,7 +6590,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 status.signalQuality === 'Poor' ? 'radio quality degradation' :
                     'capacity factors'}</b>.
                 </p>
-            </div>
         `;
     }
 
@@ -6757,264 +7516,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
 
-    window.deepAnalyzePoint = (btn) => {
-        try {
-            let script = document.getElementById('point-data-stash');
-            if (!script && btn) {
-                const container = btn.parentNode.parentNode;
-                if (container) script = container.querySelector('#point-data-stash');
-            }
-            if (!script) {
-                alert("Error: Analysis data missing.");
-                return;
-            }
-            const d = JSON.parse(script.textContent);
-
-            const getVal = (target) => {
-                const t = target.toLowerCase().replace(/[\s\-_]/g, '');
-                for (let k in d) {
-                    const normK = k.toLowerCase().replace(/[\s\-_]/g, '');
-                    if (normK === t || normK.includes(t)) {
-                        const val = parseFloat(d[k]);
-                        return isNaN(val) ? null : val;
-                    }
-                }
-                return null;
-            };
-
-            // Metrics Extraction
-            const mrCount = getVal('dominantmrcount') ?? getVal('mrcount') ?? 0;
-            const rsrp = getVal('rsrp') ?? getVal('level') ?? getVal('dominantrsrp');
-            const rsrq = getVal('rsrq') ?? getVal('dominantrsrq');
-            const cqi = getVal('averagedlwidebandcqi') ?? getVal('cqi') ?? getVal('dlwidebandcqi');
-            const dlThptRatio = getVal('dllowthroughputratio') ?? getVal('lowthptratio') ?? 0;
-            const dlRbQty = getVal('averagedlrbquantity') ?? getVal('dlrbquantity') ?? getVal('rbqty');
-            const dlSpecEff = getVal('dlspectrumefficiency') ?? getVal('spectrumeff');
-            const dlIbler = getVal('dlibler') ?? getVal('ibler') ?? getVal('bler');
-            const rank2Pct = getVal('rank2percentage') ?? getVal('rank2');
-            const ca3ccPct = getVal('dl3ccpercentage') ?? getVal('ca3cc');
-            const ca1ccPct = getVal('dl1ccpercentage') ?? getVal('ca1cc');
-            const ulThptRatio = getVal('ullowthroughputratio') ?? 0;
-
-            // SECTION 0: DATA CONFIDENCE
-            let dataConfidence = "Low";
-            if (mrCount >= 1000) dataConfidence = "High";
-            else if (mrCount >= 100) dataConfidence = "Medium";
-
-            let analysisLimitation = null;
-            if (mrCount < 20) analysisLimitation = "Indicative Only";
-
-            // SECTION 1: COVERAGE STATUS
-            let coverageStatus = "Unknown";
-            if (rsrp !== null) {
-                if (rsrp >= -90) coverageStatus = "Good";
-                else if (rsrp > -100) coverageStatus = "Fair";
-                else coverageStatus = "Poor";
-            }
-
-            // SECTION 2: SIGNAL QUALITY
-            let signalQuality = "Unknown";
-            if (rsrq !== null) {
-                if (rsrq >= -9) signalQuality = "Good";
-                else if (rsrq > -11) signalQuality = "Degraded";
-                else signalQuality = "Poor";
-            }
-
-            // SECTION 3: CHANNEL QUALITY
-            let channelQuality = "Unknown";
-            if (cqi !== null) {
-                if (cqi < 6) channelQuality = "Poor";
-                else if (cqi < 9) channelQuality = "Moderate";
-                else channelQuality = "Good";
-            }
-
-            // SECTION 4: USER EXPERIENCE
-            let dlUserExp = "Unknown";
-            if (dlThptRatio !== null) {
-                if (dlThptRatio >= 80) dlUserExp = "Severely Degraded";
-                else if (dlThptRatio >= 25) dlUserExp = "Degraded";
-                else dlUserExp = "Acceptable";
-            }
-
-            // SECTION 5: LOAD & CONGESTION
-            let cellLoadStatus = "Unknown";
-            if (dlRbQty !== null) {
-                if (dlRbQty <= 10) cellLoadStatus = "Very Low Load";
-                else if (dlRbQty < 70) cellLoadStatus = "Moderate Load";
-                else if (dlRbQty >= 80) cellLoadStatus = "Congested";
-            }
-
-            // SECTION 6: SPECTRUM EFFICIENCY
-            let dlSpectralPerf = "Unknown";
-            if (dlSpecEff !== null) {
-                if (dlSpecEff < 1000) dlSpectralPerf = "Very Low";
-                else if (dlSpecEff < 2000) dlSpectralPerf = "Low";
-                else dlSpectralPerf = "Normal";
-            }
-
-            // SECTION 7: LINK STABILITY
-            let dlLinkStability = "Unknown";
-            if (dlIbler !== null) {
-                if (dlIbler <= 10) dlLinkStability = "Stable";
-                else dlLinkStability = "Unstable";
-            }
-
-            // SECTION 8: MIMO UTILIZATION
-            let mimoUtil = "Unknown";
-            if (rank2Pct !== null) {
-                if (rank2Pct >= 30) mimoUtil = "Good";
-                else if (rank2Pct >= 15) mimoUtil = "Limited";
-                else mimoUtil = "Poor";
-            }
-
-            // SECTION 9: CA EFFECTIVENESS
-            let caEffectiveness = null;
-            if (ca3ccPct === 100 && dlSpectralPerf !== "Normal") caEffectiveness = "Active but Ineffective";
-
-            let caUtilization = null;
-            if (ca1ccPct >= 60) caUtilization = "Underutilized";
-
-            // SECTION 10: INTERPRETATION
-            let interpretation = null;
-            if (coverageStatus !== "Poor" && signalQuality === "Poor" && channelQuality !== "Poor") {
-                interpretation = "Signal power is present but radio quality is degraded by interference.";
-            } else if (dlUserExp !== "Acceptable" && ulThptRatio === 0) {
-                interpretation = "Downlink-only degradation indicates interference or overlap issues.";
-            } else if (caEffectiveness === "Active but Ineffective") {
-                interpretation = "Carrier Aggregation is enabled but limited by poor SINR.";
-            }
-
-            // SECTION 11: EXPERT DIAGNOSIS
-            let expertDiagnosis = "Inconclusive";
-            if (signalQuality === "Poor" && (dlSpectralPerf === "Low" || dlSpectralPerf === "Very Low") && (cellLoadStatus === "Very Low Load" || cellLoadStatus === "Moderate Load")) {
-                expertDiagnosis = "Interference-Limited Cell";
-            } else if (coverageStatus === "Poor" && channelQuality !== "Good") {
-                expertDiagnosis = "Coverage-Limited Cell";
-            } else if (cellLoadStatus === "Congested") {
-                expertDiagnosis = "Capacity-Limited Cell";
-            }
-
-            // SECTION 12: OPTIMIZATION ACTIONS
-            let actions = [];
-            if (expertDiagnosis === "Interference-Limited Cell") {
-                actions.push("Increase electrical downtilt (1–2°)", "Review overshooting neighbors", "Reduce DL power if overlap confirmed", "Audit PCI and neighbor relations");
-            } else if (expertDiagnosis === "Coverage-Limited Cell") {
-                actions.push("Optimize antenna orientation", "Check for hardware issues");
-            } else if (expertDiagnosis === "Capacity-Limited Cell") {
-                actions.push("Evaluate load balancing", "Plan for capacity expansion");
-            }
-
-            if (mimoUtil === "Limited" || mimoUtil === "Poor") {
-                actions.push("Verify antenna cross-polar isolation", "Check RF paths and connectors");
-            }
-            if (caEffectiveness === "Active but Ineffective") {
-                actions.push("Improve secondary carrier SINR", "Align antenna configuration across bands", "Adjust CA activation thresholds");
-            }
-            if (actions.length === 0) actions.push("Monitor KPI trends", "No critical actions identified");
-
-            // SECTION 13/14: CONFIDENCE SCORING
-            let base = 35;
-            if (dataConfidence === "High") base = 70;
-            else if (dataConfidence === "Medium") base = 55;
-
-            let bonuses = 0;
-            if (interpretation) bonuses += 10;
-            if (dlUserExp === "Severely Degraded") bonuses += 10;
-            if (dlSpectralPerf === "Very Low") bonuses += 10;
-            if (caEffectiveness) bonuses += 10;
-
-            let penalties = 0;
-            if (analysisLimitation === "Indicative Only") penalties += 20;
-
-            let score = Math.min(95, Math.max(20, base + bonuses - penalties));
-            let confidenceLevel = "Low";
-            if (score >= 85) confidenceLevel = "Very High";
-            else if (score >= 70) confidenceLevel = "High";
-            else if (score >= 50) confidenceLevel = "Medium";
-
-            // OUTPUT GENERATION
-            const colorize = (t) => {
-                if (!t) return '#94a3b8';
-                const low = t.toLowerCase();
-                if (low.includes('good') || low.includes('stable') || low.includes('acceptable') || low.includes('normal') || low.includes('very high') || low.includes('high')) return '#4ade80';
-                if (low.includes('fair') || low.includes('moderate') || low.includes('medium') || low.includes('limited')) return '#facc15';
-                return '#f87171';
-            };
-
-            const html = `
-                <div class="analysis-modal-overlay" onclick="if(event.target===this) this.remove()">
-                    <div class="analysis-modal" style="width: 700px; max-width: 90vw;">
-                        <div class="analysis-header" style="background:#059669;">
-                            <h3>Deep RF Performance Analysis</h3>
-                            <button class="analysis-close-btn" onclick="this.closest('.analysis-modal-overlay').remove()">×</button>
-                        </div>
-                        <div class="analysis-content" style="padding:25px; background:#111827; color:#e5e7eb; font-family:Inter, sans-serif;">
-                            
-                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; margin-bottom:25px;">
-                                <div style="background:#1f2937; padding:15px; border-radius:8px; border-left:4px solid #10b981;">
-                                    <div style="font-size:11px; color:#9ca3af; text-transform:uppercase;">Data Confidence</div>
-                                    <div style="font-size:20px; font-weight:bold; color:${colorize(dataConfidence)}">${dataConfidence}</div>
-                                    <div style="font-size:10px; color:#6b7280; margin-top:4px;">Sample Count: ${mrCount}</div>
-                                </div>
-                                <div style="background:#1f2937; padding:15px; border-radius:8px; border-left:4px solid #3b82f6;">
-                                    <div style="font-size:11px; color:#9ca3af; text-transform:uppercase;">Diagnosis Confidence</div>
-                                    <div style="font-size:20px; font-weight:bold; color:${colorize(confidenceLevel)}">${score}% (${confidenceLevel})</div>
-                                    <div style="font-size:10px; color:#6b7280; margin-top:4px;">Rule-based Scoring</div>
-                                </div>
-                            </div>
-
-                            <div style="margin-bottom:20px;">
-                                <h4 style="color:#60a5fa; border-bottom:1px solid #374151; padding-bottom:5px; margin-bottom:12px; font-size:14px;">1. KPI CLASSIFICATION</h4>
-                                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; font-size:13px;">
-                                    <div>Coverage: <span style="font-weight:bold; color:${colorize(coverageStatus)}">${coverageStatus}</span></div>
-                                    <div>Signal Quality: <span style="font-weight:bold; color:${colorize(signalQuality)}">${signalQuality}</span></div>
-                                    <div>Channel (CQI): <span style="font-weight:bold; color:${colorize(channelQuality)}">${channelQuality}</span></div>
-                                    <div>UX (Throughput): <span style="font-weight:bold; color:${colorize(dlUserExp)}">${dlUserExp}</span></div>
-                                    <div>Cell Load: <span style="font-weight:bold; color:${colorize(cellLoadStatus)}">${cellLoadStatus}</span></div>
-                                    <div>Spectrum Eff: <span style="font-weight:bold; color:${colorize(dlSpectralPerf)}">${dlSpectralPerf}</span></div>
-                                    <div>Link Stability: <span style="font-weight:bold; color:${colorize(dlLinkStability)}">${dlLinkStability}</span></div>
-                                    <div>MIMO Utilization: <span style="font-weight:bold; color:${colorize(mimoUtil)}">${mimoUtil}</span></div>
-                                </div>
-                                ${caEffectiveness ? `<div style="margin-top:10px; font-size:13px;">CA Effectiveness: <span style="color:#f87171; font-weight:bold;">${caEffectiveness}</span></div>` : ''}
-                                ${caUtilization ? `<div style="margin-top:5px; font-size:13px;">CA Utilization: <span style="color:#facc15; font-weight:bold;">${caUtilization}</span></div>` : ''}
-                            </div>
-
-                            <div style="margin-bottom:20px;">
-                                <h4 style="color:#60a5fa; border-bottom:1px solid #374151; padding-bottom:5px; margin-bottom:10px; font-size:14px;">2. INTERPRETATION & DIAGNOSIS</h4>
-                                <div style="background:#1f2937; padding:12px; border-radius:6px; margin-bottom:10px; border-left:3px solid #6366f1;">
-                                    <div style="font-size:11px; color:#9ca3af; margin-bottom:4px;">Analysis Context:</div>
-                                    <div style="font-size:13px; line-height:1.5;">${interpretation || "Normal operational behavior observed or standard performance limitations."}</div>
-                                </div>
-                                <div style="background:#450a0a; padding:12px; border-radius:6px; border-left:3px solid #ef4444;">
-                                    <div style="font-size:11px; color:#f87171; margin-bottom:4px;">Expert Diagnosis:</div>
-                                    <div style="font-size:14px; font-weight:bold; color:#fecaca;">${expertDiagnosis}</div>
-                                </div>
-                            </div>
-
-                            <div>
-                                <h4 style="color:#60a5fa; border-bottom:1px solid #374151; padding-bottom:5px; margin-bottom:10px; font-size:14px;">3. OPTIMIZATION RECOMMENDATIONS</h4>
-                                <ul style="margin:0; padding-left:20px; font-size:13px; line-height:1.7; color:#d1d5db;">
-                                    ${actions.map(a => `<li>${a}</li>`).join('')}
-                                </ul>
-                            </div>
-
-                            <div style="margin-top:25px; font-size:10px; color:#4b5563; text-align:center; font-style:italic;">
-                                Deep Analysis Engine v2.0 | Rules-based Diagnostic Model
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-
-            const div = document.createElement('div');
-            div.innerHTML = html;
-            document.body.appendChild(div.firstElementChild);
-
-        } catch (e) {
-            console.error(e);
-            alert("Deep Analysis failed: " + e.message);
-        }
-    };
+    
     // Global function to update the Floating Info Panel (Single Point)
     window.updateFloatingInfoPanel = (p, logColor) => {
         try {
@@ -7421,6 +7923,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             '<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
             '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
+            '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>' +
             '<button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>' +
             '</div>' +
 
@@ -7892,6 +8395,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const technology = Array.isArray(result) ? 'Unknown' : result.tech;
             const signalingData = !Array.isArray(result) ? result.signaling : [];
             const eventsData = !Array.isArray(result) ? result.events : [];
+            const callSessionsData = !Array.isArray(result) ? (result.callSessions || []) : [];
             const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel
             const configData = !Array.isArray(result) ? result.config : null;
             const configHistory = !Array.isArray(result) ? result.configHistory : [];
@@ -7953,6 +8457,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     points: parsedData,
                     signaling: signalingData,
                     events: eventsData,
+                    callSessions: callSessionsData,
                     tech: technology,
                     customMetrics: customMetrics,
                     color: getRandomColor(),
@@ -8335,6 +8840,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.target == document.getElementById('signalingModal')) {
             document.getElementById('signalingModal').style.display = "none";
         }
+        if (event.target == document.getElementById('callSessionsModal')) {
+            document.getElementById('callSessionsModal').style.display = "none";
+        }
+        if (event.target == document.getElementById('dropAnalysisModal')) {
+            document.getElementById('dropAnalysisModal').style.display = "none";
+        }
     }
 
 
@@ -8375,6 +8886,1081 @@ document.addEventListener('DOMContentLoaded', () => {
     window.filterSignaling = () => {
         renderSignalingTable();
     };
+
+    window.closeCallSessionsModal = () => {
+        const modal = document.getElementById('callSessionsModal');
+        if (modal) modal.style.display = 'none';
+    };
+
+    window.closeDropAnalysisModal = () => {
+        const modal = document.getElementById('dropAnalysisModal');
+        if (modal) modal.style.display = 'none';
+    };
+
+    const ensureCallSessionsModal = () => {
+        let modal = document.getElementById('callSessionsModal');
+        if (modal) return modal;
+
+        modal = document.createElement('div');
+        modal.id = 'callSessionsModal';
+        modal.className = 'modal';
+        modal.style.zIndex = '10030';
+        modal.innerHTML =
+            '<div class="modal-content" style="max-width:1180px; width:92vw; max-height:88vh; background:#111827; color:#e5e7eb; border:1px solid #334155; display:flex; flex-direction:column;">' +
+            '  <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid #334155; cursor:move;">' +
+            '    <h3 id="callSessionsModalTitle" style="margin:0; font-size:16px;">Call Sessions</h3>' +
+            '    <span class="close" style="color:#94a3b8; cursor:pointer; font-size:20px;" onclick="window.closeCallSessionsModal()">&times;</span>' +
+            '  </div>' +
+            '  <div class="modal-body" style="padding:10px 12px; overflow:auto;">' +
+            '    <div style="display:grid; grid-template-columns: minmax(220px, 1fr) 180px 140px 140px; gap:8px; margin-bottom:8px;">' +
+            '      <input id="callSessionSearch" placeholder="Search CallID / IMSI / TMSI" style="padding:6px 8px; border:1px solid #334155; border-radius:4px; background:#0f172a; color:#e5e7eb;" oninput="window.filterCallSessions()"/>' +
+            '      <select id="callSessionRrcFilter" style="padding:6px 8px; border:1px solid #334155; border-radius:4px; background:#0f172a; color:#e5e7eb;" onchange="window.filterCallSessions()">' +
+            '        <option value="ALL">All RRC States</option>' +
+            '      </select>' +
+            '      <input id="callSessionStartFilter" placeholder="Start >= (HH:MM:SS)" style="padding:6px 8px; border:1px solid #334155; border-radius:4px; background:#0f172a; color:#e5e7eb;" oninput="window.filterCallSessions()"/>' +
+            '      <input id="callSessionEndFilter" placeholder="End <= (HH:MM:SS)" style="padding:6px 8px; border:1px solid #334155; border-radius:4px; background:#0f172a; color:#e5e7eb;" oninput="window.filterCallSessions()"/>' +
+            '    </div>' +
+            '    <div id="callSessionsSummary" style="font-size:11px; color:#93c5fd; margin-bottom:8px;"></div>' +
+            '    <table style="width:100%; border-collapse:collapse; font-size:11px;">' +
+            '      <thead>' +
+            '        <tr style="background:#1e293b;">' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Session</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Call/Transaction</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">IMSI / TMSI</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Start</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">End</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Duration (s)</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">End Type</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Failure Reason</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Drop</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Setup Failure</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">RRC States</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">RAB</th>' +
+            '          <th style="text-align:left; padding:6px; border:1px solid #334155;">Measurements</th>' +
+            '        </tr>' +
+            '      </thead>' +
+            '      <tbody id="callSessionsTableBody"></tbody>' +
+            '    </table>' +
+            '  </div>' +
+            '</div>';
+
+        document.body.appendChild(modal);
+        const content = modal.querySelector('.modal-content');
+        const header = modal.querySelector('.modal-header');
+        if (content && header) makeElementDraggable(header, content);
+        return modal;
+    };
+
+    const parseSessionTimeToMs = (timeValue) => {
+        if (!timeValue) return NaN;
+        const txt = String(timeValue).trim();
+        const iso = Date.parse(txt);
+        if (!Number.isNaN(iso)) return iso;
+        const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+        if (!m) return NaN;
+        const hh = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        const ss = parseInt(m[3], 10);
+        const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+        return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+    };
+
+    const ensureDropAnalysisModal = () => {
+        let modal = document.getElementById('dropAnalysisModal');
+        if (modal) return modal;
+
+        modal = document.createElement('div');
+        modal.id = 'dropAnalysisModal';
+        modal.className = 'modal';
+        modal.style.zIndex = '10040';
+        modal.innerHTML =
+            '<div class="modal-content" style="max-width:760px; width:88vw; max-height:84vh; background:#0b1220; color:#e5e7eb; border:1px solid #334155; display:flex; flex-direction:column;">' +
+            '  <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid #334155; cursor:move;">' +
+            '    <h3 id="dropAnalysisTitle" style="margin:0; font-size:16px;">Drop Call Analysis</h3>' +
+            '    <span class="close" style="color:#94a3b8; cursor:pointer; font-size:20px;" onclick="window.closeDropAnalysisModal()">&times;</span>' +
+            '  </div>' +
+            '  <div class="modal-body" id="dropAnalysisBody" style="padding:12px 14px; overflow:auto;"></div>' +
+            '</div>';
+
+        document.body.appendChild(modal);
+        const content = modal.querySelector('.modal-content');
+        const header = modal.querySelector('.modal-header');
+        if (content && header) makeElementDraggable(header, content);
+        return modal;
+    };
+
+    const summarizeDropRadio = (session) => {
+        const ms = Array.isArray(session?.radioMeasurementsTimeline) ? session.radioMeasurementsTimeline : [];
+        if (ms.length === 0) return 'No radio measurements available near drop.';
+        const tail = ms.slice(-8);
+        const avg = (arr) => {
+            const vals = arr.filter(v => typeof v === 'number' && !Number.isNaN(v));
+            if (vals.length === 0) return null;
+            return vals.reduce((a, b) => a + b, 0) / vals.length;
+        };
+        const avgRscp = avg(tail.map(x => x.rscp));
+        const avgRsrp = avg(tail.map(x => x.rsrp));
+        const avgEcno = avg(tail.map(x => x.ecno));
+        const avgRsrq = avg(tail.map(x => x.rsrq));
+        const avgRssi = avg(tail.map(x => x.rssi));
+
+        const parts = [];
+        if (avgRscp !== null) parts.push('Avg RSCP (last samples): ' + avgRscp.toFixed(1) + ' dBm');
+        if (avgRsrp !== null) parts.push('Avg RSRP (last samples): ' + avgRsrp.toFixed(1) + ' dBm');
+        if (avgEcno !== null) parts.push('Avg EcNo (last samples): ' + avgEcno.toFixed(1) + ' dB');
+        if (avgRsrq !== null) parts.push('Avg RSRQ (last samples): ' + avgRsrq.toFixed(1) + ' dB');
+        if (avgRssi !== null) parts.push('Avg RSSI (last samples): ' + avgRssi.toFixed(1) + ' dBm');
+        return parts.length ? parts.join('<br>') : 'No usable radio metrics available near drop.';
+    };
+
+    const buildDropInsights = (log, session) => {
+        const endMs = parseSessionTimeToMs(session?.endTime || session?.startTime);
+        const points = Array.isArray(log?.points) ? log.points : [];
+        const nearWindow = points.filter(p => {
+            const t = parseSessionTimeToMs(p?.time);
+            if (Number.isNaN(t) || Number.isNaN(endMs)) return false;
+            return Math.abs(t - endMs) <= 30000;
+        });
+        const beforeDrop = nearWindow.filter(p => {
+            const t = parseSessionTimeToMs(p?.time);
+            return !Number.isNaN(t) && !Number.isNaN(endMs) && t <= endMs;
+        });
+        const measurements = beforeDrop.filter(p => p?.type === 'MEASUREMENT');
+        const events = nearWindow.filter(p => p?.type === 'EVENT' || p?.event || p?.message);
+
+        const msgOf = (p) => [p?.event, p?.message, p?.properties?.Event, p?.properties?.Message].filter(Boolean).join(' ').toUpperCase();
+        const hasEvent = (matcher) => events.some(e => matcher(msgOf(e)));
+        const avg = (vals) => {
+            const n = vals.filter(v => typeof v === 'number' && !Number.isNaN(v));
+            if (!n.length) return null;
+            return n.reduce((a, b) => a + b, 0) / n.length;
+        };
+        const median = (vals) => {
+            const n = vals.filter(v => typeof v === 'number' && !Number.isNaN(v)).sort((a, b) => a - b);
+            if (!n.length) return null;
+            const mid = Math.floor(n.length / 2);
+            return n.length % 2 === 0 ? (n[mid - 1] + n[mid]) / 2 : n[mid];
+        };
+        const num = (v) => {
+            const x = parseFloat(v);
+            return Number.isNaN(x) ? null : x;
+        };
+
+        const recentTail = measurements.slice(-8);
+        const avgRscp = avg(recentTail.map(m => num(m?.rscp ?? m?.level ?? m?.properties?.['Serving RSCP'])));
+        const avgEcno = avg(recentTail.map(m => num(m?.ecno ?? m?.properties?.['EcNo'] ?? m?.properties?.['Serving EcNo'])));
+        const avgUlTx = avg(recentTail.map(m => num(m?.properties?.['UE Tx Power'])));
+        const latestUlTx = (() => {
+            const last = recentTail[recentTail.length - 1];
+            return num(last?.properties?.['UE Tx Power']);
+        })();
+        const rlfOccurred = String(session?.endTrigger || '').toUpperCase().includes('RADIO_LINK_FAILURE')
+            || hasEvent(txt => txt.includes('RLF') || txt.includes('RADIO LINK FAILURE'));
+
+        // 10s pre-drop trend analysis (RSCP / EcNo / UL Tx / BLER/FER)
+        const trendWindow = measurements.filter(m => {
+            const t = parseSessionTimeToMs(m?.time);
+            if (Number.isNaN(t) || Number.isNaN(endMs)) return false;
+            return t >= (endMs - 10000) && t <= endMs;
+        });
+        const series = (extractor) => trendWindow
+            .map(m => ({ t: parseSessionTimeToMs(m?.time), v: num(extractor(m)) }))
+            .filter(x => !Number.isNaN(x.t) && x.v !== null)
+            .sort((a, b) => a.t - b.t);
+        const rscpSeries = series(m => m?.rscp ?? m?.level ?? m?.properties?.['Serving RSCP']);
+        const ecnoSeries = series(m => m?.ecno ?? m?.properties?.['EcNo'] ?? m?.properties?.['Serving EcNo']);
+        const ulTxSeries = series(m => m?.properties?.['UE Tx Power']);
+        const blerSeries = series(m => m?.bler_dl ?? m?.properties?.['BLER DL'] ?? m?.bler_ul ?? m?.properties?.['BLER UL']);
+        const ferSeries = series(m => m?.fer_dl ?? m?.properties?.['FER DL'] ?? m?.fer_ul ?? m?.properties?.['FER UL'] ?? m?.properties?.['FER']);
+        const freqSeries = series(m => m?.freq ?? m?.properties?.['Freq']);
+        const buildServingLabel = (m) => {
+            const name = String(m?.serving_cell_name || m?.properties?.['Serving Cell Name'] || m?.properties?.['serving_cell_name'] || m?.properties?.['Serving Cell'] || '').trim();
+            if (name) return name;
+            const rnc = m?.rnc ?? m?.properties?.['RNC'];
+            const cid = m?.cid ?? m?.properties?.['CID'] ?? m?.properties?.['Cell ID'];
+            if (rnc !== undefined && rnc !== null && cid !== undefined && cid !== null && String(rnc) !== 'N/A' && String(cid) !== 'N/A') {
+                return String(rnc) + '/' + String(cid);
+            }
+            const sc = m?.sc ?? m?.properties?.['Serving SC'] ?? m?.properties?.['SC'];
+            const fq = m?.freq ?? m?.properties?.['Freq'];
+            if (sc !== undefined && sc !== null && fq !== undefined && fq !== null && String(sc) !== 'N/A' && String(fq) !== 'N/A') {
+                return String(sc) + '/' + String(fq);
+            }
+            return '';
+        };
+
+        const cellNameSeries = trendWindow
+            .map(m => ({
+                t: parseSessionTimeToMs(m?.time),
+                v: buildServingLabel(m)
+            }))
+            .filter(x => !Number.isNaN(x.t) && x.v)
+            .sort((a, b) => a.t - b.t);
+
+        const markerEvents10s = nearWindow
+            .map(p => {
+                const t = parseSessionTimeToMs(p?.time);
+                if (Number.isNaN(t) || Number.isNaN(endMs) || t < (endMs - 10000) || t > endMs) return null;
+                const txt = [p?.event, p?.message, p?.properties?.Event, p?.properties?.Message].filter(Boolean).join(' ').toUpperCase();
+                if (txt.includes('RLF') || txt.includes('RADIO LINK FAILURE')) return { t, label: 'RLF' };
+                if (txt.includes('HOF') || txt.includes('HANDOVER FAILURE') || txt.includes('HO FAILURE')) return { t, label: 'HOF' };
+                return null;
+            })
+            .filter(Boolean);
+
+        const trendDrop = (s) => (s.length >= 2 ? (s[s.length - 1].v - s[0].v) : null);
+        const ratioDecreasing = (s) => {
+            if (s.length < 2) return null;
+            let dec = 0;
+            for (let i = 1; i < s.length; i++) if (s[i].v < s[i - 1].v) dec++;
+            return dec / (s.length - 1);
+        };
+        const rscpDrop10s = trendDrop(rscpSeries);
+        const ecnoDrop10s = trendDrop(ecnoSeries);
+        const rscpContinuouslyDropping = ratioDecreasing(rscpSeries) !== null && ratioDecreasing(rscpSeries) >= 0.7 && rscpDrop10s !== null && rscpDrop10s <= -3;
+        const ecnoContinuouslyDropping = ratioDecreasing(ecnoSeries) !== null && ratioDecreasing(ecnoSeries) >= 0.7 && ecnoDrop10s !== null && ecnoDrop10s <= -2;
+
+        const latestRscp = rscpSeries.length ? rscpSeries[rscpSeries.length - 1].v : null;
+        const latestEcno = ecnoSeries.length ? ecnoSeries[ecnoSeries.length - 1].v : null;
+        const suddenCellEdgeBehavior = rscpDrop10s !== null && rscpDrop10s <= -8 && latestRscp !== null && latestRscp < -95;
+        const goodRscpBadEcno = latestRscp !== null && latestRscp >= -90 && latestEcno !== null && latestEcno < -14;
+        const bothBad = latestRscp !== null && latestRscp < -95 && latestEcno !== null && latestEcno < -14;
+
+        const ulLimited = (latestUlTx !== null && latestUlTx > 21) || (avgUlTx !== null && avgUlTx > 21);
+
+        const blerStart = blerSeries.length ? blerSeries[0].v : null;
+        const blerEnd = blerSeries.length ? blerSeries[blerSeries.length - 1].v : null;
+        const blerMedian = median(blerSeries.map(x => x.v));
+        const blerMax = blerSeries.length ? Math.max(...blerSeries.map(x => x.v)) : null;
+        const risingBler = blerStart !== null && blerEnd !== null && (blerEnd - blerStart) >= 3 && blerEnd >= 5;
+        const blerSpike = blerMedian !== null && blerMax !== null && (blerMax - blerMedian) >= 5;
+
+        const ferStart = ferSeries.length ? ferSeries[0].v : null;
+        const ferEnd = ferSeries.length ? ferSeries[ferSeries.length - 1].v : null;
+        const ferMedian = median(ferSeries.map(x => x.v));
+        const ferMax = ferSeries.length ? Math.max(...ferSeries.map(x => x.v)) : null;
+        const risingFer = ferStart !== null && ferEnd !== null && (ferEnd - ferStart) >= 3 && ferEnd >= 5;
+        const ferSpike = ferMedian !== null && ferMax !== null && (ferMax - ferMedian) >= 5;
+
+        let lastHoMs = null;
+        beforeDrop.forEach(p => {
+            const txt = msgOf(p);
+            if (txt.includes('HO COMMAND') || txt.includes('HO COMPLETION') || txt.includes('HANDOVER')) {
+                const t = parseSessionTimeToMs(p.time);
+                if (!Number.isNaN(t) && (lastHoMs === null || t > lastHoMs)) lastHoMs = t;
+            }
+        });
+        const dropAfterHoSec = (lastHoMs !== null && !Number.isNaN(endMs)) ? ((endMs - lastHoMs) / 1000) : null;
+        const dropWithin5sAfterHo = dropAfterHoSec !== null && dropAfterHoSec >= 0 && dropAfterHoSec < 5;
+        const hoFailure = hasEvent(txt => txt.includes('HO FAILURE') || txt.includes('HOF') || txt.includes('HANDOVER FAILURE'));
+        const interRatHoFailure = hasEvent(txt => (txt.includes('INTER-RAT') || txt.includes('IRAT')) && txt.includes('HO') && txt.includes('FAIL'));
+
+        const rabReleaseResource = String(session?.endTrigger || '').toUpperCase().includes('RAB_RELEASE')
+            || hasEvent(txt => txt.includes('RAB RELEASE') && txt.includes('RESOURCE'));
+        const iuReleaseNoResource = String(session?.endTrigger || '').toUpperCase().includes('IU_RELEASE')
+            || hasEvent(txt => txt.includes('IU RELEASE') && txt.includes('NO RESOURCE'));
+
+        let suddenPowerOrCodeReduction = false;
+        if (measurements.length >= 2) {
+            const first = measurements[Math.max(0, measurements.length - 8)];
+            const last = measurements[measurements.length - 1];
+            const firstTx = num(first?.properties?.['UE Tx Power']);
+            const lastTx = num(last?.properties?.['UE Tx Power']);
+            const firstAs = num(first?.as_size ?? first?.properties?.['Active Set Size']);
+            const lastAs = num(last?.as_size ?? last?.properties?.['Active Set Size']);
+            if (firstTx !== null && lastTx !== null && (firstTx - lastTx) >= 5) suddenPowerOrCodeReduction = true;
+            if (firstAs !== null && lastAs !== null && (firstAs - lastAs) >= 1) suddenPowerOrCodeReduction = true;
+        }
+
+        const mscInitiatedIuRelease = String(session?.endTrigger || '').toUpperCase().includes('MSC_RELEASE_WITHOUT_DISCONNECT')
+            || hasEvent(txt => txt.includes('MSC') && txt.includes('IU RELEASE'));
+        const goodRadioBeforeDrop = (avgRscp !== null && avgEcno !== null && avgRscp >= -95 && avgEcno >= -14);
+
+        const radioPoor = (
+            (avgRscp !== null && avgRscp < -95) ||
+            (avgEcno !== null && avgEcno < -14) ||
+            (avgUlTx !== null && avgUlTx > 21)
+        );
+        const recentHoInstability = dropWithin5sAfterHo || hoFailure || interRatHoFailure;
+
+        const radioFindings = [];
+        if (avgRscp !== null && avgRscp < -95) radioFindings.push('RSCP below threshold (' + avgRscp.toFixed(1) + ' dBm < -95 dBm)');
+        if (avgEcno !== null && avgEcno < -14) radioFindings.push('Ec/No below threshold (' + avgEcno.toFixed(1) + ' dB < -14 dB)');
+        if (avgUlTx !== null && avgUlTx > 21) radioFindings.push('UL Tx Power high (' + avgUlTx.toFixed(1) + ' dBm > 21 dBm)');
+        if (rlfOccurred && radioPoor && !recentHoInstability) {
+            radioFindings.push('RLF with poor radio and no recent HO instability');
+        }
+        if (rscpContinuouslyDropping) radioFindings.push('RSCP continuously dropping during last 10s');
+        if (ecnoContinuouslyDropping) radioFindings.push('Ec/No continuously dropping during last 10s');
+        if (suddenCellEdgeBehavior) radioFindings.push('Sudden cell-edge behavior detected (fast RSCP decay)');
+        if (goodRscpBadEcno) radioFindings.push('Pattern: good RSCP + bad Ec/No -> likely interference');
+        if (bothBad) radioFindings.push('Pattern: both RSCP and Ec/No poor -> weak coverage');
+        if (ulLimited) radioFindings.push('Uplink-limited condition (UL Tx > 21 dBm)');
+        if (risingBler || risingFer) radioFindings.push('Rising BLER/FER before drop -> radio instability');
+        if (blerSpike || ferSpike) radioFindings.push('Sudden BLER/FER spike -> fast fading/interference');
+
+        const mobilityFindings = [];
+        if (dropWithin5sAfterHo) mobilityFindings.push('Drop occurred ' + dropAfterHoSec.toFixed(1) + ' s after HO');
+        if (hoFailure) mobilityFindings.push('Handover failure event detected');
+        if (interRatHoFailure) mobilityFindings.push('Inter-RAT HO failure detected');
+
+        const congestionFindings = [];
+        if (rabReleaseResource) congestionFindings.push('RAB release/resource indicator detected');
+        if (iuReleaseNoResource) congestionFindings.push('IU release/no-resource indicator detected');
+        if (suddenPowerOrCodeReduction) congestionFindings.push('Sudden power/code reduction pattern detected');
+
+        const coreFindings = [];
+        const coreEligible = mscInitiatedIuRelease && goodRadioBeforeDrop && !recentHoInstability;
+        if (coreEligible) {
+            coreFindings.push('MSC/IU release present with good radio and no HO instability');
+        }
+
+        const radioValues = {
+            avgRscp: avgRscp,
+            avgEcno: avgEcno,
+            avgUlTx: avgUlTx,
+            latestUlTx: latestUlTx,
+            rlfOccurred: rlfOccurred,
+            rscpDrop10s: rscpDrop10s,
+            ecnoDrop10s: ecnoDrop10s,
+            rscpContinuouslyDropping: rscpContinuouslyDropping,
+            ecnoContinuouslyDropping: ecnoContinuouslyDropping,
+            suddenCellEdgeBehavior: suddenCellEdgeBehavior,
+            goodRscpBadEcno: goodRscpBadEcno,
+            bothBad: bothBad,
+            ulLimited: ulLimited,
+            risingBler: risingBler,
+            blerSpike: blerSpike,
+            risingFer: risingFer,
+            ferSpike: ferSpike,
+            blerEnd: blerEnd,
+            ferEnd: ferEnd,
+            rscpSeries10s: rscpSeries.map(p => ({ t: p.t, v: p.v })),
+            ecnoSeries10s: ecnoSeries.map(p => ({ t: p.t, v: p.v })),
+            freqSeries10s: freqSeries.map(p => ({ t: p.t, v: p.v })),
+            cellNameSeries10s: cellNameSeries.map(p => ({ t: p.t, v: p.v })),
+            markerEvents10s: markerEvents10s
+        };
+        const mobilityValues = {
+            dropAfterHoSec: dropAfterHoSec,
+            dropWithin5sAfterHo: dropWithin5sAfterHo,
+            hoFailure: hoFailure,
+            interRatHoFailure: interRatHoFailure
+        };
+        const congestionValues = {
+            rabReleaseResource: rabReleaseResource,
+            iuReleaseNoResource: iuReleaseNoResource,
+            suddenPowerOrCodeReduction: suddenPowerOrCodeReduction
+        };
+        const coreValues = {
+            mscInitiatedIuRelease: mscInitiatedIuRelease,
+            goodRadioBeforeDrop: goodRadioBeforeDrop
+        };
+
+        return {
+            radioFindings,
+            mobilityFindings,
+            congestionFindings,
+            coreFindings,
+            values: {
+                radio: radioValues,
+                mobility: mobilityValues,
+                congestion: congestionValues,
+                core: coreValues
+            },
+            scores: {
+                radio: radioFindings.length,
+                mobility: mobilityFindings.length,
+                congestion: congestionFindings.length,
+                core: coreFindings.length
+            },
+            flags: {
+                radioPoor,
+                recentHoInstability,
+                coreEligible,
+                mobilityOverride: dropWithin5sAfterHo
+            }
+        };
+    };
+
+    const renderInsightBlock = (title, findings, explanation, valueLines, extraHtml) => {
+        const has = Array.isArray(findings) && findings.length > 0;
+        const status = has ? '<span style="color:#fca5a5;">Matched</span>' : '<span style="color:#86efac;">No strong indicator</span>';
+        const details = has
+            ? findings.map(x => '<div style="margin-bottom:4px;">- ' + x + '</div>').join('')
+            : '<div style="color:#9ca3af;">No explicit signal found in this category around drop time.</div>';
+        const valuesHtml = Array.isArray(valueLines) && valueLines.length
+            ? valueLines.map(v => '<div style="margin-bottom:2px;">' + v + '</div>').join('')
+            : '<div style="color:#9ca3af;">No values available.</div>';
+        return '' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:8px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">' + title + ' - ' + status + '</div>' +
+            '  <div style="font-size:12px; color:#9ca3af; margin-bottom:6px;">' + (explanation || '') + '</div>' +
+            (extraHtml ? ('  <div style="margin-bottom:8px;">' + extraHtml + '</div>') : '') +
+            '  <div style="font-size:12px; color:#cbd5e1; margin-bottom:6px;">' + valuesHtml + '</div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">' + details + '</div>' +
+            '</div>';
+    };
+
+    const deriveDropRootCause = (insights) => {
+        const scores = insights?.scores || { radio: 0, mobility: 0, congestion: 0, core: 0 };
+        const domains = [
+            { key: 'radio', label: 'Radio Coverage / Quality', actions: ['Check coverage holes (RSCP), interference (Ec/No), and UL budget near drop area.', 'Audit UL power control and pilot pollution around serving/neighbor cells.'] },
+            { key: 'mobility', label: 'Mobility', actions: ['Audit HO thresholds/hysteresis/TTT and neighbor definitions on serving/target cells.', 'Review inter-RAT mobility parameters and missing neighbors for the route segment.'] },
+            { key: 'congestion', label: 'Congestion', actions: ['Check RAB/Iu resource counters and admission control at drop timestamp.', 'Review code/power utilization and sudden channel resource reductions.'] },
+            { key: 'core', label: 'Core Network', actions: ['Investigate MSC/Iu traces for release origin and reject causes.', 'Validate core signaling continuity despite good radio context.'] }
+        ];
+
+        if (insights?.flags?.mobilityOverride) {
+            const mobility = domains.find(d => d.key === 'mobility');
+            return {
+                topDomain: mobility.label,
+                confidence: 90,
+                summary: 'Mobility override: drop occurred within 5s of HO, so mobility is prioritized.',
+                recommendations: mobility.actions
+            };
+        }
+        domains.sort((a, b) => (scores[b.key] || 0) - (scores[a.key] || 0));
+        const top = domains[0];
+        const second = domains[1];
+        const topScore = scores[top.key] || 0;
+        const secondScore = scores[second.key] || 0;
+        const total = (scores.radio || 0) + (scores.mobility || 0) + (scores.congestion || 0) + (scores.core || 0);
+        const confidence = topScore === 0 ? 0 : Math.min(95, Math.max(35, Math.round((topScore / Math.max(1, total)) * 100 + (topScore - secondScore) * 8)));
+        const summary = topScore === 0
+            ? 'No dominant root-cause signal. More signaling/radio context is needed.'
+            : 'Most likely domain: ' + top.label + '.';
+        return {
+            topDomain: topScore > 0 ? top.label : 'Undetermined',
+            confidence,
+            summary,
+            recommendations: top.actions
+        };
+    };
+
+    const buildMiniTrendSvg = (rscpSeries, ecnoSeries, freqSeries, cellNameSeries, markerEvents) => {
+        const r = Array.isArray(rscpSeries) ? rscpSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const e = Array.isArray(ecnoSeries) ? ecnoSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const f = Array.isArray(freqSeries) ? freqSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const n = Array.isArray(cellNameSeries) ? cellNameSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'string' && p.v.trim()) : [];
+        if (!r.length && !e.length) {
+            return '<div style="font-size:11px; color:#9ca3af;">No RSCP/EcNo samples in last 10s.</div>';
+        }
+
+        const width = 560;
+        const height = 160;
+        const padL = 38;
+        const padR = 38;
+        const padT = 14;
+        const padB = 24;
+        const plotW = width - padL - padR;
+        const plotH = height - padT - padB;
+
+        const allTimes = r.concat(e).concat(f).concat(n).map(p => p.t);
+        const tMin = Math.min(...allTimes);
+        const tMax = Math.max(...allTimes);
+        const tSpan = Math.max(1, tMax - tMin);
+
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const xAt = (t) => padL + ((t - tMin) / tSpan) * plotW;
+        const yRscp = (v) => {
+            const minV = -120;
+            const maxV = -60;
+            const n = (clamp(v, minV, maxV) - minV) / (maxV - minV);
+            return padT + (1 - n) * plotH;
+        };
+        const yEcno = (v) => {
+            const minV = -24;
+            const maxV = 0;
+            const n = (clamp(v, minV, maxV) - minV) / (maxV - minV);
+            return padT + (1 - n) * plotH;
+        };
+
+        const pathFrom = (series, yFn) => {
+            if (!series.length) return '';
+            return series.map((p, i) => (i === 0 ? 'M ' : ' L ') + xAt(p.t).toFixed(1) + ' ' + yFn(p.v).toFixed(1)).join('');
+        };
+
+        const gridLines = [0.25, 0.5, 0.75].map(fr => {
+            const y = (padT + fr * plotH).toFixed(1);
+            return '<line x1="' + padL + '" y1="' + y + '" x2="' + (width - padR) + '" y2="' + y + '" stroke="#334155" stroke-width="1" />';
+        }).join('');
+
+        const axis =
+            '<line x1="' + padL + '" y1="' + padT + '" x2="' + padL + '" y2="' + (height - padB) + '" stroke="#64748b" stroke-width="1"/>' +
+            '<line x1="' + (width - padR) + '" y1="' + padT + '" x2="' + (width - padR) + '" y2="' + (height - padB) + '" stroke="#64748b" stroke-width="1"/>' +
+            '<line x1="' + padL + '" y1="' + (height - padB) + '" x2="' + (width - padR) + '" y2="' + (height - padB) + '" stroke="#64748b" stroke-width="1"/>';
+
+        const rscpPath = pathFrom(r, yRscp);
+        const ecnoPath = pathFrom(e, yEcno);
+        const dropX = (width - padR);
+        const rLast = r.length ? r[r.length - 1] : null;
+        const eLast = e.length ? e[e.length - 1] : null;
+        const t0 = r.length || e.length ? '-10s' : '';
+        const t1 = '0s(drop)';
+
+        const nameAtTime = (t) => {
+            let last = null;
+            for (let i = 0; i < n.length; i++) {
+                if (n[i].t <= t) last = n[i].v;
+                else break;
+            }
+            return last;
+        };
+
+        const segments = [];
+        if (f.length || n.length) {
+            const tPoints = Array.from(new Set((f.map(x => x.t)).concat(n.map(x => x.t)).sort((a, b) => a - b)));
+            let currentFreq = f.length ? f[0].v : null;
+            let segStart = tPoints[0];
+            let currentName = nameAtTime(segStart);
+
+            for (let i = 0; i < tPoints.length; i++) {
+                const t = tPoints[i];
+                const fAt = (() => {
+                    let last = currentFreq;
+                    for (let j = 0; j < f.length; j++) {
+                        if (f[j].t <= t) last = f[j].v;
+                        else break;
+                    }
+                    return last;
+                })();
+                const nAt = nameAtTime(t);
+
+                if (i > 0 && (fAt !== currentFreq || nAt !== currentName)) {
+                    segments.push({ t0: segStart, t1: tPoints[i - 1], freq: currentFreq, name: currentName });
+                    segStart = t;
+                    currentFreq = fAt;
+                    currentName = nAt;
+                } else {
+                    currentFreq = fAt;
+                    currentName = nAt;
+                }
+            }
+            const endT = tPoints[tPoints.length - 1];
+            if (segStart !== undefined && endT !== undefined) {
+                segments.push({ t0: segStart, t1: endT, freq: currentFreq, name: currentName });
+            }
+        } else {
+            segments.push({ t0: tMin, t1: tMax, freq: null, name: null });
+        }
+        const freqPalette = ['#22d3ee', '#38bdf8', '#60a5fa', '#818cf8', '#a78bfa', '#34d399', '#f59e0b'];
+        const freqColor = (freq) => {
+            const idx = Math.abs(Math.round(freq)) % freqPalette.length;
+            return freqPalette[idx];
+        };
+        const freqBandY = height - padB + 5;
+        const freqBandH = 8;
+        const labelShort = (txt) => {
+            if (!txt) return '';
+            const t = String(txt);
+            return t.length > 16 ? (t.slice(0, 16) + '...') : t;
+        };
+        const freqBands = segments.map(seg => {
+            const x0 = xAt(seg.t0);
+            const x1 = xAt(seg.t1);
+            const w = Math.max(2, x1 - x0);
+            const c = freqColor(seg.freq || 0);
+            const label = seg.name || (seg.freq !== null ? String(seg.freq) : '');
+            return '<rect x="' + x0.toFixed(1) + '" y="' + freqBandY + '" width="' + w.toFixed(1) + '" height="' + freqBandH + '" fill="' + c + '" opacity="0.9" />' +
+                (label ? '<text x="' + (x0 + 2).toFixed(1) + '" y="' + (freqBandY - 2) + '" font-size="9" fill="' + c + '">' + labelShort(label) + '</text>' : '');
+        }).join('');
+        const freqTransitions = [];
+        for (let i = 1; i < segments.length; i++) {
+            const x = xAt(segments[i].t0);
+            freqTransitions.push('<line x1="' + x.toFixed(1) + '" y1="' + padT + '" x2="' + x.toFixed(1) + '" y2="' + (height - padB) + '" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 2" />');
+        }
+        const topNameLabels = segments.map(seg => {
+            if (!seg.name) return '';
+            const xMid = (xAt(seg.t0) + xAt(seg.t1)) / 2;
+            return '<text x="' + xMid.toFixed(1) + '" y="' + (padT - 4) + '" text-anchor="middle" font-size="10" fill="#e2e8f0">' + labelShort(seg.name) + '</text>';
+        }).join('');
+        const markerLines = (Array.isArray(markerEvents) ? markerEvents : []).map(ev => {
+            const x = xAt(ev.t);
+            return '<line x1="' + x.toFixed(1) + '" y1="' + padT + '" x2="' + x.toFixed(1) + '" y2="' + (height - padB) + '" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4 3" />' +
+                '<text x="' + (x - 10).toFixed(1) + '" y="' + (padT - 2) + '" font-size="10" fill="#fca5a5">' + ev.label + '</text>';
+        }).join('');
+
+        return '' +
+            '<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="160" style="display:block; background:#0f172a; border:1px solid #334155; border-radius:6px;">' +
+            gridLines +
+            axis +
+            freqTransitions.join('') +
+            markerLines +
+            '<line x1="' + dropX + '" y1="' + padT + '" x2="' + dropX + '" y2="' + (height - padB) + '" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4 3" />' +
+            (rscpPath ? '<path d="' + rscpPath + '" fill="none" stroke="#22c55e" stroke-width="2" />' : '') +
+            (ecnoPath ? '<path d="' + ecnoPath + '" fill="none" stroke="#f59e0b" stroke-width="2" />' : '') +
+            (rLast ? ('<circle cx="' + xAt(rLast.t).toFixed(1) + '" cy="' + yRscp(rLast.v).toFixed(1) + '" r="3.5" fill="#22c55e" stroke="#0f172a" stroke-width="1" />') : '') +
+            (eLast ? ('<circle cx="' + xAt(eLast.t).toFixed(1) + '" cy="' + yEcno(eLast.v).toFixed(1) + '" r="3.5" fill="#f59e0b" stroke="#0f172a" stroke-width="1" />') : '') +
+            freqBands +
+            topNameLabels +
+            '<text x="' + (dropX - 30) + '" y="' + (padT - 2) + '" font-size="10" fill="#fca5a5">DROP</text>' +
+            '<text x="' + (padL - 32) + '" y="' + (padT + 10) + '" font-size="10" fill="#86efac">RSCP</text>' +
+            '<text x="' + (width - padR + 6) + '" y="' + (padT + 10) + '" font-size="10" fill="#fcd34d">EcNo</text>' +
+            '<text x="' + padL + '" y="' + (height - padB + 20) + '" font-size="10" fill="#67e8f9">Serving Freq timeline</text>' +
+            '<text x="' + padL + '" y="' + (height - 6) + '" font-size="10" fill="#94a3b8">' + t0 + '</text>' +
+            '<text x="' + (width - padR - 42) + '" y="' + (height - 6) + '" font-size="10" fill="#94a3b8">' + t1 + '</text>' +
+            '<circle cx="' + (padL + 8) + '" cy="' + (padT + 10) + '" r="3" fill="#22c55e"/>' +
+            '<text x="' + (padL + 16) + '" y="' + (padT + 13) + '" font-size="10" fill="#cbd5e1">RSCP</text>' +
+            '<circle cx="' + (padL + 72) + '" cy="' + (padT + 10) + '" r="3" fill="#f59e0b"/>' +
+            '<text x="' + (padL + 80) + '" y="' + (padT + 13) + '" font-size="10" fill="#cbd5e1">EcNo</text>' +
+            '</svg>';
+    };
+
+    const buildDropOneParagraphSummary = (session, insights, root) => {
+        const vals = insights?.values || {};
+        const scores = insights?.scores || {};
+        const radio = vals.radio || {};
+        const mobility = vals.mobility || {};
+        const congestion = vals.congestion || {};
+        const core = vals.core || {};
+
+        const rscp = (typeof radio.avgRscp === 'number' && !Number.isNaN(radio.avgRscp)) ? radio.avgRscp.toFixed(1) : 'N/A';
+        const ecno = (typeof radio.avgEcno === 'number' && !Number.isNaN(radio.avgEcno)) ? radio.avgEcno.toFixed(1) : 'N/A';
+
+        const radioQualityAssessment = (() => {
+            const poor = (typeof radio.avgRscp === 'number' && radio.avgRscp < -95) ||
+                (typeof radio.avgEcno === 'number' && radio.avgEcno < -14) ||
+                (typeof radio.avgUlTx === 'number' && radio.avgUlTx > 21);
+            const good = (typeof radio.avgRscp === 'number' && radio.avgRscp >= -90) &&
+                (typeof radio.avgEcno === 'number' && radio.avgEcno >= -10);
+            if (poor) return 'poor';
+            if (good) return 'good';
+            return 'marginal';
+        })();
+
+        const radioConclusion = (() => {
+            if (radioQualityAssessment === 'poor') return 'supports radio coverage/quality contribution';
+            if (radioQualityAssessment === 'good') return 'rules out coverage or interference issues';
+            return 'does not strongly confirm or exclude radio contribution';
+        })();
+
+        const keyTriggerEvent = (() => {
+            if (insights?.flags?.mobilityOverride) return 'last handover';
+            const trig = String(session?.endTrigger || '').toUpperCase();
+            if (trig.includes('RADIO_LINK_FAILURE')) return 'radio link failure';
+            if (trig.includes('IU_RELEASE')) return 'IU release';
+            if (trig.includes('RRC_CONNECTION_RELEASE')) return 'RRC release';
+            if (trig.includes('HANDOVER')) return 'handover';
+            return 'the key release event';
+        })();
+
+        const timeAfterTrigger = (() => {
+            if (typeof mobility.dropAfterHoSec === 'number' && !Number.isNaN(mobility.dropAfterHoSec) && mobility.dropAfterHoSec >= 0) {
+                return mobility.dropAfterHoSec.toFixed(1);
+            }
+            return 'N/A';
+        })();
+
+        const interpretation = (() => {
+            if (insights?.flags?.mobilityOverride) return 'post-handover instability';
+            if (root?.topDomain === 'Radio Coverage / Quality') return 'radio degradation near call end';
+            if (root?.topDomain === 'Congestion') return 'resource pressure at release';
+            if (root?.topDomain === 'Core Network') return 'core-side release despite acceptable radio';
+            return 'a mixed set of contributing indicators';
+        })();
+
+        const finalClassification = (() => {
+            if (root?.topDomain === 'Mobility') return 'Mobility-related drop';
+            if (root?.topDomain === 'Radio Coverage / Quality') return 'Radio-related drop';
+            if (root?.topDomain === 'Congestion') return 'Congestion-related drop';
+            if (root?.topDomain === 'Core Network') return 'Core-network-related drop';
+            return 'Undetermined drop';
+        })();
+
+        const excluded = [];
+        if ((scores.radio || 0) === 0) excluded.push('radio degradation');
+        if ((scores.mobility || 0) === 0) excluded.push('mobility instability');
+        if ((scores.congestion || 0) === 0) excluded.push('congestion/resource pressure');
+        if ((scores.core || 0) === 0) excluded.push('core network release');
+        const excludedDomains = excluded.length ? excluded.join(' or ') : 'major alternative domains';
+
+        const primaryRootCause = root?.topDomain || 'Undetermined';
+        const confidence = Number.isFinite(root?.confidence) ? root.confidence : 0;
+
+        return 'The call was successfully established and subsequently dropped due to ' + primaryRootCause +
+            '. The drop occurred ' + timeAfterTrigger + ' seconds after ' + keyTriggerEvent +
+            ', indicating ' + interpretation +
+            '. Radio conditions prior to the drop were ' + radioQualityAssessment +
+            ' (RSCP ' + rscp + ' dBm, Ec/No ' + ecno + ' dB), which ' + radioConclusion +
+            '. No evidence of ' + excludedDomains +
+            ' was observed during the call. The drop is therefore classified as ' + finalClassification +
+            ' with ' + confidence + '% confidence.';
+    };
+
+    const buildPostHoLikelyCauses = (insights, root) => {
+        const mobilityLikely = !!(insights?.flags?.mobilityOverride || (insights?.scores?.mobility || 0) > 0 || root?.topDomain === 'Mobility');
+        if (!mobilityLikely) return '';
+        const causes = [
+            'HO hysteresis too low',
+            'Time-to-trigger too short',
+            'Overlapping coverage imbalance',
+            'Pilot pollution',
+            'Missing or wrong neighbor ranking'
+        ];
+        return '' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Likely Root Causes (Post-Handover Instability)</div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">' +
+            causes.map(c => '<div style="margin-bottom:4px;">- ' + c + '</div>').join('') +
+            '  </div>' +
+            '</div>';
+    };
+
+    const buildDropEventTimeline = (log, session) => {
+        const points = Array.isArray(log?.points) ? log.points : [];
+        const endMs = parseSessionTimeToMs(session?.endTime || session?.startTime);
+        if (Number.isNaN(endMs)) return [];
+        const events = points.filter(p => {
+            const t = parseSessionTimeToMs(p?.time);
+            if (Number.isNaN(t)) return false;
+            const isEvt = p?.type === 'EVENT' || p?.event || p?.message;
+            return isEvt && Math.abs(t - endMs) <= 15000;
+        }).map(p => {
+            const t = parseSessionTimeToMs(p.time);
+            return {
+                time: p.time,
+                deltaSec: ((t - endMs) / 1000).toFixed(1),
+                label: [p?.event, p?.message, p?.properties?.Event, p?.properties?.Message].filter(Boolean)[0] || 'Event'
+            };
+        }).sort((a, b) => parseFloat(a.deltaSec) - parseFloat(b.deltaSec));
+        return events.slice(0, 10);
+    };
+
+    const renderDropAnalysis = (log, session) => {
+        ensureDropAnalysisModal();
+        const titleEl = document.getElementById('dropAnalysisTitle');
+        const bodyEl = document.getElementById('dropAnalysisBody');
+        if (!titleEl || !bodyEl) return;
+
+        const reasonLabel = session?.failureReason?.label || '-';
+        const reasonCause = session?.failureReason?.cause || '-';
+        const endType = session?.endType || '-';
+        const endTrigger = session?.endTrigger || '-';
+        const rrcTrail = (session?.rrcStates || []).map(x => x.state).filter(Boolean).join(' -> ') || '-';
+        const duration = typeof session?.durationMs === 'number' ? (session.durationMs / 1000).toFixed(1) + ' s' : '-';
+        const insights = buildDropInsights(log, session);
+        const root = deriveDropRootCause(insights);
+        const oneParagraph = buildDropOneParagraphSummary(session, insights, root);
+        const likelyPostHoHtml = buildPostHoLikelyCauses(insights, root);
+        const timeline = buildDropEventTimeline(log, session);
+        const v = insights.values || {};
+        const fmtNum = (x, unit) => (typeof x === 'number' && !Number.isNaN(x)) ? (x.toFixed(1) + (unit ? (' ' + unit) : '')) : 'N/A';
+        const yn = (val) => val
+            ? '<span style="color:#f87171; font-weight:600;">Yes</span>'
+            : '<span style="color:#22c55e; font-weight:600;">No</span>';
+        const miniTrendSvg = buildMiniTrendSvg(
+            v.radio?.rscpSeries10s,
+            v.radio?.ecnoSeries10s,
+            v.radio?.freqSeries10s,
+            v.radio?.cellNameSeries10s,
+            v.radio?.markerEvents10s
+        );
+        const timelineHtml = timeline.length
+            ? timeline.map(e => '<div style="margin-bottom:3px;">[' + e.deltaSec + 's] ' + e.time + ' - ' + e.label + '</div>').join('')
+            : '<div style="color:#9ca3af;">No nearby event timeline found (±15s).</div>';
+
+        titleEl.textContent = 'Drop Call Analysis - ' + (session?.sessionId || 'Session');
+        bodyEl.innerHTML =
+            '<div style="display:grid; grid-template-columns: 180px 1fr; gap:8px; font-size:12px; margin-bottom:10px;">' +
+            '  <div style="color:#93c5fd;">Log</div><div>' + (log?.name || '-') + '</div>' +
+            '  <div style="color:#93c5fd;">Session</div><div>' + (session?.sessionId || '-') + '</div>' +
+            '  <div style="color:#93c5fd;">Call ID</div><div>' + (session?.callTransactionId || '-') + '</div>' +
+            '  <div style="color:#93c5fd;">Window</div><div>' + (session?.startTime || '-') + ' → ' + (session?.endTime || '-') + ' (' + duration + ')</div>' +
+            '  <div style="color:#93c5fd;">Drop Trigger</div><div>' + endTrigger + '</div>' +
+            '  <div style="color:#93c5fd;">End Type</div><div>' + endType + '</div>' +
+            '  <div style="color:#93c5fd;">Failure Reason</div><div>' + reasonLabel + '</div>' +
+            '  <div style="color:#93c5fd;">Cause</div><div>' + reasonCause + '</div>' +
+            '</div>' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Root-Cause Summary</div>' +
+            '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;">' + root.summary + '</div>' +
+            '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;">Primary domain: <b>' + root.topDomain + '</b> | Confidence: <b>' + root.confidence + '%</b></div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">Recommendations:<br>- ' + root.recommendations.join('<br>- ') + '</div>' +
+            '</div>' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">One-Paragraph Summary</div>' +
+            '  <div style="font-size:12px; color:#d1d5db; line-height:1.5;">' + oneParagraph + '</div>' +
+            '</div>' +
+            likelyPostHoHtml +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">RRC Evolution</div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">' + rrcTrail + '</div>' +
+            '</div>' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Radio Context Near Drop</div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">' + summarizeDropRadio(session) + '</div>' +
+            '</div>' +
+            '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-top:10px;">' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Event Timeline Around Drop</div>' +
+            '  <div style="font-size:12px; color:#d1d5db;">' + timelineHtml + '</div>' +
+            '</div>' +
+            '<div style="margin-top:10px;">' +
+            renderInsightBlock(
+                '1) Radio Coverage / Quality',
+                insights.radioFindings,
+                'Checks weak coverage/interference behavior using 10s RSCP/EcNo trend, UL budget, and BLER/FER dynamics before drop.',
+                [
+                    'Avg RSCP (last samples): ' + fmtNum(v.radio?.avgRscp, 'dBm') + ' | Threshold: < -95 dBm',
+                    'Avg Ec/No (last samples): ' + fmtNum(v.radio?.avgEcno, 'dB') + ' | Threshold: < -14 dB',
+                    'RSCP trend over 10s: ' + fmtNum(v.radio?.rscpDrop10s, 'dB') + ' (negative means dropping) | Continuous drop: ' + yn(v.radio?.rscpContinuouslyDropping),
+                    'Ec/No trend over 10s: ' + fmtNum(v.radio?.ecnoDrop10s, 'dB') + ' (negative means dropping) | Continuous drop: ' + yn(v.radio?.ecnoContinuouslyDropping),
+                    'Cell-edge behavior: ' + (v.radio?.suddenCellEdgeBehavior ? 'Detected' : 'Not detected'),
+                    'Pattern check: Good RSCP + bad Ec/No = ' + yn(v.radio?.goodRscpBadEcno) + ' (interference likely) | Both bad = ' + yn(v.radio?.bothBad) + ' (weak coverage likely)',
+                    'UL Tx Power: Avg ' + fmtNum(v.radio?.avgUlTx, 'dBm') + ', Latest ' + fmtNum(v.radio?.latestUlTx, 'dBm') + ' | UL-limited (>21 dBm): ' + yn(v.radio?.ulLimited),
+                    'BLER/FER near drop: BLER end ' + fmtNum(v.radio?.blerEnd, '%') + ', FER end ' + fmtNum(v.radio?.ferEnd, '%') + ' | Rising=' + yn((v.radio?.risingBler || v.radio?.risingFer)) + ', Spike=' + yn((v.radio?.blerSpike || v.radio?.ferSpike)),
+                    'RLF occurred: ' + yn(v.radio?.rlfOccurred)
+                ],
+                '<div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">RSCP / EcNo Mini Trend (Last 10s)</div>' + miniTrendSvg
+            ) +
+            renderInsightBlock(
+                '2) Mobility',
+                insights.mobilityFindings,
+                'Checks if handover instability triggered the call drop.',
+                [
+                    'Drop time after last HO: ' + (typeof v.mobility?.dropAfterHoSec === 'number' ? v.mobility.dropAfterHoSec.toFixed(1) + ' s' : 'N/A') + ' | Rule: < 5 s',
+                    'HO failure event: ' + yn(v.mobility?.hoFailure),
+                    'Inter-RAT HO failure: ' + yn(v.mobility?.interRatHoFailure)
+                ]
+            ) +
+            renderInsightBlock(
+                '3) Congestion',
+                insights.congestionFindings,
+                'Checks whether resource pressure/capacity events likely caused release.',
+                [
+                    'RAB release (resource): ' + yn(v.congestion?.rabReleaseResource),
+                    'IU release (no resource): ' + yn(v.congestion?.iuReleaseNoResource),
+                    'Sudden power/code reduction: ' + yn(v.congestion?.suddenPowerOrCodeReduction)
+                ]
+            ) +
+            renderInsightBlock(
+                '4) Core Network',
+                insights.coreFindings,
+                'Checks whether core-side release happened despite acceptable radio context.',
+                [
+                    'MSC-initiated IU release: ' + yn(v.core?.mscInitiatedIuRelease),
+                    'Good radio before drop: ' + yn(v.core?.goodRadioBeforeDrop)
+                ]
+            ) +
+            '</div>';
+
+        document.getElementById('dropAnalysisModal').style.display = 'block';
+    };
+
+    const showCallSessionsModal = (logId) => {
+        const log = loadedLogs.find(l => l.id.toString() === logId.toString());
+        if (!log) return;
+        currentCallSessionLogId = log.id;
+        ensureCallSessionsModal();
+        renderCallSessionsTable();
+        document.getElementById('callSessionsModal').style.display = 'block';
+    };
+
+    const filterCallSessions = () => {
+        renderCallSessionsTable();
+    };
+    window.showCallSessionsModal = showCallSessionsModal;
+    window.filterCallSessions = filterCallSessions;
+
+    const findSessionAnchorPoint = (log, session, mode) => {
+        if (!log || !Array.isArray(log.points) || log.points.length === 0 || !session) return null;
+        const parseT = parseSessionTimeToMs;
+        const targetTime = session.endTime || session.startTime;
+        const targetMs = parseT(targetTime);
+
+        const isDropLikeEvent = (p) => {
+            const txt = [
+                p?.event,
+                p?.message,
+                p?.properties?.Event,
+                p?.properties?.Message
+            ].filter(Boolean).join(' ').toUpperCase();
+            return (
+                txt.includes('DROP') ||
+                txt.includes('RLF') ||
+                txt.includes('RADIO LINK FAILURE') ||
+                txt.includes('ABNORMAL') ||
+                txt.includes('CALL FAIL')
+            );
+        };
+
+        let exact = null;
+        let best = null;
+        let minDiff = Infinity;
+        let bestDropLike = null;
+        let minDropDiff = Infinity;
+
+        for (let i = 0; i < log.points.length; i++) {
+            const p = log.points[i];
+            if (!p || !p.time) continue;
+            const pMs = parseT(p.time);
+            const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
+
+            if (p.time === targetTime) {
+                exact = { point: p, index: i };
+                if (mode !== 'drop' || isDropLikeEvent(p)) break;
+            }
+            if (diff < minDiff) {
+                minDiff = diff;
+                best = { point: p, index: i };
+            }
+            if (mode === 'drop' && isDropLikeEvent(p) && diff < minDropDiff) {
+                minDropDiff = diff;
+                bestDropLike = { point: p, index: i };
+            }
+        }
+
+        if (mode === 'drop') {
+            if (exact && isDropLikeEvent(exact.point)) return exact;
+            if (bestDropLike && minDropDiff <= 15000) return bestDropLike;
+        }
+        if (exact) return exact;
+        if (best && minDiff <= 10000) return best;
+        return best || null;
+    };
+
+    const syncSessionPointToMap = (log, session, mode) => {
+        const hit = findSessionAnchorPoint(log, session, mode);
+        if (!hit || !hit.point) return;
+
+        const p = hit.point;
+        if (p.lat !== undefined && p.lng !== undefined && window.map && window.map.setView) {
+            window.map.setView([p.lat, p.lng], 17);
+        }
+
+        if (typeof window.globalSync === 'function') {
+            window.globalSync(log.id, hit.index, 'call-session');
+            return;
+        }
+
+        window.dispatchEvent(new CustomEvent('map-point-clicked', {
+            detail: { logId: log.id, point: p, source: 'call-session' }
+        }));
+    };
+
+    function renderCallSessionsTable() {
+        if (!currentCallSessionLogId) return;
+        const log = loadedLogs.find(l => l.id.toString() === currentCallSessionLogId.toString());
+        if (!log) return;
+
+        const sessions = Array.isArray(log.callSessions) ? log.callSessions : [];
+        const title = document.getElementById('callSessionsModalTitle');
+        const tbody = document.getElementById('callSessionsTableBody');
+        const summary = document.getElementById('callSessionsSummary');
+        const searchEl = document.getElementById('callSessionSearch');
+        const rrcEl = document.getElementById('callSessionRrcFilter');
+        const startEl = document.getElementById('callSessionStartFilter');
+        const endEl = document.getElementById('callSessionEndFilter');
+        if (!tbody || !summary || !rrcEl) return;
+
+        if (title) title.textContent = 'Call Sessions - ' + log.name;
+        tbody.innerHTML = '';
+
+        const rrcStates = new Set();
+        sessions.forEach(s => {
+            (s.rrcStates || []).forEach(st => {
+                if (st && st.state) rrcStates.add(st.state);
+            });
+        });
+        const sortedRrc = Array.from(rrcStates).sort();
+        const currentRrc = rrcEl.value || 'ALL';
+        rrcEl.innerHTML = '<option value="ALL">All RRC States</option>' +
+            sortedRrc.map(s => '<option value="' + s + '"' + (currentRrc === s ? ' selected' : '') + '>' + s + '</option>').join('');
+
+        const textFilter = String(searchEl?.value || '').trim().toLowerCase();
+        const rrcFilter = rrcEl.value || 'ALL';
+        const startFilterMs = parseSessionTimeToMs(startEl?.value || '');
+        const endFilterMs = parseSessionTimeToMs(endEl?.value || '');
+
+        const filtered = sessions.filter(s => {
+            const callTxt = String(s.callTransactionId || '').toLowerCase();
+            const imsiTxt = String(s.imsi || '').toLowerCase();
+            const tmsiTxt = String(s.tmsi || '').toLowerCase();
+            const sidTxt = String(s.sessionId || '').toLowerCase();
+            const textOk = !textFilter || callTxt.includes(textFilter) || imsiTxt.includes(textFilter) || tmsiTxt.includes(textFilter) || sidTxt.includes(textFilter);
+            if (!textOk) return false;
+
+            if (rrcFilter !== 'ALL') {
+                const hasRrc = (s.rrcStates || []).some(st => String(st.state || '') === rrcFilter);
+                if (!hasRrc) return false;
+            }
+
+            const sStart = parseSessionTimeToMs(s.startTime);
+            const sEnd = parseSessionTimeToMs(s.endTime);
+            if (!Number.isNaN(startFilterMs) && !Number.isNaN(sStart) && sStart < startFilterMs) return false;
+            if (!Number.isNaN(endFilterMs) && !Number.isNaN(sEnd) && sEnd > endFilterMs) return false;
+            return true;
+        });
+
+        summary.textContent = 'Showing ' + filtered.length + ' / ' + sessions.length + ' sessions';
+
+        if (filtered.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="13" style="text-align:center; padding:14px; border:1px solid #334155; color:#9ca3af;">No sessions match the filters.</td></tr>';
+            return;
+        }
+
+        filtered.forEach(s => {
+            const tr = document.createElement('tr');
+            tr.style.background = '#0f172a';
+
+            const startMs = parseSessionTimeToMs(s.startTime);
+            const endMs = parseSessionTimeToMs(s.endTime);
+            const durationSec = (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs)
+                ? ((endMs - startMs) / 1000).toFixed(1)
+                : 'N/A';
+            const rrcText = (s.rrcStates || []).map(st => st.state).filter(Boolean).join(' -> ') || 'N/A';
+            const rabCount = Array.isArray(s.rabLifecycle) ? s.rabLifecycle.length : 0;
+            const measCount = Array.isArray(s.radioMeasurementsTimeline) ? s.radioMeasurementsTimeline.length : 0;
+            const idsText = [s.imsi || '-', s.tmsi || '-'].join(' / ');
+            const endType = s.endType || '-';
+            const failureReason = s.failureReason?.label || '-';
+            const ynHtml = (val) => val
+                ? '<span style="color:#f87171; font-weight:600;">Yes</span>'
+                : '<span style="color:#22c55e; font-weight:600;">No</span>';
+            const dropText = ynHtml(!!s.drop);
+            const setupFailureText = ynHtml(!!s.setupFailure);
+
+            const td = (value) => '<td style="padding:6px; border:1px solid #334155; vertical-align:top;">' + value + '</td>';
+            tr.innerHTML =
+                td(s.sessionId || '-') +
+                td(s.callTransactionId || '-') +
+                td(idsText) +
+                td(s.startTime || '-') +
+                td(s.endTime || '-') +
+                td(durationSec) +
+                td(endType) +
+                td(failureReason) +
+                td(dropText) +
+                td(setupFailureText) +
+                td('<span title="' + rrcText + '" style="display:inline-block; max-width:260px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + rrcText + '</span>') +
+                td(String(rabCount)) +
+                td(String(measCount));
+
+            const dropCell = tr.children[8];
+            const setupCell = tr.children[9];
+            if (dropCell && s.drop) {
+                dropCell.style.cursor = 'pointer';
+                dropCell.style.color = '#fca5a5';
+                dropCell.title = 'Click to analyze drop and sync map';
+                dropCell.onclick = (e) => {
+                    e.stopPropagation();
+                    syncSessionPointToMap(log, s, 'drop');
+                    renderDropAnalysis(log, s);
+                };
+            }
+            if (setupCell && s.setupFailure) {
+                setupCell.style.cursor = 'pointer';
+                setupCell.style.color = '#fde68a';
+                setupCell.title = 'Click to sync setup-failure point on map';
+                setupCell.onclick = (e) => {
+                    e.stopPropagation();
+                    syncSessionPointToMap(log, s, 'setupFailure');
+                };
+            }
+
+            tbody.appendChild(tr);
+        });
+    }
 
     function renderSignalingTable() {
         if (!currentSignalingLogId) return;
@@ -9327,6 +10913,29 @@ document.addEventListener('DOMContentLoaded', () => {
             sigBtn.onmouseout = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
             actions.appendChild(sigBtn);
 
+            const sessionsCount = Array.isArray(log.callSessions) ? log.callSessions.length : 0;
+            if (sessionsCount > 0) {
+                const sessionsBtn = document.createElement('div');
+                sessionsBtn.className = 'metric-item';
+                sessionsBtn.style.padding = '4px 8px';
+                sessionsBtn.style.cursor = 'pointer';
+                sessionsBtn.style.margin = '2px 0';
+                sessionsBtn.style.fontSize = '11px';
+                sessionsBtn.style.color = '#d1fae5';
+                sessionsBtn.style.borderRadius = '4px';
+                sessionsBtn.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+                sessionsBtn.style.border = '1px solid rgba(16, 185, 129, 0.35)';
+                sessionsBtn.textContent = 'Show Call Sessions (' + sessionsCount + ')';
+                sessionsBtn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (window.showCallSessionsModal) window.showCallSessionsModal(log.id);
+                };
+                sessionsBtn.onmouseover = () => sessionsBtn.style.backgroundColor = 'rgba(16, 185, 129, 0.24)';
+                sessionsBtn.onmouseout = () => sessionsBtn.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+                actions.appendChild(sessionsBtn);
+            }
+
             // Add components
             body.appendChild(stats);
             body.appendChild(actions);
@@ -9341,6 +10950,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.updateLogsList = updateLogsList;
     window.openChartModal = openChartModal;
     window.showSignalingModal = showSignalingModal;
+    window.showCallSessionsModal = showCallSessionsModal;
     window.dockChart = dockChart;
     window.dockSignaling = dockSignaling;
     window.undockChart = undockChart;
@@ -9583,7 +11193,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 <b>${name}</b><br>
                 <div style="color:#888; font-size:11px; margin-top:4px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
                 <button onclick="window.removeUserPoint('${markerId}')" style="margin-top:8px; background:#ef4444; color:white; border:none; padding:2px 5px; border-radius:3px; cursor:pointer; font-size:10px;">Remove</button>
-            </div>
             `;
 
             marker.bindPopup(popupContent).openPopup();
@@ -10061,7 +11670,6 @@ window.generateManagementSummary = (d) => {
             <div class="report-block">
                 <h4>Overall Performance Status</h4>
                 <p>The cell performance is classified as <span class="${statusClass}" style="padding:2px 6px; border-radius:4px; font-weight:bold;">${status}</span>.</p>
-            </div>
 
             <div class="report-block">
                 <h4>User Impact</h4>
@@ -10069,7 +11677,6 @@ window.generateManagementSummary = (d) => {
                    Downlink user experience is <span class="${impactClass}" style="font-weight:bold;">${userExp}</span>,
                    mainly affecting <strong>${impactedService}</strong> traffic.
                 </p>
-            </div>
 
             <div class="report-block">
                 <h4>Primary Issue(s)</h4>
@@ -10081,13 +11688,11 @@ window.generateManagementSummary = (d) => {
                 <p style="margin-top:5px; font-size:0.9em; color:#bbb;">
                     <em>This issue is impacting: Data speeds, Service stability, User experience consistency.</em>
                 </p>
-            </div>
 
             <div class="report-block">
                 <h4>Network Load Assessment</h4>
                 <p>The cell is <span class="${congestionClass}" style="font-weight:bold;">${congestionStatus}</span>,</p>
                 <p>indicating that the performance issue is <strong>${issueType}</strong>.</p>
-            </div>
 
             <div class="report-block">
                 <h4>Recommended Actions</h4>
@@ -10101,7 +11706,6 @@ window.generateManagementSummary = (d) => {
                 <ul>
                     ${mediumPriority.length > 0 ? mediumPriority.map(a => '<li>' + (a) + '</li>').join('') : '<li>None required at this stage</li>'}
                 </ul>
-            </div>
 
             <div class="report-block" style="border-left: 4px solid #a29bfe; background: rgba(162, 155, 254, 0.1);">
                 <h4 style="color:#a29bfe;">EXECUTIVE CONCLUSION</h4>
@@ -10109,7 +11713,6 @@ window.generateManagementSummary = (d) => {
                     This LTE cell requires <strong>${conclusionAction.toUpperCase()}</strong> 
                     to improve customer experience and overall network efficiency.
                 </p>
-            </div>
             `;
 
     // --- 4. Display ---
@@ -10127,10 +11730,8 @@ window.showAnalysisModal = (content, title) => {
             <div class="analysis-header">
                 <h3 id="analysisModalTitle">Cell Performance Analysis Report</h3>
                 <button class="analysis-close-btn" onclick="document.querySelector('.analysis-modal-overlay').remove()">×</button>
-            </div>
             <div class="analysis-content" style="padding: 30px;" id="analysisResultBody">
                 <!-- Content Injected Here -->
-            </div>
         </div>
                 </div >
     `;
@@ -10247,7 +11848,6 @@ window.showEvent1AGrid = function (logId) {
                         <button onclick="this.closest('.event1a-modal-overlay').remove()" style="padding:6px 16px; background:#2563eb; color:white; border:none; border-radius:4px; cursor:pointer;">Close</button>
                     </div>
                 </div>
-            </div>
         `;
 
     const div = document.createElement('div');
@@ -10496,7 +12096,6 @@ function renderThroughputReport(report) {
                         </div>
                     </div>
                 </div>
-            </div>
         `;
 
     const div = document.createElement('div');
