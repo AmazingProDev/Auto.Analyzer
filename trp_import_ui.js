@@ -1,6 +1,7 @@
 (function () {
     function qs(id) { return document.getElementById(id); }
     let trpApiBase = '';
+    const API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
 
     const trpState = {
         runId: null,
@@ -12,7 +13,27 @@
         eventRows: []
     };
 
+    function readConfiguredApiBase() {
+        try {
+            if (window.API_BASE_URL && String(window.API_BASE_URL).trim()) return String(window.API_BASE_URL).trim();
+        } catch (_e) {}
+        try {
+            const fromStorage = localStorage.getItem(API_BASE_STORAGE_KEY);
+            if (fromStorage && String(fromStorage).trim()) return String(fromStorage).trim();
+        } catch (_e) {}
+        return '';
+    }
+
+    function isLikelyVercelHost() {
+        try {
+            return /\.vercel\.app$/i.test(window.location.hostname || '');
+        } catch (_e) {
+            return false;
+        }
+    }
+
     function buildApiUrl(path) {
+        if (!trpApiBase) trpApiBase = readConfiguredApiBase();
         if (!trpApiBase) return path;
         return trpApiBase.replace(/\/+$/, '') + path;
     }
@@ -97,6 +118,12 @@ function inferAltApiBase() {
             importTrpBtn.addEventListener('click', (ev) => {
                 ev.preventDefault();
                 ev.stopPropagation();
+                if (!trpApiBase) trpApiBase = readConfiguredApiBase();
+                if (isLikelyVercelHost() && !trpApiBase) {
+                    setStatus('TRP import unavailable: configure backend URL (window.API_BASE_URL or localStorage.OPTIM_API_BASE_URL).');
+                    alert('TRP import is not available on pure Vercel static hosting.\nConfigure backend base URL:\nlocalStorage.setItem("OPTIM_API_BASE_URL","https://your-backend.example.com")');
+                    return;
+                }
                 try {
                     if (typeof input.showPicker === 'function') input.showPicker();
                     else input.click();
@@ -165,6 +192,9 @@ function inferAltApiBase() {
                 if (Number.isFinite(Number(report.decodedEvents))) parts.push('events=' + report.decodedEvents);
                 if (Array.isArray(report.warnings) && report.warnings.length) parts.push('warnings=' + report.warnings.slice(0, 3).join(' | '));
                 if (parts.length) msg += '\n\nImport report: ' + parts.join(' ; ');
+            }
+            if (response && response.status === 404 && isLikelyVercelHost() && !trpApiBase) {
+                msg = 'Backend API not configured for Vercel. Set OPTIM_API_BASE_URL first.\n\n' + msg;
             }
             alert(msg);
             return;
@@ -1271,6 +1301,14 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     window.trpFetchSignals = fetchSignals;
     window.trpFetchTimeseries = fetchTimeseries;
     window.trpFetchTrack = fetchTrack;
+    window.trpBuildApiUrl = buildApiUrl;
+    window.trpGetApiBase = () => (trpApiBase || readConfiguredApiBase() || '');
+    window.setOptimApiBase = (url) => {
+        const v = String(url || '').trim().replace(/\/+$/, '');
+        trpApiBase = v;
+        try { localStorage.setItem(API_BASE_STORAGE_KEY, v); } catch (_e) {}
+        return trpApiBase;
+    };
 
     async function selectKpiMetric(name) {
         trpState.selectedMetric = name;

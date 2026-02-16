@@ -14,6 +14,38 @@ document.addEventListener('DOMContentLoaded', () => {
     window.map = map.map; // Expose Leaflet instance globally for inline onclicks
     window.mapRenderer = map; // Expose Renderer helper for debugging/verification
 
+    const buildApiUrl = (path) => {
+        if (window.trpBuildApiUrl && typeof window.trpBuildApiUrl === 'function') {
+            return window.trpBuildApiUrl(path);
+        }
+        const base = (window.API_BASE_URL || '').trim();
+        if (!base) return path;
+        return base.replace(/\/+$/, '') + path;
+    };
+
+    const isLikelyVercelHost = () => {
+        try { return /\.vercel\.app$/i.test(window.location.hostname || ''); }
+        catch (_e) { return false; }
+    };
+
+    const ensureBackendConfigured = (actionLabel) => {
+        const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
+        if (isLikelyVercelHost() && !base) {
+            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nSet it with:\nlocalStorage.setItem("OPTIM_API_BASE_URL","https://your-backend.example.com")';
+            if (fileStatus) fileStatus.textContent = 'Backend API URL not configured.';
+            alert(msg);
+            return false;
+        }
+        return true;
+    };
+
+    if (isLikelyVercelHost()) {
+        const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
+        if (!base && fileStatus) {
+            fileStatus.textContent = 'Set OPTIM_API_BASE_URL to enable TRP backend actions.';
+        }
+    }
+
     // ------------------------------
     // Dynamic SmartCare Thresholds
     // ------------------------------
@@ -668,11 +700,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearTrpDbBtn = document.getElementById('clearTrpDbBtn');
     if (clearTrpDbBtn) {
         clearTrpDbBtn.onclick = async () => {
+            if (!ensureBackendConfigured('Clear DB')) return;
             const ok = confirm('Clear all TRP data from trp_runs.db now? This cannot be undone.');
             if (!ok) return;
             clearTrpDbBtn.disabled = true;
             try {
-                const res = await fetch('/api/runs/reset-storage', { method: 'POST' });
+                const res = await fetch(buildApiUrl('/api/runs/reset-storage'), { method: 'POST' });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || data.status !== 'success') {
                     if (res.status === 404) {
@@ -13394,7 +13427,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchThroughputSummary(runId) {
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/throughput-summary');
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/throughput-summary'));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') {
             throw new Error((data && data.message) || ('HTTP ' + res.status));
@@ -13484,7 +13517,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 return (series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
             } catch (_e) {}
         }
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName));
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName)));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return (data.series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
@@ -13735,7 +13768,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     async function fetchRunSignals(runId) {
         if (driverSignalsCache.has(runId)) return driverSignalsCache.get(runId);
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/signals');
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/signals'));
         const data = await res.json();
         const rows = (res.ok && data.status === 'success') ? (data.signals || []) : [];
         driverSignalsCache.set(runId, rows);
@@ -13743,7 +13776,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchRunTimeseries(runId, signal) {
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/timeseries?signal=' + encodeURIComponent(signal));
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/timeseries?signal=' + encodeURIComponent(signal)));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return data.series || [];
@@ -13751,7 +13784,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     async function fetchRunTrack(runId) {
         if (driverTrackCache.has(runId)) return driverTrackCache.get(runId);
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/track');
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/track'));
         const data = await res.json();
         const rows = (res.ok && data.status === 'success') ? (data.track || []) : [];
         driverTrackCache.set(runId, rows);
@@ -13759,7 +13792,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchTypedEvents(runId, typeKey) {
-        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/events?type=' + encodeURIComponent(typeKey) + '&limit=8000');
+        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/events?type=' + encodeURIComponent(typeKey) + '&limit=8000'));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return data.events || [];
@@ -14675,7 +14708,7 @@ window.syncToBackend = function (siteData) {
     const status = document.getElementById('fileStatus');
     if (status) status.textContent = "Saving to Excel...";
 
-    fetch('/save_sites', {
+    fetch(buildApiUrl('/save_sites'), {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
