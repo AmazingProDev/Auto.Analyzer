@@ -120,8 +120,8 @@ function inferAltApiBase() {
                 ev.stopPropagation();
                 if (!trpApiBase) trpApiBase = readConfiguredApiBase();
                 if (isLikelyVercelHost() && !trpApiBase) {
-                    setStatus('TRP import unavailable: configure backend URL (window.API_BASE_URL or localStorage.OPTIM_API_BASE_URL).');
-                    alert('TRP import is not available on pure Vercel static hosting.\nConfigure backend base URL:\nlocalStorage.setItem("OPTIM_API_BASE_URL","https://your-backend.example.com")');
+                    setStatus('TRP import unavailable: set backend URL from the header API setting.');
+                    alert('TRP import is not available on pure Vercel static hosting.\nUse the header API setting to add your backend base URL.');
                     return;
                 }
                 try {
@@ -194,7 +194,7 @@ function inferAltApiBase() {
                 if (parts.length) msg += '\n\nImport report: ' + parts.join(' ; ');
             }
             if (response && response.status === 404 && isLikelyVercelHost() && !trpApiBase) {
-                msg = 'Backend API not configured for Vercel. Set OPTIM_API_BASE_URL first.\n\n' + msg;
+                msg = 'Backend API not configured for Vercel. Set backend URL from the header API setting first.\n\n' + msg;
             }
             alert(msg);
             return;

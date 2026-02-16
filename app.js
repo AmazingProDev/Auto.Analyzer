@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!base) return path;
         return base.replace(/\/+$/, '') + path;
     };
+    const API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
 
     const isLikelyVercelHost = () => {
         try { return /\.vercel\.app$/i.test(window.location.hostname || ''); }
@@ -31,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const ensureBackendConfigured = (actionLabel) => {
         const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
         if (isLikelyVercelHost() && !base) {
-            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nSet it with:\nlocalStorage.setItem("OPTIM_API_BASE_URL","https://your-backend.example.com")';
+            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nUse the API setting in the header and save your backend URL.';
             if (fileStatus) fileStatus.textContent = 'Backend API URL not configured.';
             alert(msg);
             return false;
@@ -42,8 +43,64 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isLikelyVercelHost()) {
         const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
         if (!base && fileStatus) {
-            fileStatus.textContent = 'Set OPTIM_API_BASE_URL to enable TRP backend actions.';
+            fileStatus.textContent = 'Set backend API URL from header API settings to enable TRP actions.';
         }
+    }
+
+    const readApiBase = () => {
+        const fromBridge = (window.trpGetApiBase && window.trpGetApiBase()) || '';
+        if (String(fromBridge).trim()) return String(fromBridge).trim();
+        try {
+            const fromStorage = localStorage.getItem(API_BASE_STORAGE_KEY);
+            if (fromStorage && String(fromStorage).trim()) return String(fromStorage).trim();
+        } catch (_e) {}
+        return (window.API_BASE_URL || '').trim();
+    };
+
+    const setApiBase = (url) => {
+        const normalized = String(url || '').trim().replace(/\/+$/, '');
+        if (window.setOptimApiBase && typeof window.setOptimApiBase === 'function') {
+            window.setOptimApiBase(normalized);
+            return normalized;
+        }
+        try {
+            if (normalized) localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
+            else localStorage.removeItem(API_BASE_STORAGE_KEY);
+        } catch (_e) {}
+        return normalized;
+    };
+
+    const apiBaseInput = document.getElementById('apiBaseInput');
+    const apiBaseSaveBtn = document.getElementById('apiBaseSaveBtn');
+    const apiBaseClearBtn = document.getElementById('apiBaseClearBtn');
+    const refreshApiBaseUi = () => {
+        if (!apiBaseInput) return;
+        const current = readApiBase();
+        apiBaseInput.value = current;
+        apiBaseInput.title = current || 'Backend API URL for TRP actions';
+    };
+    if (apiBaseInput) {
+        refreshApiBaseUi();
+    }
+    if (apiBaseSaveBtn) {
+        apiBaseSaveBtn.onclick = () => {
+            const raw = apiBaseInput ? apiBaseInput.value : '';
+            const value = String(raw || '').trim();
+            if (!value) {
+                alert('Enter a backend URL (for example: https://your-backend.example.com)');
+                return;
+            }
+            const saved = setApiBase(value);
+            refreshApiBaseUi();
+            if (fileStatus) fileStatus.textContent = 'Backend API URL saved: ' + saved;
+        };
+    }
+    if (apiBaseClearBtn) {
+        apiBaseClearBtn.onclick = () => {
+            setApiBase('');
+            refreshApiBaseUi();
+            if (fileStatus) fileStatus.textContent = 'Backend API URL cleared.';
+        };
     }
 
     // ------------------------------
