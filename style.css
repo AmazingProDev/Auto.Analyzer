@@ -401,7 +401,16 @@ input[type="file"] {
 
 @media (max-width: 1320px) {
     .api-base-settings {
-        display: none;
+        gap: 4px;
+        padding: 3px 4px;
+    }
+
+    .api-base-input {
+        width: 130px;
+    }
+
+    .header-mini-btn {
+        padding: 0 6px;
     }
 }
 

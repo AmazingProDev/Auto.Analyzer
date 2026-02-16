@@ -120,9 +120,18 @@ function inferAltApiBase() {
                 ev.stopPropagation();
                 if (!trpApiBase) trpApiBase = readConfiguredApiBase();
                 if (isLikelyVercelHost() && !trpApiBase) {
-                    setStatus('TRP import unavailable: set backend URL from the header API setting.');
-                    alert('TRP import is not available on pure Vercel static hosting.\nUse the header API setting to add your backend base URL.');
-                    return;
+                    const entered = prompt(
+                        'TRP import needs a backend API URL on Vercel.\nEnter backend base URL (example: https://your-backend.example.com)',
+                        ''
+                    );
+                    if (window.setOptimApiBase && typeof window.setOptimApiBase === 'function') {
+                        window.setOptimApiBase(entered || '');
+                    }
+                    trpApiBase = readConfiguredApiBase();
+                    if (!trpApiBase) {
+                        setStatus('TRP import unavailable: set backend URL from the header API setting.');
+                        return;
+                    }
                 }
                 try {
                     if (typeof input.showPicker === 'function') input.showPicker();

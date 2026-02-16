@@ -32,10 +32,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const ensureBackendConfigured = (actionLabel) => {
         const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
         if (isLikelyVercelHost() && !base) {
-            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nUse the API setting in the header and save your backend URL.';
-            if (fileStatus) fileStatus.textContent = 'Backend API URL not configured.';
-            alert(msg);
-            return false;
+            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nEnter it now (example: https://your-backend.example.com).';
+            const entered = prompt(msg, '');
+            const saved = setApiBase(entered || '');
+            refreshApiBaseUi();
+            if (!saved) {
+                if (fileStatus) fileStatus.textContent = 'Backend API URL not configured.';
+                return false;
+            }
+            if (fileStatus) fileStatus.textContent = 'Backend API URL saved: ' + saved;
         }
         return true;
     };
