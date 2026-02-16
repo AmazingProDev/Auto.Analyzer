@@ -257,6 +257,11 @@ class MapRenderer {
     getColor(val, metric = 'level') {
         if (val === undefined || val === null || val === 'N/A' || val === '') return '#888';
 
+        const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
+        if (rangeKey === 'discrete') {
+            return this.getDiscreteColor(val, metric);
+        }
+
         const discreteMetrics = [
             'cellId', 'cid', 'pci', 'sc', 'lac', 'serving_cell_name', 'Cell ID',
             'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name',
@@ -266,12 +271,11 @@ class MapRenderer {
             'freq', 'Freq', 'earfcn', 'EARFCN', 'uarfcn', 'UARFCN', 'channel', 'Channel'
         ];
         if (discreteMetrics.includes(metric) || metric.toLowerCase().includes('name') || metric.toLowerCase().includes('id-cell')) {
-            return this.getDiscreteColor(val);
+            return this.getDiscreteColor(val, metric);
         }
 
         // 2. Thematic Thresholds
         if (window.getThresholdKey && window.themeConfig) {
-            const rangeKey = window.getThresholdKey(metric);
             if (rangeKey) {
                 const thresholds = window.themeConfig.thresholds[rangeKey];
                 if (thresholds) {
@@ -332,11 +336,16 @@ class MapRenderer {
         return val;
     }
 
-    getDiscreteColor(val) {
+    getDiscreteColor(val, metric = '') {
         if (val === undefined || val === null || val === '' || val === 'N/A') return '#ff0000'; // RED for Invalid (Debug)
 
         // Check for Custom Overrides first
         const sVal = String(val);
+        const metricKey = String(metric || '');
+        const scopedKey = metricKey ? `${metricKey}::${sVal}` : sVal;
+        if (this.customDiscreteColors && this.customDiscreteColors[scopedKey]) {
+            return this.customDiscreteColors[scopedKey];
+        }
         if (this.customDiscreteColors && this.customDiscreteColors[sVal]) {
             return this.customDiscreteColors[sVal];
         }
@@ -393,7 +402,7 @@ class MapRenderer {
             return 4294967296 * (2097151 & h2) + (h1 >>> 0);
         };
 
-        const hash = cyrb53(str);
+        const hash = cyrb53(metricKey ? `${metricKey}:${str}` : str);
         const index = hash % palette.length;
         return palette[index];
     }
@@ -657,12 +666,12 @@ class MapRenderer {
         const validLocations = [];
         const idsCollection = new Map(); // Accumulate IDs for Legend here
         let totalValidsForMetric = 0;
-        const isIdentityMetric = (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID' ||
+        const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
+        const isIdentityMetric = (rangeKey === 'discrete' || metric === 'cellId' || metric === 'cid' || metric === 'Cell ID' ||
             metric === 'RRC State' || metric === 'Active Set Size' || metric === 'AS Event' ||
             metric === 'HO Command' || metric === 'HO Completion' ||
             metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' ||
             metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel');
-        const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
         const thresholds = (rangeKey && window.themeConfig && window.themeConfig.thresholds)
             ? window.themeConfig.thresholds[rangeKey]
             : null;
@@ -868,6 +877,64 @@ class MapRenderer {
         }
     }
 
+    renderMetricOnMap(selection) {
+        const overlayId = '__driver_metric_overlay__';
+        this.clearLayer(overlayId);
+        const points = (selection && selection.mapPoints) || [];
+        if (!points.length) return { ok: false, reason: 'no_points' };
+
+        const vals = points.map(p => Number(p.value)).filter(v => Number.isFinite(v));
+        if (!vals.length) return { ok: false, reason: 'no_numeric_values' };
+        const min = Math.min(...vals);
+        const max = Math.max(...vals);
+        const span = Math.max(1e-9, max - min);
+        const sorted = vals.slice().sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length * 0.5)];
+
+        const legend = (selection && selection.legend) || null;
+
+        const colorFor = (v) => {
+            // If a legend is provided, use bin/categorical mapping
+            if (legend && window.trpThroughputUtils && typeof window.trpThroughputUtils.classifyValueToLegend === 'function') {
+                const c = window.trpThroughputUtils.classifyValueToLegend(v, legend);
+                return c && c.color ? c.color : '#22c55e';
+            }
+            // Fallback: simple 5-band continuous ramp by min/max
+            const t = Math.max(0, Math.min(1, (Number(v) - min) / span));
+            if (t < 0.2) return '#1d4ed8';
+            if (t < 0.4) return '#0284c7';
+            if (t < 0.6) return '#22c55e';
+            if (t < 0.8) return '#f59e0b';
+            return '#ef4444';
+        };
+
+        const layerGroup = L.layerGroup();
+        const latlngs = [];
+        points.forEach(p => {
+            const lat = Number(p.lat);
+            const lon = Number(p.lon);
+            const val = Number(p.value);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(val)) return;
+            latlngs.push([lat, lon]);
+            L.circleMarker([lat, lon], {
+                radius: 4,
+                color: colorFor(val),
+                fillColor: colorFor(val),
+                fillOpacity: 0.9,
+                weight: 1,
+                pane: 'sitesPane'
+            }).bindTooltip(`${selection.label || 'Metric'}: ${val.toFixed(2)} ${selection.unit || ''}`).addTo(layerGroup);
+        });
+
+        if (!latlngs.length) return { ok: false, reason: 'no_geo_match' };
+        layerGroup.addTo(this.map);
+        this.logLayers[overlayId] = layerGroup;
+        try {
+            this.map.fitBounds(L.latLngBounds(latlngs), { padding: [20, 20] });
+        } catch (_e) {}
+        return { ok: true, stats: { min, median, max } };
+    }
+
     renderLog(log, metric = 'level', preventZoom = false) {
         // If it already exists, maybe clear first to ensure fresh render?
         this.clearLayer(log.id);
@@ -968,7 +1035,7 @@ class MapRenderer {
             }
 
             const marker = useIcon
-                ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: false })
+                ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: true })
                 : L.circleMarker([p.lat, p.lng], {
                     radius: radius,
                     color: '#fff', // White border for contrast
@@ -977,14 +1044,19 @@ class MapRenderer {
                     fillOpacity: 1,
                     pane: 'eventsPane',
                     className: 'event-marker',
-                    interactive: false
+                    interactive: true
                 });
 
             if (typeof this.layerZ === 'number') {
                 if (typeof marker.setZIndexOffset === 'function') marker.setZIndexOffset(this.layerZ);
             }
 
-            // Note: interactive disabled to allow clicking underlying DT points
+            marker.on('click', (e) => {
+                L.DomEvent.stopPropagation(e);
+                window.dispatchEvent(new CustomEvent('map-point-clicked', {
+                    detail: { logId: id, point: p, source: 'event_icon' }
+                }));
+            });
 
             layerGroup.addLayer(marker);
         });

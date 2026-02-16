@@ -1,3 +1,5 @@
+const { analyzeUmtsCallSessions } = require('./nmfCallSession');
+
 const NMFParser = {
     parse(content) {
         const lines = content.split(/\r?\n/);
@@ -551,49 +553,191 @@ const NMFParser = {
 
                 if (techId === 5) {
                     // UMTS (Tech 5)
-                    servingFreq = parseFloat(parts[7]);
-                    servingLevel = parseFloat(parts[8]); // RSCP
-                    servingSc = parts[15] !== undefined ? parseInt(parts[15]) : null;
-                    servingEcNo = parseFloat(parts[16]); // Ec/No
+                    const toNumCell = (v) => {
+                        const x = parseFloat(v);
+                        return Number.isFinite(x) ? x : null;
+                    };
+                    const toIntCell = (v) => {
+                        const x = parseInt(v, 10);
+                        return Number.isFinite(x) ? x : null;
+                    };
+                    const looksLikePlmn = (v) => /^[0-9]{5}$/.test(String(v || '').trim());
+                    const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 1;
+                    const validSc = (v) => Number.isFinite(v) && v >= 0 && v <= 512;
+                    const scanUmtsServing = (arr, sfreq) => {
+                        for (let i = 0; i < arr.length - 3; i++) {
+                            if (!looksLikePlmn(arr[i])) continue;
+                            const freq = toNumCell(arr[i + 1]);
+                            const sc = toIntCell(arr[i + 2]);
+                            if (!near(freq, sfreq) || !validSc(sc)) continue;
+                            return { sc, ecno: toNumCell(arr[i + 3]) };
+                        }
+                        return null;
+                    };
+                    const scanUmtsCellBlocks = (arr) => {
+                        const blocks = [];
+                        const seen = new Set();
+                        for (let k = 0; k < arr.length - 6; k++) {
+                            const setType = toIntCell(arr[k]);
+                            if (setType === null || setType < 0 || setType > 3) continue;
+                            const plmn = String(arr[k + 1] || '').trim();
+                            const uarfcn = toNumCell(arr[k + 2]);
+                            const psc = toIntCell(arr[k + 3]);
+                            const ecno = toNumCell(arr[k + 4]);
+                            const rscp = toNumCell(arr[k + 6]);
+                            const ok =
+                                looksLikePlmn(plmn) &&
+                                uarfcn !== null && uarfcn > 2000 &&
+                                psc !== null && psc >= 0 && psc <= 512 &&
+                                rscp !== null && rscp < -20 && rscp > -140;
+                            if (!ok) continue;
+                            const key = `${Math.round(uarfcn)}:${psc}:${setType}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            blocks.push({ setType, freq: uarfcn, psc, ecno, rscp, _k: k });
+                        }
+                        return blocks;
+                    };
+                    const scanUmtsCellBlocksFallback = (arr) => {
+                        const blocks = [];
+                        const seen = new Set();
+                        for (let k = 15; k < arr.length - 6; k += 8) {
+                            const setType = toIntCell(arr[k]);
+                            if (setType === null || setType < 0 || setType > 3) continue;
+                            const uarfcn = toNumCell(arr[k + 2]);
+                            const psc = toIntCell(arr[k + 3]);
+                            const ecno = toNumCell(arr[k + 4]);
+                            const rscp = toNumCell(arr[k + 6]);
+                            const ok =
+                                uarfcn !== null && uarfcn > 2000 &&
+                                psc !== null && psc >= 0 && psc <= 512 &&
+                                rscp !== null && rscp < -20 && rscp > -140;
+                            if (!ok) continue;
+                            const key = `${Math.round(uarfcn)}:${psc}:${setType}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            blocks.push({ setType, freq: uarfcn, psc, ecno, rscp, _k: k });
+                        }
+                        return blocks;
+                    };
+                    const labelUmtsNeighbors = (inNeighbors, sfreq, actCount, monCount) => {
+                        const cleanNeighbors = (inNeighbors || []).filter(n => !n.isServing);
+                        const rscpDesc = (a, b) => (Number(b?.rscp) || -999) - (Number(a?.rscp) || -999);
+                        const isInterFreq = (n) =>
+                            Number.isFinite(Number(n?.freq)) &&
+                            Number.isFinite(Number(sfreq)) &&
+                            Math.abs(Number(n.freq) - Number(sfreq)) >= 1;
+
+                        const activeSlots = Math.max(0, (actCount || 1) - 1);
+                        const hasMonitoredContext = Math.max(0, monCount || 0) > 0;
+
+                        const activeCandidates = [];
+                        const monitored = [];
+                        const detected = [];
+                        const unknown = [];
+
+                        for (const n of cleanNeighbors) {
+                            const st = Number.isFinite(Number(n?.setType)) ? Number(n.setType) : null;
+                            if (st === 0 || st === 1) activeCandidates.push(n);
+                            else if (st === 2) monitored.push(n);
+                            else if (st !== null && st > 2) detected.push(n);
+                            else unknown.push(n);
+                        }
+
+                        activeCandidates.sort(rscpDesc);
+                        monitored.sort(rscpDesc);
+                        detected.sort(rscpDesc);
+                        unknown.sort(rscpDesc);
+
+                        const active = activeCandidates.slice(0, activeSlots);
+                        const overflowActive = activeCandidates.slice(activeSlots);
+                        for (const n of overflowActive) {
+                            if (isInterFreq(n) || hasMonitoredContext) monitored.push(n);
+                            else detected.push(n);
+                        }
+
+                        for (const n of unknown) {
+                            if (isInterFreq(n) && hasMonitoredContext) monitored.push(n);
+                            else detected.push(n);
+                        }
+
+                        active.sort(rscpDesc);
+                        monitored.sort(rscpDesc);
+                        detected.sort(rscpDesc);
+
+                        const activeLabeled = active.slice(0, 16);
+                        const monitoredLabeled = monitored.slice(0, 16);
+                        const detectedLabeled = detected.slice(0, 16);
+
+                        activeLabeled.forEach((n, i) => {
+                            n.type = `A${i + 2}`;
+                            n.name = n.type;
+                            n.setLabel = 'Active';
+                        });
+                        monitoredLabeled.forEach((n, i) => {
+                            n.type = `M${i + 1}`;
+                            n.name = n.type;
+                            n.setLabel = 'Monitored';
+                        });
+                        detectedLabeled.forEach((n, i) => {
+                            n.type = `D${i + 1}`;
+                            n.name = n.type;
+                            n.setLabel = 'Detected';
+                        });
+
+                        return { neighbors: [...activeLabeled, ...monitoredLabeled, ...detectedLabeled] };
+                    };
+
+                    servingFreq = toNumCell(parts[7]);
+                    servingLevel = toNumCell(parts[8]); // RSCP
+                    servingSc = null;
+                    servingEcNo = null;
                     activeSetCount = parseInt(parts[5]) || 1;
                     monitoredSetCount = parseInt(parts[6]) || 0;
+                    if (servingFreq !== null && servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
+                    else if (servingFreq !== null && servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
 
-                    if (servingFreq >= 10562 && servingFreq <= 10838) servingBand = 'B1 (2100)';
-                    else if (servingFreq >= 2937 && servingFreq <= 3088) servingBand = 'B8 (900)';
-
-                    // RSSI calculation for 3G
-                    if (!isNaN(servingLevel) && !isNaN(servingEcNo)) {
-                        valRssi = servingLevel - servingEcNo;
+                    const servingMatch = scanUmtsServing(parts, servingFreq);
+                    if (servingMatch) {
+                        servingSc = servingMatch.sc;
+                        servingEcNo = servingMatch.ecno;
                     }
 
-                    // Neighbors: Robust Scanning (Tech 5)
-                    for (let k = 15; k < parts.length - 6; k++) {
-                        const type = parseInt(parts[k]);
-                        const freq = parseFloat(parts[k + 2]);
-                        const sc = parseInt(parts[k + 3]);
-                        const ecno = parseFloat(parts[k + 4]);
-                        const rscp = parseFloat(parts[k + 6]);
+                    let blocks = scanUmtsCellBlocks(parts);
+                    if (!blocks.length) {
+                        blocks = scanUmtsCellBlocksFallback(parts);
+                    }
 
-                        const isValidType = !isNaN(type) && type >= 0 && type <= 3;
-                        const isValidFreq = !isNaN(freq) && freq > 2000;
-                        const isValidSc = !isNaN(sc) && sc >= 0 && sc <= 512;
-                        const isValidRscp = !isNaN(rscp) && rscp < -20 && rscp > -140;
+                    neighbors = blocks.map((b) => {
+                        const isServing = near(b.freq, servingFreq) && validSc(servingSc) && b.psc === servingSc;
+                        return {
+                            freq: b.freq,
+                            pci: b.psc,
+                            ecno: b.ecno,
+                            rscp: b.rscp,
+                            setType: b.setType,
+                            isServing
+                        };
+                    });
 
-                        if (isValidType && isValidFreq && isValidSc && isValidRscp) {
-                            neighbors.push({
-                                freq: freq,
-                                pci: sc,
-                                ecno: ecno,
-                                rscp: rscp,
-                                setType: type
+                    if (!validSc(servingSc) && neighbors.length) {
+                        const onServingFreq = neighbors.filter((n) => near(n.freq, servingFreq));
+                        const fallbackServing = (onServingFreq.length ? onServingFreq : neighbors)
+                            .reduce((best, n) => (!best || n.rscp > best.rscp) ? n : best, null);
+                        if (fallbackServing) {
+                            servingSc = fallbackServing.pci;
+                            if (servingEcNo === null) servingEcNo = fallbackServing.ecno;
+                            neighbors.forEach((n) => {
+                                n.isServing = near(n.freq, servingFreq) && n.pci === servingSc;
                             });
-                            // Populate Serving EcNo if missing and this is serving
-                            if (Math.abs(freq - servingFreq) < 1 && sc === servingSc) {
-                                neighbors[neighbors.length - 1].isServing = true;
-                                if (isNaN(servingEcNo)) servingEcNo = ecno;
-                            }
-                            k += 8;
                         }
+                    }
+
+                    const labeled = labelUmtsNeighbors(neighbors, servingFreq, activeSetCount, monitoredSetCount);
+                    neighbors = labeled.neighbors;
+
+                    if (Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
+                        valRssi = servingLevel - servingEcNo;
                     }
                 } else if (techId === 7) {
                     // LTE/HSPA+ (Tech 7)
@@ -703,6 +847,7 @@ const NMFParser = {
 
                 point.properties['Active Set Size'] = activeSetCount;
                 point.as_size = activeSetCount;
+                point.activeSetCount = activeSetCount;
 
                 if (neighbors && neighbors.length > 0) {
                     currentNeighbors = neighbors;
@@ -717,54 +862,11 @@ const NMFParser = {
                         let prefix = 'd'; // Default Detected
                         let num = 0;
 
-                        // Use setType if available (from Tech 5 parsing)
-                        if (n.setType !== undefined) {
-                            // Correct Logic: Type 1 means Active Candidate or Intra-Freq Monitored.
-                            // Only treat as Active if we are actually IN Soft Handover (Size > 1).
-                            // If AS Size is 1, then ALL neighbors are Monitored/Detected.
-                            const isActiveCandidate = (n.setType === 0 || n.setType === 1);
-
-                            // Check if this neighbor can plausibly be in the active set
-                            // For simplicity, if AS Size > 1, we trust Type 0/1 as Active.
-                            // If AS Size == 1, we force them to Monitored.
-                            if (isActiveCandidate && activeSetCount > 1) {
-                                // Active Set
-                                const activeNeighbors = cleanNeighbors.filter(nb => (nb.setType === 0 || nb.setType === 1));
-                                // Double check: If we have more active candidates than (AS_Size - 1), 
-                                // it implies some Type 1s are actually Monitored.
-                                const maxActiveNeighbors = Math.max(0, activeSetCount - 1);
-                                const activeIdx = activeNeighbors.indexOf(n);
-
-                                if (activeIdx < maxActiveNeighbors) {
-                                    prefix = 'a';
-                                    num = activeIdx + 2; // A2, A3...
-                                } else {
-                                    // Overflow from Active candidates -> Monitored
-                                    prefix = 'm';
-                                    const overflowIdx = activeIdx - maxActiveNeighbors;
-                                    // Need to find where it sits in purely monitored list?
-                                    // Or just append it?
-                                    // Let's treat it as the "Start" of monitored list
-                                    num = overflowIdx + 1;
-                                }
-                            } else if (n.setType === 2 || isActiveCandidate) { // Fallback for Type 1 if AS=1
-                                // Monitored Set
-                                // Filter all "Monitored-like" neighbors (Type 2, plus any Demoted Type 1s)
-                                const monitoredNeighbors = cleanNeighbors.filter(nb => {
-                                    if (nb.setType === 2) return true;
-                                    if ((nb.setType === 0 || nb.setType === 1) && activeSetCount <= 1) return true;
-                                    return false;
-                                });
-                                const monitoredIdx = monitoredNeighbors.indexOf(n);
-                                prefix = 'm';
-                                num = monitoredIdx + 1; // M1, M2...
-                            } else {
-                                // Detected Set
-                                const detectedNeighbors = cleanNeighbors.filter(nb => nb.setType > 2);
-                                const detectedIdx = detectedNeighbors.indexOf(n);
-                                prefix = 'd';
-                                num = detectedIdx + 1; // D1, D2...
-                            }
+                        if (techId === 5 && typeof n.type === 'string') {
+                            const t = String(n.type).trim().toUpperCase();
+                            prefix = t.startsWith('A') ? 'a' : (t.startsWith('M') ? 'm' : 'd');
+                            const parsedNum = parseInt(t.slice(1), 10);
+                            num = Number.isFinite(parsedNum) ? parsedNum : (idx + 1);
                         } else {
                             // Fallback to old counting logic for Tech 7 or other techs
                             const numActiveNeighbors = Math.max(0, activeSetCount - 1);
@@ -784,16 +886,16 @@ const NMFParser = {
                                 prefix = 'd';
                                 num = idx - (numActiveNeighbors + monitoredSetCount) + 1; // D1, D2...
                             }
+                            if (!n.type) {
+                                n.type = prefix.toUpperCase() + num;
+                                n.name = n.type;
+                            }
                         }
 
                         // Limit valid count to avoid spam (12 max usually enough)
                         if (num > 16) return;
 
                         const keyBase = `${prefix}${num}`;
-
-                        // Inject UI Labels directly into neighbor object
-                        n.type = prefix.toUpperCase() + num; // Result: "A2", "M1"
-                        n.name = n.type;
 
                         point[`${keyBase}_rscp`] = n.rscp;
                         point[`${keyBase}_ecno`] = n.ecno;
@@ -948,6 +1050,7 @@ const NMFParser = {
         });
 
         const customMetrics = Array.from(metricSet);
+        const umtsCallAnalysis = analyzeUmtsCallSessions(content, { windowSeconds: 10 });
 
         return {
             points: measurementPoints.concat(eventPoints),
@@ -956,7 +1059,8 @@ const NMFParser = {
             tech: detectedTech,
             config: this.detected1AConfig || null,
             configHistory: this.event1AHistory || [],
-            customMetrics: customMetrics // Dynamic list based on actual file content
+            customMetrics: customMetrics, // Dynamic list based on actual file content
+            umtsCallAnalysis
         };
     }
 

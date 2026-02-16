@@ -61,12 +61,16 @@
                     class="hidden-input" aria-label="Import Log File">
                 <input type="file" id="siteInput" accept=".xlsx, .xls, .csv" class="hidden-input"
                     aria-label="Import Site Data">
+                <input type="file" id="trpImportInput" accept=".trp" class="hidden-input"
+                    aria-label="Import TRP Run">
                 <input type="file" id="shpInput" accept=".shp, .zip, .dbf, .shx, .prj, .xlsx, .xls" multiple
                     class="hidden-input" aria-label="Import Shapefile or SmartCare Data">
 
                 <!-- Action Buttons -->
                 <button id="importBtn" class="btn header-btn" title="Import Logs, Sites, or SmartCare data">📂
                     Import</button>
+                <button id="importTrpBtn" class="btn header-btn" title="Import TRP and decode KPIs/events">📥 Import TRP</button>
+                <button id="clearTrpDbBtn" class="btn header-btn" title="Clear TRP database tables">🧹 Clear DB</button>
                 <button id="exportKmlBtn" class="btn header-btn" title="Export current view to KML">🌍 Export</button>
                 <button id="spiderSmartCareBtn" class="btn header-btn" title="Draw spider lines for SmartCare grid">🕸️
                     Spider</button>
@@ -242,6 +246,8 @@
                 <div id="logsList" class="logs-list-container">
                     <div class="empty-state">No logs loaded</div>
                 </div>
+                <div id="driverViewToggleHost" class="driver-view-toggle-host"></div>
+                <div id="driverVerificationHost" class="driver-verification-host"></div>
 
                 <!-- Docked Views Container REMOVED -->
             </div>
@@ -422,7 +428,9 @@
         </div>
     </aside>
 
-    <script src="map_renderer.js?v=73"></script>
+    <script src="map_renderer.js?v=76"></script>
+    <script src="analyze_stats.js?v=2"></script>
+    <script src="metric_registry.js?v=1"></script>
     <script src="parser.js?v=63"></script>
     <!-- KML Export Choice Modal -->
     <!-- KML Export Choice Modal -->
@@ -464,7 +472,8 @@
 
     <!-- Scripts -->
     <script src="theme_config.js"></script>
-    <script src="app.js?v=v236"></script>
+    <script src="app.js?v=v241"></script>
+    <script src="trp_import_ui.js?v=11"></script>
     <!-- User Point Modal -->
     <div id="userPointModal" class="modal">
         <div class="modal-content user-point-modal-content">

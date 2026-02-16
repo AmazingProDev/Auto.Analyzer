@@ -1069,6 +1069,11 @@ body,
     margin-bottom: 10px;
 }
 
+.driver-view-toggle-host,
+.driver-verification-host {
+    display: none;
+}
+
 .logs-sidebar-flex {
     display: flex;
     flex-direction: column;

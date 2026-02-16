@@ -157,17 +157,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Fallback map click -> nearest DT point (in case markers are not clickable)
+    const getMapClickableEntries = () => {
+        const entries = [];
+        const order = window.dtLayerOrder || [];
+        const pushEntry = (entry, keyHint) => {
+            if (!entry || entry.visible === false) return;
+            if (!Array.isArray(entry.points) || entry.points.length === 0) return;
+            const logId = entry.logId ?? (typeof keyHint === 'string' ? keyHint.split('::')[0] : undefined);
+            if (logId === undefined || logId === null || String(logId).trim() === '') return;
+            entries.push(Object.assign({}, entry, { logId }));
+        };
+
+        if (window.metricLegendEntries) {
+            order.forEach(key => pushEntry(window.metricLegendEntries[key], key));
+        }
+        if (window.eventLegendEntries) {
+            Object.keys(window.eventLegendEntries).forEach(key => pushEntry(window.eventLegendEntries[key], key));
+        }
+        return entries;
+    };
+
+    // Fallback map click -> nearest DT/Event point (in case markers are not clickable)
     window.map.on('click', (e) => {
         if (window.__mapDragInProgress) return;
         try {
-            if (!window.metricLegendEntries) return;
-            const order = window.dtLayerOrder || [];
-            const entries = [];
-            order.forEach(key => {
-                const entry = window.metricLegendEntries[key];
-                if (entry && entry.visible !== false) entries.push(entry);
-            });
+            const entries = getMapClickableEntries();
             if (entries.length === 0) return;
 
             const clickPt = window.map.latLngToContainerPoint(e.latlng);
@@ -219,19 +233,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     )) {
                         return;
                     }
-                    if (!window.metricLegendEntries || !window.map) return;
+                    if (!window.map) return;
 
                     const rect = mapEl.getBoundingClientRect();
                     const x = ev.clientX - rect.left;
                     const y = ev.clientY - rect.top;
                     if (x < 0 || y < 0 || x > rect.width || y > rect.height) return;
 
-                    const order = window.dtLayerOrder || [];
-                    const entries = [];
-                    order.forEach(key => {
-                        const entry = window.metricLegendEntries[key];
-                        if (entry && entry.visible !== false) entries.push(entry);
-                    });
+                    const entries = getMapClickableEntries();
                     if (entries.length === 0) return;
 
                     const clickLatLng = window.map.containerPointToLatLng([x, y]);
@@ -275,18 +284,67 @@ document.addEventListener('DOMContentLoaded', () => {
     // ----------------------------------------------------
     // Helper to map metric names to theme keys
     window.getThresholdKey = (metric) => {
-        if (!metric) return 'level';
+        if (!metric) return 'rsrp';
         const m = metric.toLowerCase();
-        if (m.includes('qual') || m.includes('sinr') || m.includes('ecno')) return 'quality';
-        if (m.includes('throughput')) return 'throughput';
+
+        // Discrete identity metrics (Cell/Network identifiers)
+        if (m.startsWith('__info_') || m.startsWith('__derived_') || m.includes('earfcn') || m.includes('tracking area') || m.includes('tac') || m.includes('enodeb') || m.includes('physical cell') || m.includes('pci') || m === 'cellid' || m.includes('cell id') || m.includes('cellidentity')) return 'discrete';
+
+        // ---- Explicit KPI-specific legends ----
+        // RSRP
+        if (m.includes('rsrp') || m.includes('rscp') || m.includes('signallevel') || m.includes('level')) return 'rsrp';
+
+        // RSRQ
+        if (m.includes('rsrq')) return 'rsrq';
+
+        // SINR / RS-SINR
+        if (m.includes('sinr') || m.includes('rssinr')) return 'sinr';
+
+        // Throughput: split DL vs UL when possible
+        if (m.includes('throughput')) {
+            if (m.includes('downlink') || m.includes('dl')) return 'dl_throughput';
+            if (m.includes('uplink') || m.includes('ul')) return 'ul_throughput';
+            return 'throughput'; // generic fallback
+        }
+
+        // BLER
         if (m.includes('bler')) return 'bler';
-        if (m.includes('rscp') || m.includes('rsrp') || m.includes('level') || m === 'rssi' || m.includes('tx power')) return 'level';
-        return 'level'; // Default to level (RSRP/RSCP)
+
+        // ---- Throughput Drivers (LTE PHY/Scheduling) ----
+        // CQI
+        if (m.includes('cqi')) return 'cqi';
+
+        // MCS
+        if (m.includes('mcs')) return 'mcs';
+
+        // Timing Advance
+        if (m.includes('timingadvance') || m.includes('timing advance') || m === 'ta' || m.endsWith('_ta') || m.includes('_ta_')) return 'timing_advance';
+
+        // PMI
+        if (m.includes('pmi')) return 'pmi';
+
+        // Rank / Layers (incl. proxy)
+        if (m.includes('rank') || m.includes('layers') || m.includes('ri')) return 'rank_layers';
+
+        // Modulation is categorical
+        if (m.includes('modulation') || m.includes('qam') || m.includes('qpsk')) return 'discrete';
+
+        // Generic quality bucket (UMTS-like)
+        if (m.includes('qual') || m.includes('ecno')) return 'quality';
+
+        return 'rsrp';
     };
 
     // Global Theme Configuration
     window.themeConfig = {
         thresholds: {
+            'rsrp': [
+                { min: -70, max: undefined, color: '#22c55e', label: 'Excellent (>= -70 dBm)' },
+                { min: -85, max: -70, color: '#84cc16', label: 'Good (-85 to -70 dBm)' },
+                { min: -95, max: -85, color: '#eab308', label: 'Fair (-95 to -85 dBm)' },
+                { min: -105, max: -95, color: '#f97316', label: 'Poor (-105 to -95 dBm)' },
+                { min: undefined, max: -105, color: '#ef4444', label: 'Bad (< -105 dBm)' }
+            ],
             'level': [
                 { min: -70, max: undefined, color: '#22c55e', label: 'Excellent (>= -70)' },      // Green (34,197,94)
                 { min: -85, max: -70, color: '#84cc16', label: 'Good (-85 to -70)' },             // Light Green (132,204,22)
@@ -299,6 +357,36 @@ document.addEventListener('DOMContentLoaded', () => {
                 { min: -15, max: -10, color: '#eab308', label: 'Fair (-15 to -10)' },
                 { min: undefined, max: -15, color: '#ef4444', label: 'Poor (< -15)' }
             ],
+
+            'rsrq': [
+                { min: -10, max: undefined, color: '#22c55e', label: 'Excellent (>= -10 dB)' },
+                { min: -15, max: -10, color: '#84cc16', label: 'Good (-15 to -10 dB)' },
+                { min: -20, max: -15, color: '#eab308', label: 'Fair (-20 to -15 dB)' },
+                { min: undefined, max: -20, color: '#ef4444', label: 'Poor (< -20 dB)' }
+            ],
+            'sinr': [
+                { min: 20, max: undefined, color: '#22c55e', label: 'Excellent (>= 20 dB)' },
+                { min: 13, max: 20, color: '#84cc16', label: 'Good (13 to 20 dB)' },
+                { min: 0, max: 13, color: '#eab308', label: 'Fair (0 to 13 dB)' },
+                { min: -3, max: 0, color: '#f97316', label: 'Poor (-3 to 0 dB)' },
+                { min: undefined, max: -3, color: '#ef4444', label: 'Bad (< -3 dB)' }
+            ],
+                        'dl_throughput': [
+                { min: 50000, max: undefined, color: '#22c55e', label: 'Excellent (>= 50 Mbps)' },
+                { min: 20000, max: 50000, color: '#84cc16', label: 'Very Good (20–50 Mbps)' },
+                { min: 10000, max: 20000, color: '#eab308', label: 'Good (10–20 Mbps)' },
+                { min: 5000, max: 10000, color: '#f97316', label: 'Fair (5–10 Mbps)' },
+                { min: 1000, max: 5000, color: '#ef4444', label: 'Poor (1–5 Mbps)' },
+                { min: -Infinity, max: 1000, color: '#991b1b', label: 'Very Poor (< 1 Mbps)' }
+            ],
+            'ul_throughput': [
+                { min: 10000, max: undefined, color: '#22c55e', label: 'Excellent (>= 10 Mbps)' },
+                { min: 5000, max: 10000, color: '#84cc16', label: 'Very Good (5–10 Mbps)' },
+                { min: 2000, max: 5000, color: '#eab308', label: 'Good (2–5 Mbps)' },
+                { min: 1000, max: 2000, color: '#f97316', label: 'Fair (1–2 Mbps)' },
+                { min: 500, max: 1000, color: '#ef4444', label: 'Poor (0.5–1 Mbps)' },
+                { min: -Infinity, max: 500, color: '#991b1b', label: 'Very Poor (< 0.5 Mbps)' }
+            ],
             'throughput': [
                 { min: 20000, max: undefined, color: '#22c55e', label: 'Excellent (>= 20000 Kbps)' },
                 { min: 10000, max: 20000, color: '#84cc16', label: 'Good (10000-20000 Kbps)' },
@@ -310,6 +398,52 @@ document.addEventListener('DOMContentLoaded', () => {
                 { min: undefined, max: 2, color: '#22c55e', label: 'Good (< 2%)' },
                 { min: 2, max: 10, color: '#eab308', label: 'Fair (2-10%)' },
                 { min: 10, max: undefined, color: '#ef4444', label: 'Bad (> 10%)' }
+            ],
+
+            // --- Throughput Drivers & Events defaults ---
+            // CQI is typically 0..15
+            'cqi': [
+                { min: 13, max: undefined, color: '#22c55e', label: 'Excellent (13–15)' },
+                { min: 10, max: 13, color: '#84cc16', label: 'Very Good (10–12)' },
+                { min: 7, max: 10, color: '#eab308', label: 'Good (7–9)' },
+                { min: 4, max: 7, color: '#f97316', label: 'Fair (4–6)' },
+                { min: undefined, max: 4, color: '#ef4444', label: 'Poor (0–3)' }
+            ],
+
+            // MCS bins (generic LTE-style 0..31)
+            'mcs': [
+                { min: 21, max: undefined, color: '#22c55e', label: 'Very High (21–31)' },
+                { min: 16, max: 21, color: '#84cc16', label: 'High (16–20)' },
+                { min: 11, max: 16, color: '#eab308', label: 'Medium (11–15)' },
+                { min: 6, max: 11, color: '#f97316', label: 'Low (6–10)' },
+                { min: undefined, max: 6, color: '#ef4444', label: 'Very Low (0–5)' }
+            ],
+
+            // Timing Advance (index-based)
+            'timing_advance': [
+                { min: 0, max: 50, color: '#22c55e', label: 'Near (0–50)' },
+                { min: 50, max: 200, color: '#84cc16', label: 'Mid (51–200)' },
+                { min: 200, max: 500, color: '#eab308', label: 'Far (201–500)' },
+                { min: 500, max: 900, color: '#f97316', label: 'Very Far (501–900)' },
+                { min: 900, max: undefined, color: '#ef4444', label: 'Extreme (>= 901)' }
+            ],
+
+            // PMI (ordinal-ish). Defaults can be adjusted by user.
+            'pmi': [
+                { min: 12, max: undefined, color: '#22c55e', label: 'High' },
+                { min: 8, max: 12, color: '#84cc16', label: 'Medium-High' },
+                { min: 4, max: 8, color: '#eab308', label: 'Medium' },
+                { min: 1, max: 4, color: '#f97316', label: 'Low' },
+                { min: undefined, max: 1, color: '#ef4444', label: 'Very Low' }
+            ],
+
+            // Rank/Layers (1..4). Rendered as thresholds for consistent UI.
+            'rank_layers': [
+                { min: 4, max: undefined, color: '#22c55e', label: 'Rank 4' },
+                { min: 3, max: 4, color: '#84cc16', label: 'Rank 3' },
+                { min: 2, max: 3, color: '#eab308', label: 'Rank 2' },
+                { min: 1, max: 2, color: '#f97316', label: 'Rank 1' },
+                { min: undefined, max: 1, color: '#ef4444', label: 'Unknown/0' }
             ]
 
         }
@@ -528,6 +662,58 @@ document.addEventListener('DOMContentLoaded', () => {
             e.preventDefault();
             const modal = document.getElementById('importModal');
             if (modal) modal.style.display = 'block';
+        };
+    }
+
+    const clearTrpDbBtn = document.getElementById('clearTrpDbBtn');
+    if (clearTrpDbBtn) {
+        clearTrpDbBtn.onclick = async () => {
+            const ok = confirm('Clear all TRP data from trp_runs.db now? This cannot be undone.');
+            if (!ok) return;
+            clearTrpDbBtn.disabled = true;
+            try {
+                const res = await fetch('/api/runs/reset-storage', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.status !== 'success') {
+                    if (res.status === 404) {
+                        throw new Error('Endpoint /api/runs/reset-storage not found. Restart backend from the updated Optim_Analyzer folder.');
+                    }
+                    throw new Error((data && data.message) || ('HTTP ' + res.status));
+                }
+
+                const removedLogIds = loadedLogs.filter(l => l && l.trpRunId).map(l => String(l.id));
+                if (map && typeof map.removeLogLayer === 'function') {
+                    removedLogIds.forEach(id => map.removeLogLayer(id));
+                }
+                const kept = loadedLogs.filter(l => !(l && l.trpRunId));
+                loadedLogs.length = 0;
+                kept.forEach(l => loadedLogs.push(l));
+
+                if (driverSignalsCache && typeof driverSignalsCache.clear === 'function') driverSignalsCache.clear();
+                if (driverTrackCache && typeof driverTrackCache.clear === 'function') driverTrackCache.clear();
+
+                if (window.metricLegendEntries) {
+                    Object.keys(window.metricLegendEntries).forEach(key => {
+                        const e = window.metricLegendEntries[key];
+                        if (e && removedLogIds.includes(String(e.logId))) delete window.metricLegendEntries[key];
+                    });
+                }
+                if (window.eventLegendEntries) {
+                    Object.keys(window.eventLegendEntries).forEach(key => {
+                        const e = window.eventLegendEntries[key];
+                        if (e && removedLogIds.includes(String(e.logId))) delete window.eventLegendEntries[key];
+                    });
+                }
+
+                if (typeof updateLogsList === 'function') updateLogsList();
+                if (typeof window.updateDTLayersSidebar === 'function') window.updateDTLayersSidebar();
+                if (typeof window.updateLegend === 'function') window.updateLegend();
+                if (fileStatus) fileStatus.textContent = 'TRP database file and uploads folder were reset.';
+            } catch (err) {
+                alert('Failed to clear TRP DB: ' + (err && err.message ? err.message : err));
+            } finally {
+                clearTrpDbBtn.disabled = false;
+            }
         };
     }
 
@@ -896,7 +1082,15 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.appendChild(menu);
 
         // Map Click Handler (add overlay metric layer, keep existing)
-        menu.querySelector('#menu-map-' + (layerId)).onclick = () => {
+        menu.querySelector('#menu-map-' + (layerId)).onclick = async () => {
+            if (type === 'driver_entry') {
+                await openDriverEntryInView(log, String(metric || ''), 'map');
+                menu.remove();
+                return;
+            }
+            if (log.trpRunId && window.prepareTrpMetric) {
+                await window.prepareTrpMetric(layerId, metric);
+            }
             if (window.addMetricLegendLayer) {
                 window.addMetricLegendLayer(log, metric);
             }
@@ -904,13 +1098,29 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         // Grid Click Handler
-        menu.querySelector('#menu-grid-' + (layerId)).onclick = () => {
+        menu.querySelector('#menu-grid-' + (layerId)).onclick = async () => {
+            if (type === 'driver_entry') {
+                await openDriverEntryInView(log, String(metric || ''), 'grid');
+                menu.remove();
+                return;
+            }
+            if (log.trpRunId && window.prepareTrpMetric) {
+                await window.prepareTrpMetric(layerId, metric);
+            }
             window.openGridModal(log, metric);
             menu.remove();
         };
 
         // Chart Click Handler
-        menu.querySelector('#menu-chart-' + (layerId)).onclick = () => {
+        menu.querySelector('#menu-chart-' + (layerId)).onclick = async () => {
+            if (type === 'driver_entry') {
+                await openDriverEntryInView(log, String(metric || ''), 'chart');
+                menu.remove();
+                return;
+            }
+            if (log.trpRunId && window.prepareTrpMetric) {
+                await window.prepareTrpMetric(layerId, metric);
+            }
             window.openChartModal(log, metric);
             menu.remove();
         };
@@ -1939,6 +2149,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!log || !Array.isArray(log.callSessions) || !Array.isArray(log.points)) return [];
         const droppedSessions = log.callSessions.filter(s => {
             if (!s) return false;
+            const isUmtsCall = s?._source === 'umts' && s?.kind === 'UMTS_CALL';
+            if (!isUmtsCall) return false;
             if (s.drop === true) return true;
             const et = String(s.endType || '').toUpperCase();
             return et === 'DROP' || et.includes('ABNORMAL') || et.includes('RLF') || et.includes('UNEXPECTED_IDLE');
@@ -1947,26 +2159,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const result = [];
         droppedSessions.forEach((s) => {
-            const targetTime = s.endTime || s.startTime;
-            const targetMs = parsePointTimeMs(targetTime);
-            let best = null;
-            let minDiff = Infinity;
-
-            for (let i = 0; i < log.points.length; i++) {
-                const p = log.points[i];
-                if (!p || !p.time) continue;
-                const pMs = parsePointTimeMs(p.time);
-                const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
-                if (p.time === targetTime) {
-                    best = p;
-                    minDiff = 0;
-                    break;
-                }
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    best = p;
-                }
-            }
+            const hit = (typeof findSessionAnchorPoint === 'function')
+                ? findSessionAnchorPoint(log, s, 'drop')
+                : null;
+            const best = hit?.point || null;
 
             if (best) {
                 const mergedProps = Object.assign({}, best.properties || {}, {
@@ -2029,33 +2225,97 @@ document.addEventListener('DOMContentLoaded', () => {
         return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
     };
 
+    const distanceMeters = (aLat, aLng, bLat, bLng) => {
+        if (![aLat, aLng, bLat, bLng].every(v => Number.isFinite(Number(v)))) return Infinity;
+        const rad = Math.PI / 180;
+        const dLat = (Number(bLat) - Number(aLat)) * rad;
+        const dLng = (Number(bLng) - Number(aLng)) * rad;
+        const lat1 = Number(aLat) * rad;
+        const lat2 = Number(bLat) * rad;
+        const sinDLat = Math.sin(dLat / 2);
+        const sinDLng = Math.sin(dLng / 2);
+        const aa = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLng * sinDLng;
+        return 6371000 * (2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa)));
+    };
+
+    const getSessionModeFromMapPoint = (point) => {
+        if (!point) return null;
+        if (point.setupFailure === true) return 'setupFailure';
+        if (point.drop === true) return 'drop';
+        const evt = String(point.event || point.message || point.type || '').toLowerCase();
+        const endType = String(point.endType || point?.properties?.['End Type'] || '').toLowerCase();
+        if (evt.includes('setup failure') || evt.includes('call fail') || endType.includes('call_setup_failure')) return 'setupFailure';
+        if (evt.includes('drop') || endType === 'drop' || endType.includes('abnormal')) return 'drop';
+        return null;
+    };
+
+    const findUmtsFailedSessionFromPoint = (log, point, mode) => {
+        if (!log || !point || !Array.isArray(log.callSessions) || (mode !== 'drop' && mode !== 'setupFailure')) return null;
+        const isDrop = mode === 'drop';
+        const candidates = log.callSessions.filter(s =>
+            s &&
+            s._source === 'umts' &&
+            s.kind === 'UMTS_CALL' &&
+            (isDrop ? !!s.drop : !!s.setupFailure)
+        );
+        if (candidates.length === 0) return null;
+
+        const pointSessionId = String(point.sessionId || point?.properties?.['Session ID'] || '').trim();
+        if (pointSessionId) {
+            const bySession = candidates.find(s => String(s.sessionId || '').trim() === pointSessionId);
+            if (bySession) return bySession;
+        }
+
+        const pointCallId = String(
+            point.callId ??
+            point.callTransactionId ??
+            point?.properties?.['Call ID'] ??
+            point?.properties?.['Call Id'] ??
+            ''
+        ).trim();
+        if (pointCallId) {
+            const byCallId = candidates.find(s => String(s.callId ?? s.callTransactionId ?? '').trim() === pointCallId);
+            if (byCallId) return byCallId;
+        }
+
+        const clickedTs = parsePointTimeMs(point.time || point.timestamp || point.ts || point?.properties?.Time);
+        let best = null;
+        let bestScore = Infinity;
+        for (const s of candidates) {
+            const hit = (typeof findSessionAnchorPoint === 'function') ? findSessionAnchorPoint(log, s, mode) : null;
+            const anchor = hit?.point;
+            if (!anchor) continue;
+            if (point.id !== undefined && anchor.id !== undefined && String(point.id) === String(anchor.id)) return s;
+
+            const tAnchor = parsePointTimeMs(anchor.time || anchor.timestamp || anchor.ts || anchor?.properties?.Time);
+            const timeDiff = (Number.isFinite(clickedTs) && Number.isFinite(tAnchor)) ? Math.abs(clickedTs - tAnchor) : Infinity;
+            const geoDiff = distanceMeters(point.lat, point.lng, anchor.lat, anchor.lng);
+            const score = Math.min(timeDiff, geoDiff * 100);
+            if (score < bestScore) {
+                bestScore = score;
+                best = { session: s, timeDiff, geoDiff };
+            }
+        }
+
+        if (!best) return null;
+        if (best.timeDiff <= 3000 || best.geoDiff <= 40) return best.session;
+        return null;
+    };
+
     window.getCallSetupFailurePoints = (log) => {
         if (!log || !Array.isArray(log.callSessions) || !Array.isArray(log.points)) return [];
-        const failedSessions = log.callSessions.filter(s => s && (s.setupFailure || String(s.endType || '').toUpperCase() === 'CALL_SETUP_FAILURE'));
+        const failedSessions = log.callSessions.filter(s => s &&
+            s?._source === 'umts' &&
+            s?.kind === 'UMTS_CALL' &&
+            (s.setupFailure || String(s.endType || '').toUpperCase() === 'CALL_SETUP_FAILURE'));
         if (failedSessions.length === 0) return [];
 
         const result = [];
         failedSessions.forEach((s) => {
-            const targetTime = s.endTime || s.startTime;
-            const targetMs = parsePointTimeMs(targetTime);
-            let best = null;
-            let minDiff = Infinity;
-
-            for (let i = 0; i < log.points.length; i++) {
-                const p = log.points[i];
-                if (!p || !p.time) continue;
-                const pMs = parsePointTimeMs(p.time);
-                const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
-                if (p.time === targetTime) {
-                    best = p;
-                    minDiff = 0;
-                    break;
-                }
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    best = p;
-                }
-            }
+            const hit = (typeof findSessionAnchorPoint === 'function')
+                ? findSessionAnchorPoint(log, s, 'setupFailure')
+                : null;
+            const best = hit?.point || null;
 
             if (best) {
                 const mergedProps = Object.assign({}, best.properties || {}, {
@@ -2114,6 +2374,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             title: 'Call Drops',
                             iconUrl: 'icons/3g_dropcall.png',
                             count: log.events.length,
+                            logId: log.id,
+                            points: log.events,
                             layerId: layerId,
                             visible: true
                         };
@@ -2136,6 +2398,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             title: 'Drop Call',
                             iconUrl: 'icons/3g_dropcall.png',
                             count: drops.length,
+                            logId: log.id,
+                            points: drops,
                             layerId: layerId,
                             visible: true
                         };
@@ -2158,6 +2422,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             title: 'Call Failure',
                             iconUrl: 'icons/3G_CallFailure.png',
                             count: fails.length,
+                            logId: log.id,
+                            points: fails,
                             layerId: layerId,
                             visible: true
                         };
@@ -2180,6 +2446,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             title: 'Handover Failure',
                             iconUrl: 'icons/HOF.png',
                             count: hofs.length,
+                            logId: log.id,
+                            points: hofs,
                             layerId: layerId,
                             visible: true
                         };
@@ -3388,6 +3656,9 @@ document.addEventListener('DOMContentLoaded', () => {
     window.handleLegendDiscreteColorChange = (metric, val, newColor, layerId) => {
         if (!window.mapRenderer) return;
         if (!window.mapRenderer.customDiscreteColors) window.mapRenderer.customDiscreteColors = {};
+        const scopedKey = `${String(metric || '')}::${String(val)}`;
+        window.mapRenderer.customDiscreteColors[scopedKey] = newColor;
+        // Backward compatibility for older entries that used value-only keys
         window.mapRenderer.customDiscreteColors[String(val)] = newColor;
 
         // Re-render only the target layer
@@ -3501,7 +3772,7 @@ document.addEventListener('DOMContentLoaded', () => {
         log.currentParam = metric;
 
         window.metricLegendEntries[key] = {
-            title: metric,
+            title: (log.trpMetricLabels && log.trpMetricLabels[metric]) ? log.trpMetricLabels[metric] : metric,
             metric: metric,
             layerId: layerId,
             logId: log.id,
@@ -3694,23 +3965,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 const sectBody = document.createElement('div');
                 sectBody.setAttribute('style', 'padding:5px; background:rgba(0,0,0,0.2);');
 
-                if (metric === 'cellId' || metric === 'cid' || metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
+                const isDiscreteLegend = (window.getThresholdKey && window.getThresholdKey(metric) === 'discrete');
+
+                if (isDiscreteLegend || metric === 'cellId' || metric === 'cid' || metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
                     const ids = statsObj.activeMetricIds || [];
-                    const sortedIds = ids.slice().sort((a, b) => (stats.get(b) || 0) - (stats.get(a) || 0));
+                    let sortedIds;
+                    if (entry.__discreteCounts && entry.__discreteCounts.size > 0) {
+                        sortedIds = Array.from(entry.__discreteCounts.entries())
+                            .sort((a, b) => b[1] - a[1])
+                            .map(([k]) => k);
+                    } else {
+                        sortedIds = ids.slice().sort((a, b) => (stats.get(b) || 0) - (stats.get(a) || 0));
+                    }
                     if (sortedIds.length > 0) {
                         let html = '<div style="display:flex; flex-direction:column; gap:4px;">';
                         sortedIds.slice(0, 50).forEach(id => {
-                            const color = renderer.getDiscreteColor(id);
+                            const color = renderer.getDiscreteColor(id, metric);
                             let name = id;
                             if (window.mapRenderer && window.mapRenderer.siteIndex && window.mapRenderer.siteIndex.byId) {
                                 const site = window.mapRenderer.siteIndex.byId.get(id);
                                 if (site) name = site.cellName || site.name || id;
                             }
-                            const count = stats.get(id) || 0;
+                            const count = (entry.__discreteCounts && entry.__discreteCounts.get(String(id)) !== undefined) ? entry.__discreteCounts.get(String(id)) : (stats.get(id) || 0);
+                            const total = (entry.__discreteTotal && entry.__discreteTotal > 0) ? entry.__discreteTotal : (entry.points ? entry.points.length : 0);
+                            const pct = (total > 0) ? (count / total * 100) : 0;
                             html += '<div class="legend-row">\n' +
                                 '                                <input type="color" value="' + (color) + '" class="legend-color-input" onchange="window.handleLegendDiscreteColorChange(\'' + (metric) + '\', \'' + (id) + '\', this.value, \'' + (log.id) + '\')">\n' +
                                 '                                <span class="legend-label">' + (name) + '</span>\n' +
-                                '                                <span class="legend-count">' + (count) + '</span>\n' +
+                                '                                <span class="legend-count">' + (count) + ' (' + (pct.toFixed(1)) + '%)</span>\n' +
                                 '                            </div>';
                         });
                         if (sortedIds.length > 50) html += '<div style="font-size:10px; color:#888; text-align:center; padding: 4px;">+ ' + (sortedIds.length - 50) + ' more...</div>';
@@ -3771,23 +4053,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 const sectBody = document.createElement('div');
                 sectBody.setAttribute('style', 'padding:5px; background:rgba(0,0,0,0.2);');
 
-                if (metric === 'cellId' || metric === 'cid' || metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
-                    const ids = statsObj.activeMetricIds || [];
+                const isDiscreteLegend = (window.getThresholdKey && window.getThresholdKey(metric) === 'discrete');
+
+                if (isDiscreteLegend || metric === 'cellId' || metric === 'cid' || metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
+                    
+let ids = statsObj.activeMetricIds || [];
+// For TRP identifier metrics (__info_*), compute unique values directly from points if renderer stats didn't populate ids
+if (isDiscreteLegend && (!ids || ids.length === 0)) {
+    const counts = new Map();
+    const pts = entry.points || [];
+    for (let i = 0; i < pts.length; i++) {
+        const v = pts[i] ? pts[i][metric] : undefined;
+        if (v === undefined || v === null || v === '') continue;
+        const keyv = String(v);
+        counts.set(keyv, (counts.get(keyv) || 0) + 1);
+    }
+    ids = Array.from(counts.keys());
+    // Replace stats map with counts for rendering
+    if (counts.size > 0) {
+        // stats is a const above; create a local accessor
+        entry.__discreteCounts = counts;
+        entry.__discreteTotal = Array.from(counts.values()).reduce((a,b)=>a+b,0);
+    }
+}
                     const sortedIds = ids.slice().sort((a, b) => (stats.get(b) || 0) - (stats.get(a) || 0));
                     if (sortedIds.length > 0) {
                         let html = '<div style="display:flex; flex-direction:column; gap:4px;">';
                         sortedIds.slice(0, 50).forEach(id => {
-                            const color = renderer.getDiscreteColor(id);
+                            const color = renderer.getDiscreteColor(id, metric);
                             let name = id;
                             if (window.mapRenderer && window.mapRenderer.siteIndex && window.mapRenderer.siteIndex.byId) {
                                 const site = window.mapRenderer.siteIndex.byId.get(id);
                                 if (site) name = site.cellName || site.name || id;
                             }
-                            const count = stats.get(id) || 0;
+                            const count = (entry.__discreteCounts && entry.__discreteCounts.get(String(id)) !== undefined) ? entry.__discreteCounts.get(String(id)) : (stats.get(id) || 0);
+                            const totalDiscrete = (entry.__discreteTotal && entry.__discreteTotal > 0)
+                                ? entry.__discreteTotal
+                                : (Array.isArray(entry.points) ? entry.points.length : 0);
+                            const pct = totalDiscrete > 0 ? ((count / totalDiscrete) * 100) : 0;
                             html += '<div class="legend-row">\n' +
                                 '                                <input type="color" value="' + (color) + '" class="legend-color-input" onchange="window.handleLegendDiscreteColorChange(\'' + (metric) + '\', \'' + (id) + '\', this.value, \'' + (entry.layerId) + '\')">\n' +
                                 '                                <span class="legend-label">' + (name) + '</span>\n' +
-                                '                                <span class="legend-count">' + (count) + '</span>\n' +
+                                '                                <span class="legend-count">' + (count) + ' (' + (pct.toFixed(1)) + '%)</span>\n' +
                                 '                            </div>';
                         });
                         if (sortedIds.length > 50) html += '<div style="font-size:10px; color:#888; text-align:center; padding: 4px;">+ ' + (sortedIds.length - 50) + ' more...</div>';
@@ -7593,6 +7900,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    function getBestServerFromMimo(blocks) {
+        const list = Array.isArray(blocks) ? blocks : [];
+        return list.reduce((best, c) =>
+            !best || (Number.isFinite(c?.rscp) && c.rscp > best.rscp) ? c : best
+            , null);
+    }
+
     // --- NEW: Log View Generator ---
     function generatePointInfoHTMLLog(p, logColor) {
         // Extract Serving
@@ -7604,6 +7918,32 @@ document.addEventListener('DOMContentLoaded', () => {
         if (window.resolveSmartSite) {
             servingRes = window.resolveSmartSite(p);
             if (servingRes && servingRes.name) sName = servingRes.name;
+        }
+
+        // --- Normalize UMTS serving from raw MIMOMEAS blocks (best RSCP) ---
+        try {
+            // Common places parser may store blocks
+            const mimoBlocks =
+                (p && p.parsed && (p.parsed.mimoBlocks || p.parsed.blocks || p.parsed.cells)) ||
+                (p && (p.mimoBlocks || p.blocks || p.cells)) ||
+                null;
+
+            if (Array.isArray(mimoBlocks) && mimoBlocks.length) {
+                const best = getBestServerFromMimo(mimoBlocks);
+                if (best) {
+                    if (!p.parsed) p.parsed = {};
+                    p.parsed.serving = {
+                        ...p.parsed.serving,
+                        sc: best.psc ?? best.sc ?? best.SCID ?? best.scramblingCode ?? best.code,
+                        rscp: Number.isFinite(best.rscp) ? best.rscp : p.parsed.serving?.rscp,
+                        ecno: Number.isFinite(best.ecno) ? best.ecno : p.parsed.serving?.ecno,
+                        freq: best.uarfcn ?? best.freq ?? p.parsed.serving?.freq,
+                        cellId: best.cellId ?? best.cid ?? p.parsed.serving?.cellId
+                    };
+                }
+            }
+        } catch (e) {
+            // no-op, do not break Point Details
         }
 
         const connectionTargets = [];
@@ -7687,6 +8027,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 freq: freq !== undefined ? freq : '-'
             };
         };
+        const normalizeCellKeyPart = (v) => {
+            if (v === undefined || v === null) return null;
+            const s = String(v).trim();
+            if (!s || s === '-' || s.toLowerCase() === 'n/a' || s.toLowerCase() === 'unknown') return null;
+            const n = Number(s);
+            return Number.isFinite(n) ? String(n) : s.toLowerCase();
+        };
+        const servingScKey = normalizeCellKeyPart(sSC);
+        const servingFreqKey = normalizeCellKeyPart(sFreq);
+        const isServingEquivalentNeighbor = (n) => {
+            if (!n) return false;
+            const nScKey = normalizeCellKeyPart(n.sc);
+            const nFreqKey = normalizeCellKeyPart(n.freq);
+            if (!nScKey || !servingScKey) return false;
+            if (nScKey !== servingScKey) return false;
+            // If frequency is missing on either side, SC match alone is enough to avoid duplicate serving row.
+            if (!servingFreqKey || !nFreqKey) return true;
+            return nFreqKey === servingFreqKey;
+        };
 
         // Neighbors
         let rawNeighbors = [];
@@ -7706,6 +8065,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const d = readNeighborMetric('d', i);
                 if (d) explicitNeighbors.push(d);
             }
+            // Avoid showing serving cell again as A2/A3/Mx when vendor fields duplicate SC/FREQ.
+            explicitNeighbors = explicitNeighbors.filter(n => !isServingEquivalentNeighbor(n));
         }
         const resolveN = (sc, freq, cellName) => {
             if (window.resolveSmartSite && (sc !== undefined || freq !== undefined)) {
@@ -7755,6 +8116,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Sort by RSCP Descending (strongest to weakest)
         const neighborsSource = (explicitNeighbors.length > 0 ? explicitNeighbors : rawNeighbors)
+            .filter(n => !isServingEquivalentNeighbor(n))
             .slice()
             .sort((a, b) => {
                 const valA = parseFloat(a.rscp);
@@ -7835,29 +8197,92 @@ document.addEventListener('DOMContentLoaded', () => {
         // ----------------------------------------------------
 
         let extraMetricsHtml = '';
-        const sourceObj = p.properties ? p.properties : p;
-        const knownKeys = ['lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
-            'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual',
-            'rnc', 'cid', 'lac', 'freq', 'earfcn', 'uarfcn', 'band', 'tech', 'technology',
-            'cellid', 'cell_id', 'sitename', 'cellname', 'name',
-            'n1_sc', 'n1_rscp', 'n1_ecno', 'n2_sc', 'n2_rscp', 'n2_ecno', 'n3_sc', 'n3_rscp', 'n3_ecno',
-            'a2_sc', 'a2_rscp', 'a3_sc', 'a3_rscp'];
+        const normalizeMetricKey = (k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const excludedKeys = [
+            'lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
+            'type', 'event', 'message',
+            // Main table serving columns
+            'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual', 'freq',
+            'servingrscp', 'servingsc', 'servingecno', 'servingfreq',
+            // Identity already shown in header/row
+            'sitename', 'cellname', 'name'
+        ];
+        const excludedKeySet = new Set(excludedKeys.map(normalizeMetricKey));
+        const isNeighborKey = (k) => {
+            const nk = normalizeMetricKey(k);
+            return /^([namd]\d+)(sc|rscp|ecno|freq|rsrp|rsrq)$/.test(nk) ||
+                /^n[123](sc|rscp|ecno|freq|rsrp|rsrq)$/.test(nk);
+        };
+        const isSkippableValue = (v) => {
+            if (v === undefined || v === null || v === '') return true;
+            if (typeof v === 'number' && Number.isNaN(v)) return true;
+            if (typeof v === 'string' && v.trim().toLowerCase() === 'nan') return true;
+            return false;
+        };
+        const prettyLabel = (key) => String(key || '')
+            .replace(/_/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/\b\w/g, c => c.toUpperCase());
+        const metricsMap = new Map();
+        const addMetric = (label, value) => {
+            if (!label || isSkippableValue(value)) return;
+            const nk = normalizeMetricKey(label);
+            if (!nk || excludedKeySet.has(nk) || isNeighborKey(nk)) return;
+            // Keep first non-empty value to preserve properties naming/preference.
+            if (metricsMap.has(nk)) return;
+            metricsMap.set(nk, { label, value });
+        };
+        const collectFlat = (obj, labelTransform) => {
+            if (!obj || typeof obj !== 'object') return;
+            Object.entries(obj).forEach(([k, v]) => {
+                if (typeof v === 'object') return;
+                const label = typeof labelTransform === 'function' ? labelTransform(k) : k;
+                addMetric(label, v);
+            });
+        };
 
-        const isNeighborKey = (k) => /^n\d+_/.test(k) || /^a\d+_/.test(k);
+        // Priority order: explicit properties first, then top-level fields.
+        collectFlat(p.properties || null, (k) => k);
+        collectFlat(p, (k) => prettyLabel(k));
 
-        Object.entries(sourceObj).forEach(([k, v]) => {
-            const lowerK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
-            if (knownKeys.includes(lowerK) || knownKeys.includes(k.toLowerCase())) return;
-            if (isNeighborKey(k.toLowerCase())) return;
-            if (typeof v === 'object') return; // Skip nested objects for now
-            if (v === undefined || v === null || v === '') return;
+        // Include parsed serving metrics and UMTS radio KPI metrics when present.
+        if (p?.parsed?.serving && typeof p.parsed.serving === 'object') {
+            Object.entries(p.parsed.serving).forEach(([k, v]) => {
+                if (typeof v === 'object') return;
+                addMetric('Serving ' + prettyLabel(k), v);
+            });
+        }
+        const kpiCandidates = ['bler', 'blerDl', 'blerUl', 'fer', 'ferDl', 'ferUl', 'tpc', 'tx', 'txPower', 'ueTxPower', 'nodebTxPower', 'rssi', 'activeSetSize', 'rrcState', 'rnc', 'cid', 'lac', 'rncCid'];
+        kpiCandidates.forEach((k) => {
+            const vTop = p?.[k];
+            const vProp = p?.properties?.[k] ?? p?.properties?.[prettyLabel(k)];
+            const v = isSkippableValue(vProp) ? vTop : vProp;
+            if (!isSkippableValue(v)) addMetric(prettyLabel(k), v);
+        });
 
-            // Format numeric
-            let val = v;
-            if (typeof v === 'number' && !Number.isInteger(v)) val = v.toFixed(3);
+        // Sort to prioritize BLER/FER/TX/RRC fields then alphabetical.
+        const priority = (label) => {
+            const s = normalizeMetricKey(label);
+            if (s.includes('bler')) return 0;
+            if (s.includes('fer')) return 1;
+            if (s.includes('tx') || s.includes('tpc') || s.includes('rssi')) return 2;
+            if (s.includes('rrc') || s.includes('activeset')) return 3;
+            return 10;
+        };
+        const metrics = Array.from(metricsMap.values())
+            .sort((a, b) => {
+                const pa = priority(a.label);
+                const pb = priority(b.label);
+                if (pa !== pb) return pa - pb;
+                return a.label.localeCompare(b.label);
+            });
 
+        metrics.forEach(({ label, value }) => {
+            let val = value;
+            if (typeof value === 'number' && !Number.isInteger(value)) val = value.toFixed(3);
             extraMetricsHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">' +
-                '<span style="color:#aaa; margin-right: 10px;">' + k + '</span>' +
+                '<span style="color:#aaa; margin-right: 10px;">' + label + '</span>' +
                 '<span style="color:#fff; font-weight:bold; text-align: right;">' + val + '</span>' +
                 '</div>';
         });
@@ -8168,6 +8593,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (log) {
+            const mode = getSessionModeFromMapPoint(point);
+            if (mode) {
+                const matchedSession = findUmtsFailedSessionFromPoint(log, point, mode);
+                if (matchedSession && typeof syncSessionPointToMap === 'function' && typeof renderDropAnalysis === 'function') {
+                    syncSessionPointToMap(log, matchedSession, mode);
+                    renderDropAnalysis(log, matchedSession);
+                    return;
+                }
+            }
+
             // Prioritize ID match
             let index = -1;
             if (point.id !== undefined) {
@@ -8396,6 +8831,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const signalingData = !Array.isArray(result) ? result.signaling : [];
             const eventsData = !Array.isArray(result) ? result.events : [];
             const callSessionsData = !Array.isArray(result) ? (result.callSessions || []) : [];
+            const umtsCallAnalysis = !Array.isArray(result) ? (result.umtsCallAnalysis || null) : null;
             const customMetrics = !Array.isArray(result) ? result.customMetrics : []; // New for Excel
             const configData = !Array.isArray(result) ? result.config : null;
             const configHistory = !Array.isArray(result) ? result.configHistory : [];
@@ -8458,6 +8894,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     signaling: signalingData,
                     events: eventsData,
                     callSessions: callSessionsData,
+                    umtsCallAnalysis: umtsCallAnalysis,
                     tech: technology,
                     customMetrics: customMetrics,
                     color: getRandomColor(),
@@ -8466,6 +8903,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     config: configData,
                     configHistory: configHistory
                 });
+
+                if (umtsCallAnalysis && umtsCallAnalysis.summary) {
+                    const s = umtsCallAnalysis.summary;
+                    console.log('[UMTS Analyzer] Sessions:', s.totalCaaSessions, 'Success:', s.outcomes?.SUCCESS || 0, 'SetupFail:', s.outcomes?.CALL_SETUP_FAILURE || s.outcomes?.SETUP_FAILURE || 0, 'Drop:', s.outcomes?.DROP_CALL || 0);
+                }
 
                 // Update UI
                 updateLogsList();
@@ -8976,7 +9418,7 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.innerHTML =
             '<div class="modal-content" style="max-width:760px; width:88vw; max-height:84vh; background:#0b1220; color:#e5e7eb; border:1px solid #334155; display:flex; flex-direction:column;">' +
             '  <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; border-bottom:1px solid #334155; cursor:move;">' +
-            '    <h3 id="dropAnalysisTitle" style="margin:0; font-size:16px;">Drop Call Analysis</h3>' +
+            '    <h3 id="dropAnalysisTitle" style="margin:0; font-size:16px;">Call Failure Analysis</h3>' +
             '    <span class="close" style="color:#94a3b8; cursor:pointer; font-size:20px;" onclick="window.closeDropAnalysisModal()">&times;</span>' +
             '  </div>' +
             '  <div class="modal-body" id="dropAnalysisBody" style="padding:12px 14px; overflow:auto;"></div>' +
@@ -9338,12 +9780,19 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     };
 
-    const buildMiniTrendSvg = (rscpSeries, ecnoSeries, freqSeries, cellNameSeries, markerEvents) => {
-        const r = Array.isArray(rscpSeries) ? rscpSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
-        const e = Array.isArray(ecnoSeries) ? ecnoSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
-        const f = Array.isArray(freqSeries) ? freqSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
-        const n = Array.isArray(cellNameSeries) ? cellNameSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'string' && p.v.trim()) : [];
-        if (!r.length && !e.length) {
+    const buildMiniTrendSvg = (rscpSeries, ecnoSeries, freqSeries, cellNameSeries, markerEvents, options) => {
+        const opts = options || {};
+        const finalEventLabel = String(opts.finalEventLabel || 'DROP');
+        const endTickLabel = String(opts.endTickLabel || '0s(drop)');
+        const showDefaultFinalMarker = opts.showDefaultFinalMarker !== false;
+        const zoomFactor = Number.isFinite(Number(opts.zoomFactor)) ? Math.max(1, Number(opts.zoomFactor)) : 1;
+        const requestedPanMs = Number.isFinite(Number(opts.panMs)) ? Math.max(0, Number(opts.panMs)) : 0;
+        const rAll = Array.isArray(rscpSeries) ? rscpSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const eAll = Array.isArray(ecnoSeries) ? ecnoSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const fAll = Array.isArray(freqSeries) ? freqSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'number') : [];
+        const nAll = Array.isArray(cellNameSeries) ? cellNameSeries.filter(p => typeof p?.t === 'number' && typeof p?.v === 'string' && p.v.trim()) : [];
+        const mAll = Array.isArray(markerEvents) ? markerEvents.filter(ev => ev && typeof ev.t === 'number' && Number.isFinite(ev.t)) : [];
+        if (!rAll.length && !eAll.length) {
             return '<div style="font-size:11px; color:#9ca3af;">No RSCP/EcNo samples in last 10s.</div>';
         }
 
@@ -9356,7 +9805,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const plotW = width - padL - padR;
         const plotH = height - padT - padB;
 
+        const allTimesRaw = rAll.concat(eAll).concat(fAll).concat(nAll).map(p => p.t);
+        const rawMin = Math.min(...allTimesRaw);
+        const rawMax = Math.max(...allTimesRaw);
+        const rawSpan = Math.max(1, rawMax - rawMin);
+        const visibleSpan = rawSpan / zoomFactor;
+        const maxPanMs = Math.max(0, rawSpan - visibleSpan);
+        const panMs = Math.max(0, Math.min(maxPanMs, requestedPanMs));
+        const visMax = rawMax - panMs;
+        const visMin = visMax - visibleSpan;
+        const inWindow = (t) => t >= visMin && t <= visMax;
+
+        const r = rAll.filter(p => inWindow(p.t));
+        const e = eAll.filter(p => inWindow(p.t));
+        const f = fAll.filter(p => inWindow(p.t));
+        const n = nAll.filter(p => inWindow(p.t));
+        const markerFiltered = mAll.filter(ev => inWindow(ev.t));
+
         const allTimes = r.concat(e).concat(f).concat(n).map(p => p.t);
+        if (!allTimes.length) return '<div style="font-size:11px; color:#9ca3af;">No samples in zoomed window.</div>';
         const tMin = Math.min(...allTimes);
         const tMax = Math.max(...allTimes);
         const tSpan = Math.max(1, tMax - tMin);
@@ -9396,8 +9863,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const dropX = (width - padR);
         const rLast = r.length ? r[r.length - 1] : null;
         const eLast = e.length ? e[e.length - 1] : null;
-        const t0 = r.length || e.length ? '-10s' : '';
-        const t1 = '0s(drop)';
+        const windowSec = tSpan / 1000;
+        const t0 = (r.length || e.length) ? ('-' + (windowSec >= 10 ? Math.round(windowSec) : windowSec.toFixed(1)) + 's') : '';
+        const t1 = endTickLabel;
 
         const nameAtTime = (t) => {
             let last = null;
@@ -9475,10 +9943,34 @@ document.addEventListener('DOMContentLoaded', () => {
             const xMid = (xAt(seg.t0) + xAt(seg.t1)) / 2;
             return '<text x="' + xMid.toFixed(1) + '" y="' + (padT - 4) + '" text-anchor="middle" font-size="10" fill="#e2e8f0">' + labelShort(seg.name) + '</text>';
         }).join('');
-        const markerLines = (Array.isArray(markerEvents) ? markerEvents : []).map(ev => {
-            const x = xAt(ev.t);
-            return '<line x1="' + x.toFixed(1) + '" y1="' + padT + '" x2="' + x.toFixed(1) + '" y2="' + (height - padB) + '" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4 3" />' +
-                '<text x="' + (x - 10).toFixed(1) + '" y="' + (padT - 2) + '" font-size="10" fill="#fca5a5">' + ev.label + '</text>';
+        const preparedMarkers = markerFiltered
+            .filter(ev => ev && typeof ev.t === 'number' && Number.isFinite(ev.t))
+            .map(ev => ({
+                t: ev.t,
+                label: String(ev.label || ''),
+                shortLabel: String(ev.shortLabel || ev.label || ''),
+                color: String(ev.color || '#ef4444')
+            }))
+            .sort((a, b) => a.t - b.t);
+        let lastBaseX = -Infinity;
+        let overlapRun = 0;
+        const markerLines = preparedMarkers.map((ev) => {
+            const baseX = xAt(ev.t);
+            if (Math.abs(baseX - lastBaseX) < 20) overlapRun += 1;
+            else overlapRun = 0;
+            lastBaseX = baseX;
+
+            const shiftedX = clamp(baseX - overlapRun * 16, padL + 2, width - padR - 2);
+            const labelY = padT + 10 + ((overlapRun % 2) * 11);
+            const text = ev.shortLabel || ev.label || 'MARK';
+            const chipW = clamp((text.length * 6) + 8, 24, 72);
+            const chipX = clamp(shiftedX - (chipW / 2), padL + 2, width - padR - chipW - 2);
+            const chipY = labelY - 8;
+
+            return '' +
+                '<line x1="' + shiftedX.toFixed(1) + '" y1="' + padT + '" x2="' + shiftedX.toFixed(1) + '" y2="' + (height - padB) + '" stroke="' + ev.color + '" stroke-width="1.7" stroke-dasharray="4 3" />' +
+                '<rect x="' + chipX.toFixed(1) + '" y="' + chipY.toFixed(1) + '" width="' + chipW.toFixed(1) + '" height="12" rx="4" ry="4" fill="rgba(15,23,42,0.92)" stroke="' + ev.color + '" stroke-width="1" />' +
+                '<text x="' + (chipX + 4).toFixed(1) + '" y="' + (labelY + 1).toFixed(1) + '" font-size="9" fill="' + ev.color + '">' + text + '</text>';
         }).join('');
 
         return '' +
@@ -9487,14 +9979,14 @@ document.addEventListener('DOMContentLoaded', () => {
             axis +
             freqTransitions.join('') +
             markerLines +
-            '<line x1="' + dropX + '" y1="' + padT + '" x2="' + dropX + '" y2="' + (height - padB) + '" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4 3" />' +
+            (showDefaultFinalMarker ? ('<line x1="' + dropX + '" y1="' + padT + '" x2="' + dropX + '" y2="' + (height - padB) + '" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4 3" />') : '') +
             (rscpPath ? '<path d="' + rscpPath + '" fill="none" stroke="#22c55e" stroke-width="2" />' : '') +
             (ecnoPath ? '<path d="' + ecnoPath + '" fill="none" stroke="#f59e0b" stroke-width="2" />' : '') +
             (rLast ? ('<circle cx="' + xAt(rLast.t).toFixed(1) + '" cy="' + yRscp(rLast.v).toFixed(1) + '" r="3.5" fill="#22c55e" stroke="#0f172a" stroke-width="1" />') : '') +
             (eLast ? ('<circle cx="' + xAt(eLast.t).toFixed(1) + '" cy="' + yEcno(eLast.v).toFixed(1) + '" r="3.5" fill="#f59e0b" stroke="#0f172a" stroke-width="1" />') : '') +
             freqBands +
             topNameLabels +
-            '<text x="' + (dropX - 30) + '" y="' + (padT - 2) + '" font-size="10" fill="#fca5a5">DROP</text>' +
+            (showDefaultFinalMarker ? ('<text x="' + (dropX - 56) + '" y="' + (padT - 2) + '" font-size="10" fill="#fca5a5">' + finalEventLabel + '</text>') : '') +
             '<text x="' + (padL - 32) + '" y="' + (padT + 10) + '" font-size="10" fill="#86efac">RSCP</text>' +
             '<text x="' + (width - padR + 6) + '" y="' + (padT + 10) + '" font-size="10" fill="#fcd34d">EcNo</text>' +
             '<text x="' + padL + '" y="' + (height - padB + 20) + '" font-size="10" fill="#67e8f9">Serving Freq timeline</text>' +
@@ -9506,6 +9998,109 @@ document.addEventListener('DOMContentLoaded', () => {
             '<text x="' + (padL + 80) + '" y="' + (padT + 13) + '" font-size="10" fill="#cbd5e1">EcNo</text>' +
             '</svg>';
     };
+
+    const buildZoomableMiniTrend = (svgHtml, chartKey, chartPayload) => {
+        const id = `miniChart_${String(chartKey || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        const payloadEnc = chartPayload ? encodeURIComponent(JSON.stringify(chartPayload)) : '';
+        return '' +
+            '<div class="mini-chart-zoom-wrap" data-chart-id="' + id + '" data-chart-payload="' + payloadEnc + '" style="margin-top:6px;">' +
+            '  <div style="display:flex; align-items:center; justify-content:flex-end; gap:6px; margin-bottom:6px;">' +
+            '    <button class="btn-mini-chart-pan" data-op="left" data-target="' + id + '" onclick="window.__miniChartPan && window.__miniChartPan(\'' + id + '\', \'left\'); return false;" style="background:#0b1220; border:1px solid #334155; color:#cbd5e1; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px;">◀</button>' +
+            '    <button class="btn-mini-chart-pan" data-op="right" data-target="' + id + '" onclick="window.__miniChartPan && window.__miniChartPan(\'' + id + '\', \'right\'); return false;" style="background:#0b1220; border:1px solid #334155; color:#cbd5e1; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px;">▶</button>' +
+            '    <button class="btn-mini-chart-zoom" data-op="out" data-target="' + id + '" onclick="window.__miniChartZoom && window.__miniChartZoom(\'' + id + '\', \'out\'); return false;" style="background:#0b1220; border:1px solid #334155; color:#cbd5e1; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px;">-</button>' +
+            '    <button class="btn-mini-chart-zoom" data-op="reset" data-target="' + id + '" onclick="window.__miniChartZoom && window.__miniChartZoom(\'' + id + '\', \'reset\'); return false;" style="background:#0b1220; border:1px solid #334155; color:#cbd5e1; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px;">100%</button>' +
+            '    <button class="btn-mini-chart-zoom" data-op="in" data-target="' + id + '" onclick="window.__miniChartZoom && window.__miniChartZoom(\'' + id + '\', \'in\'); return false;" style="background:#0b1220; border:1px solid #334155; color:#cbd5e1; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px;">+</button>' +
+            '  </div>' +
+            '  <div class="mini-chart-scroll" style="overflow:auto; border-radius:6px; cursor:grab;">' +
+            '    <div id="' + id + '" class="mini-chart-stage" data-zoom="1" data-pan-ms="0" style="min-width:560px;">' + svgHtml + '</div>' +
+            '  </div>' +
+            '</div>';
+    };
+
+    const getMiniChartRawSpanMs = (payload) => {
+        const series = []
+            .concat(Array.isArray(payload?.rscpSeries) ? payload.rscpSeries : [])
+            .concat(Array.isArray(payload?.ecnoSeries) ? payload.ecnoSeries : [])
+            .concat(Array.isArray(payload?.freqSeries) ? payload.freqSeries : [])
+            .concat(Array.isArray(payload?.cellNameSeries) ? payload.cellNameSeries : []);
+        const times = series.map(p => Number(p?.t)).filter(Number.isFinite);
+        if (!times.length) return 0;
+        return Math.max(1, Math.max(...times) - Math.min(...times));
+    };
+
+    const clampMiniChartPanMs = (payload, zoomFactor, panMs) => {
+        const rawSpan = getMiniChartRawSpanMs(payload);
+        if (!Number.isFinite(rawSpan) || rawSpan <= 0) return 0;
+        const visible = rawSpan / Math.max(1, zoomFactor);
+        const maxPan = Math.max(0, rawSpan - visible);
+        return Math.max(0, Math.min(maxPan, Number.isFinite(panMs) ? panMs : 0));
+    };
+
+    const rerenderMiniChartStage = (stage) => {
+        if (!stage) return;
+        const wrap = stage.closest('.mini-chart-zoom-wrap');
+        if (!wrap) return;
+        const payloadTxt = wrap.getAttribute('data-chart-payload') || '';
+        if (!payloadTxt) return;
+        try {
+            const payload = JSON.parse(decodeURIComponent(payloadTxt));
+            const zoom = Number(stage.getAttribute('data-zoom') || '1') || 1;
+            const panMsRaw = Number(stage.getAttribute('data-pan-ms') || '0') || 0;
+            const panMs = clampMiniChartPanMs(payload, zoom, panMsRaw);
+            stage.setAttribute('data-pan-ms', String(panMs));
+            const opts = Object.assign({}, payload.options || {}, { zoomFactor: zoom, panMs });
+            stage.innerHTML = buildMiniTrendSvg(
+                payload.rscpSeries || [],
+                payload.ecnoSeries || [],
+                payload.freqSeries || [],
+                payload.cellNameSeries || [],
+                payload.markerEvents || [],
+                opts
+            );
+            const resetBtn = wrap.querySelector('button.btn-mini-chart-zoom[data-op="reset"]');
+            if (resetBtn) resetBtn.textContent = Math.round(zoom * 100) + '%';
+        } catch (err) {
+            console.warn('[MiniChart] failed to render payload:', err);
+        }
+    };
+
+    const applyMiniChartZoom = (targetId, op) => {
+        const stage = document.getElementById(targetId);
+        if (!stage) return;
+        const current = Number(stage.getAttribute('data-zoom') || '1') || 1;
+        let next = current;
+        if (op === 'in') next = Math.min(6, current + 0.5);
+        else if (op === 'out') next = Math.max(1, current - 0.5);
+        else next = 1;
+        stage.setAttribute('data-zoom', String(next));
+        stage.setAttribute('data-pan-ms', String(Number(stage.getAttribute('data-pan-ms') || '0') || 0));
+        rerenderMiniChartStage(stage);
+    };
+    window.__miniChartZoom = applyMiniChartZoom;
+    window.__miniChartRerender = rerenderMiniChartStage;
+    const applyMiniChartPan = (targetId, dir, stepRatio = 0.25) => {
+        const stage = document.getElementById(targetId);
+        if (!stage) return;
+        const wrap = stage.closest('.mini-chart-zoom-wrap');
+        if (!wrap) return;
+        const payloadTxt = wrap.getAttribute('data-chart-payload') || '';
+        if (!payloadTxt) return;
+        try {
+            const payload = JSON.parse(decodeURIComponent(payloadTxt));
+            const zoom = Number(stage.getAttribute('data-zoom') || '1') || 1;
+            const rawSpan = getMiniChartRawSpanMs(payload);
+            if (!Number.isFinite(rawSpan) || rawSpan <= 0) return;
+            const visibleSpan = rawSpan / Math.max(1, zoom);
+            const panStep = Math.max(1, visibleSpan * Math.max(0.05, Math.min(0.8, stepRatio)));
+            const currentPan = Number(stage.getAttribute('data-pan-ms') || '0') || 0;
+            const nextPan = (dir === 'left') ? (currentPan + panStep) : (currentPan - panStep);
+            stage.setAttribute('data-pan-ms', String(nextPan));
+            rerenderMiniChartStage(stage);
+        } catch (err) {
+            console.warn('[MiniChart] failed to pan payload:', err);
+        }
+    };
+    window.__miniChartPan = applyMiniChartPan;
 
     const buildDropOneParagraphSummary = (session, insights, root) => {
         const vals = insights?.values || {};
@@ -9627,11 +10222,1525 @@ document.addEventListener('DOMContentLoaded', () => {
         return events.slice(0, 10);
     };
 
+    const ACTION_LIBRARY = {
+        OPT_NEIGHBOR_LAYER_WEAK_COVERAGE: {
+            title: 'Optimize neighbor/layer options in weak-coverage routes',
+            solving: [
+                'User moves into weak serving area but:',
+                '• No proper neighbor in list',
+                '• Wrong priority',
+                '• No IFHO/IRAT fallback'
+            ],
+            steps: [
+                {
+                    title: 'A) Extract route segment',
+                    bullets: [
+                        'For drop/setup fail cluster:',
+                        '• List serving PSCs',
+                        '• List strongest 3 neighbors at those GPS points',
+                        'Check:',
+                        '• Is the strongest neighbor in the neighbor list?',
+                        '• Is it configured for: SHO / IFHO / IRAT?'
+                    ]
+                },
+                {
+                    title: 'B) Parameter audit',
+                    bullets: [
+                        'Review:',
+                        '• Neighbor list completeness',
+                        '• Missing PSCs',
+                        '• Incorrect scrambling code definitions',
+                        '• IFHO thresholds'
+                    ]
+                },
+                {
+                    title: 'C) Engineering actions',
+                    bullets: [
+                        'P0:',
+                        '• Add missing neighbor definitions',
+                        '• Correct wrong PSC/UARFCN mapping',
+                        'P1:',
+                        '• Adjust inter-frequency measurement trigger',
+                        'P2:',
+                        '• Review layer priority (e.g., 900 vs 2100)'
+                    ]
+                }
+            ]
+        },
+        INVEST_UL_TX_SAT_ZONES: {
+            title: 'Investigate uplink coverage limits and UE Tx saturation zones',
+            solving: [
+                'You suspect uplink limitation (UL budget exhausted) when:',
+                '• UE Tx power stays high (often >= 21-23 dBm) for several seconds',
+                '• Call setup failures / drops cluster geographically',
+                '• RSCP may be weak-to-moderate, EcNo may be unstable',
+                '• DL may look \'OK\' but UL cannot sustain the link'
+            ],
+            steps: [
+                {
+                    title: 'A) Identify saturation zones from the NMF route',
+                    bullets: [
+                        '1) Filter to the last window before failure (e.g., 10s before CAD/CARE).',
+                        '2) Extract per timestamp: GPS, UE Tx (TXPC), RSCP/EcNo (MIMOMEAS best server), BLER (RLCBLER), PSC/UARFCN.',
+                        '3) Mark a sample as \'UL-saturated\' if:',
+                        '   • UE Tx >= 21 dBm (or your chosen threshold), AND',
+                        '   • persists >= 3 consecutive samples OR >= 3 seconds in time.',
+                        '4) Cluster saturated samples by GPS (e.g., within 50-100 m) to find hotspots.'
+                    ]
+                },
+                {
+                    title: 'B) Validate it’s truly UL-limited (not only DL interference)',
+                    bullets: [
+                        'Check these patterns in the same window:',
+                        '• UL-limited signature:',
+                        '  - UE Tx high (near max) + RSCP weak + EcNo poor/unstable',
+                        '  - Drops/setup failures repeat in the same segment',
+                        '• DL-interference signature (NOT UL-limited):',
+                        '  - UE Tx low/normal + RSCP strong + EcNo very bad + BLER spikes',
+                        'If UE Tx is consistently high while RSCP is weak, UL limitation is very likely.'
+                    ]
+                },
+                {
+                    title: 'C) Cross-check with network-side evidence (if you have OSS counters)',
+                    bullets: [
+                        'Pull counters/KPIs for the serving cell(s) covering the hotspot:',
+                        '• UL Noise Rise / RTWP trend (high indicates UL interference/load)',
+                        '• RRC failures / RLF causes (uplink-related, poor coverage)',
+                        '• UL BLER / retransmissions (if available)',
+                        '• Iub/Iu issues (to exclude transport problems)',
+                        'If UL Noise Rise is high during the same period, prioritize interference/source hunt.'
+                    ]
+                },
+                {
+                    title: 'D) Practical actions (prioritized)',
+                    bullets: [
+                        'P0 (fast checks):',
+                        '• Verify antenna feeders/VSWR/alarms for the serving site (hardware issues can mimic UL holes).',
+                        '• Check tilt/azimuth mismatch (overshoot/coverage gap) and confirm dominant coverage along the route.',
+                        '• Identify if hotspot is on the edge between two layers (900/2100) with poor fallback.',
+                        '',
+                        'P1 (optimization):',
+                        '• Adjust tilt / CPICH / layer strategy to improve UL margin where the route is failing.',
+                        '• Add/repair neighbors to allow earlier HO to a better UL cell before saturation.',
+                        '',
+                        'P2 (structural):',
+                        '• Consider densification / additional carrier/layer changes if the hole is persistent and wide.',
+                        '• Add monitoring: alert when UE Tx high ratio spikes on that corridor.'
+                    ]
+                }
+            ]
+        },
+        INVEST_UL_TX_SATURATION: {
+            title: 'Investigate UL Tx saturation / uplink-limited coverage',
+            solving: [
+                'Call drops or setup failures happen with high UE Tx and weak RSCP.',
+                'This usually indicates uplink budget limitation near coverage edge.'
+            ],
+            steps: [
+                {
+                    title: 'A) Verify radio signature',
+                    bullets: [
+                        'Check last-10s window for:',
+                        '• UE Tx p90 / max near upper range',
+                        '• Weak RSCP and degraded Ec/No',
+                        '• Repeated drops in same geography'
+                    ]
+                },
+                {
+                    title: 'B) Field and site checks',
+                    bullets: [
+                        'Inspect:',
+                        '• Feeder/connector/VSWR alarms',
+                        '• Antenna tilt/azimuth mismatch',
+                        '• Sector overlap and overshoot',
+                        '• UL noise rise and interference floor'
+                    ]
+                },
+                {
+                    title: 'C) Optimization actions',
+                    bullets: [
+                        'P0:',
+                        '• Correct physical faults and obvious tilt/azimuth issues',
+                        'P1:',
+                        '• Tune neighbors/layer fallback for edge retention',
+                        'P2:',
+                        '• Consider densification where weak-UL cluster persists'
+                    ]
+                }
+            ]
+        },
+        AUDIT_PILOT_POLLUTION_SHO: {
+            title: 'Audit pilot pollution and SHO behavior',
+            solving: [
+                'Drops occur with good RSCP but poor Ec/No and BLER spikes.',
+                'Likely too many close-power pilots and unstable serving dominance.'
+            ],
+            steps: [
+                {
+                    title: 'A) Identify pollution zone',
+                    bullets: [
+                        'For affected points, list:',
+                        '• Serving + top 3 pilots',
+                        '• RSCP delta to serving',
+                        '• Active-set size/churn',
+                        'Mark zones where many pilots are within ~6 dB.'
+                    ]
+                },
+                {
+                    title: 'B) SHO / neighbor audit',
+                    bullets: [
+                        'Review:',
+                        '• Missing/wrong neighbors',
+                        '• A3/A5 thresholds, hysteresis, TTT',
+                        '• Excessive ping-pong or late HO signs'
+                    ]
+                },
+                {
+                    title: 'C) Corrective actions',
+                    bullets: [
+                        'P0:',
+                        '• Rebalance CPICH pilot powers and fix obvious neighbor defects',
+                        'P1:',
+                        '• Tune SHO thresholds/hysteresis/TTT',
+                        'P2:',
+                        '• Re-test route and compare Ec/No+BLER before/after'
+                    ]
+                }
+            ]
+        },
+        TRACE_SETUP_TIMEOUT_PATH: {
+            title: 'Trace setup timeout path (CAD cause 102)',
+            solving: [
+                'Setup fails with timer expiry before call connect.',
+                'Cause is usually signaling path delay/failure across RNC/core/transport.'
+            ],
+            steps: [
+                {
+                    title: 'A) Build failing call ladder',
+                    bullets: [
+                        'Collect all signaling around failure:',
+                        '• RRC connection request/setup',
+                        '• NAS/CC setup messages',
+                        '• RAB assignment steps',
+                        'Mark where message progression stops.'
+                    ]
+                },
+                {
+                    title: 'B) Correlate network-side counters',
+                    bullets: [
+                        'Check same time window for:',
+                        '• RNC/MSC reject/timeout counters',
+                        '• Iu/Iub transport latency/resets',
+                        '• Retransmission spikes'
+                    ]
+                },
+                {
+                    title: 'C) Remediation plan',
+                    bullets: [
+                        'P0:',
+                        '• Fix immediate signaling/transport faults causing timeout',
+                        'P1:',
+                        '• Tune timer-related parameters only after root cause confirmation',
+                        'P2:',
+                        '• Add monitoring alarm for repeated setup-timeout clusters'
+                    ]
+                }
+            ]
+        },
+        VALIDATE_PILOT_DOMINANCE_DROP_CLUSTER: {
+            title: 'Validate pilot dominance in drop cluster',
+            solving: [
+                'Drops can occur when serving pilot is not dominant enough.',
+                'Near-equal pilots create unstable serving selection and quality degradation.'
+            ],
+            steps: [
+                {
+                    title: 'A) Compute dominance along route',
+                    bullets: [
+                        'For each drop-cluster point compute:',
+                        '• ΔRSCP = RSCP(best pilot) - RSCP(2nd best pilot)',
+                        'Flag weak dominance where:',
+                        '• ΔRSCP < 3 dB'
+                    ]
+                },
+                {
+                    title: 'B) Validate active set behavior',
+                    bullets: [
+                        'Check active-set dynamics in same segment:',
+                        '• Active set size >= 3',
+                        '• Frequent active-set churn / SHO instability'
+                    ]
+                },
+                {
+                    title: 'C) Review CPICH strategy',
+                    bullets: [
+                        'Review CPICH power and dominance balancing:',
+                        '• Reduce overlapping strong pilots',
+                        '• Improve serving-cell dominance on route',
+                        'Owner: RAN Optimization'
+                    ]
+                }
+            ]
+        }
+    };
+    ACTION_LIBRARY.INVEST_UL_TX_SATURATION = ACTION_LIBRARY.INVEST_UL_TX_SAT_ZONES;
+    ACTION_LIBRARY.INVEST_SETUP_UL_LIMITATION = ACTION_LIBRARY.INVEST_UL_TX_SAT_ZONES;
+    ACTION_LIBRARY.SOLVE_INTERFERENCE_STRONG_SIGNAL = ACTION_LIBRARY.SOLVE_INTERFERENCE_STRONG_SIGNAL || {
+        title: 'Solve interference-under-strong-signal',
+        solving: [
+            'Signal level is acceptable but quality and decode performance collapse.',
+            'Typical signature: high BLER with low/normal UE Tx and non-weak RSCP.'
+        ],
+        steps: [
+            {
+                title: 'A) Confirm signature',
+                bullets: [
+                    'Validate RSCP, EcNo, BLER and UE Tx in the last 10s before failure.',
+                    'Rule-of-thumb: RSCP >= -90 dBm, BLER high, UE Tx not saturated.'
+                ]
+            },
+            {
+                title: 'B) Isolate dominant interferers',
+                bullets: [
+                    'Identify recurring competing pilots by location/time.',
+                    'Correlate with repeated failures and quality collapse.'
+                ]
+            },
+            {
+                title: 'C) Mitigate and verify',
+                bullets: [
+                    'Tune CPICH/tilt/overlap where needed.',
+                    'Re-drive and compare EcNo/BLER before and after changes.'
+                ]
+            }
+        ]
+    };
+    ACTION_LIBRARY.SOLVE_INTERFERENCE_UNDER_STRONG_SIGNAL = ACTION_LIBRARY.SOLVE_INTERFERENCE_STRONG_SIGNAL;
+
+    const ACTION_ID_ALIASES_UI = {
+        SOLVE_INTERFERENCE_UNDER_STRONG_SIGNAL: 'SOLVE_INTERFERENCE_STRONG_SIGNAL'
+    };
+
+    function canonicalActionIdUi(actionId) {
+        const id = String(actionId || '').trim().toUpperCase();
+        return ACTION_ID_ALIASES_UI[id] || id;
+    }
+
+    function findActionInSession(session, actionId) {
+        const canon = canonicalActionIdUi(actionId);
+        const collections = [
+            session?.umts?.classification?.recommendations,
+            session?.classification?.recommendations,
+            session?.recommendedActions,
+            session?.umts?.setupFailureDeepAnalysis?.recommendedActions,
+            session?.setupFailureDeepAnalysis?.recommendedActions
+        ];
+        for (const list of collections) {
+            if (!Array.isArray(list)) continue;
+            const hit = list.find((r) => canonicalActionIdUi(r?.actionId || '') === canon);
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    function formatActionMetric(v, unit, digits = 1) {
+        return Number.isFinite(v) ? `${Number(v).toFixed(digits)}${unit ? ` ${unit}` : ''}` : 'n/a';
+    }
+
+    function formatInterferenceStrongSignalPopup(session, action) {
+        const cls = session?.umts?.classification || session?.classification || null;
+        const snap = session?.umts?.snapshot || session?.snapshot || cls?.snapshot || null;
+        const pp = cls?.pilotPollution || snap?.pilotPollution || null;
+        const strong = pp?.strongRscpBadEcno || {};
+        const delta = pp?.deltaStats || {};
+
+        const rscpSeriesVals = Array.isArray(snap?.seriesRscp) ? snap.seriesRscp.map(p => Number(p?.value)).filter(Number.isFinite) : [];
+        const ecnoSeriesVals = Array.isArray(snap?.seriesEcno) ? snap.seriesEcno.map(p => Number(p?.value)).filter(Number.isFinite) : [];
+        const rscpMin = rscpSeriesVals.length ? Math.min(...rscpSeriesVals) : (Number.isFinite(snap?.rscpMin) ? snap.rscpMin : null);
+        const rscpMed = Number.isFinite(snap?.rscpMedian) ? snap.rscpMedian : null;
+        const rscpMax = rscpSeriesVals.length ? Math.max(...rscpSeriesVals) : (Number.isFinite(snap?.rscpLast) ? snap.rscpLast : null);
+        const ecnoMin = ecnoSeriesVals.length ? Math.min(...ecnoSeriesVals) : (Number.isFinite(snap?.ecnoMin) ? snap.ecnoMin : null);
+        const ecnoMed = Number.isFinite(snap?.ecnoMedian) ? snap.ecnoMedian : null;
+        const ecnoMax = ecnoSeriesVals.length ? Math.max(...ecnoSeriesVals) : (Number.isFinite(snap?.ecnoLast) ? snap.ecnoLast : null);
+        const blerMax = Number.isFinite(snap?.blerMax) ? snap.blerMax : null;
+        const txP90 = Number.isFinite(snap?.txP90) ? snap.txP90 : null;
+        const servingTxt = (Number.isFinite(snap?.lastPsc) || Number.isFinite(snap?.lastUarfcn))
+            ? `Serving context: PSC ${Number.isFinite(snap?.lastPsc) ? snap.lastPsc : 'n/a'} / UARFCN ${Number.isFinite(snap?.lastUarfcn) ? snap.lastUarfcn : 'n/a'}`
+            : 'Serving context: n/a';
+
+        const S = Number.isFinite(strong?.strongCount) ? strong.strongCount : 0;
+        const SB = Number.isFinite(strong?.strongBadCount) ? strong.strongBadCount : 0;
+        const B = Number.isFinite(strong?.denomBestValid) ? strong.denomBestValid : 0;
+        const N = Number.isFinite(strong?.denomTotalMimo) ? strong.denomTotalMimo : (Number.isFinite(delta?.totalMimoSamples) ? delta.totalMimoSamples : 0);
+        const ratioBad = Number.isFinite(strong?.ratioBad) ? `${(strong.ratioBad * 100).toFixed(0)}%` : 'n/a';
+        const ratioStrongShare = Number.isFinite(strong?.ratioStrongShare) ? `${(strong.ratioStrongShare * 100).toFixed(0)}%` : 'n/a';
+        const K = Number.isFinite(delta?.samplesWith2Pilots) ? delta.samplesWith2Pilots : 0;
+        const Y = Number.isFinite(delta?.totalMimoSamples) ? delta.totalMimoSamples : N;
+        const dominanceLine = `ΔRSCP computed on ${K}/${Y} timestamps meeting the ≥2-pilot criterion.`;
+        const dominanceUnavailableLine = K === 0
+            ? `ΔRSCP not computable (0/${Y} ≥2-pilot timestamps). Dominance inference disabled.`
+            : null;
+        const bestServerDen = B > 0 ? B : N;
+        const strongDenominatorLine = `Strong RSCP+bad EcNo computed on ${SB}/${bestServerDen} best-server samples.`;
+        const interferenceLevel = pp?.interferenceLevel || 'n/a';
+        const interferenceScore = Number.isFinite(pp?.interferenceScore) ? pp.interferenceScore : null;
+        const dominanceLevel = pp?.dominanceLevel || (K === 0 ? 'N/A' : 'n/a');
+        const dominanceScore = Number.isFinite(pp?.dominanceScore) ? pp.dominanceScore : null;
+        const dominanceContributionLine = String(dominanceLevel).toUpperCase() === 'HIGH'
+            ? 'Dominance overlap may also contribute; resolve overlap first.'
+            : null;
+        const prioritizeInterference = String(interferenceLevel).toUpperCase() === 'HIGH';
+        const recRows = [
+            {
+                priority: 'P0',
+                action: 'Verify DL load and noise-rise on serving cell',
+                rationale: 'High BLER under good RSCP suggests interference',
+                owner: 'RAN Optimization'
+            },
+            {
+                priority: 'P0',
+                action: 'Check CPICH power vs traffic power balance',
+                rationale: 'Misconfigured power split can degrade EcNo',
+                owner: 'Optimization'
+            },
+            {
+                priority: 'P1',
+                action: 'Audit neighbor dominance & SHO thresholds',
+                rationale: 'Missing SHO can amplify interference',
+                owner: 'Optimization'
+            },
+            {
+                priority: 'P1',
+                action: 'Inspect hardware alarms (PA, VSWR, feeder)',
+                rationale: 'Hardware distortion can raise noise floor',
+                owner: 'Field / RAN'
+            },
+            {
+                priority: 'P1',
+                action: 'Analyze EcNo/BLER distribution on same PSC',
+                rationale: 'Validate persistent footprint vs isolated event',
+                owner: 'RAN'
+            }
+        ];
+
+        return {
+            title: 'Solve interference-under-strong-signal',
+            sections: [
+                {
+                    title: '🔍 What you\'re solving',
+                    body: 'Downlink decoding collapses even though coverage is acceptable. UE is not power-limited, but BLER/quality indicates interference/noise rise or control-channel decode impairment.'
+                },
+                {
+                    title: '📡 What physically happens on the network',
+                    body:
+                        '• CPICH (pilot) power is strong -> RSCP looks good.\n' +
+                        '• Interference or cell load increases -> EcNo drops.\n' +
+                        '• DPCH / control channel decoding becomes unstable.\n' +
+                        '• CRC errors increase -> BLER spikes.\n' +
+                        '• RRC / NAS messages fail to decode.\n' +
+                        '• Call setup aborts before connection completes.\n\n' +
+                        'Even though coverage appears fine, the radio environment is polluted.'
+                },
+                {
+                    title: '🎯 Why this case fits this + Interpretation',
+                    body:
+                        `Coverage OK: RSCP median = ${formatActionMetric(rscpMed, 'dBm')} (threshold -90)\n` +
+                        `UL margin OK: UE Tx p90 = ${formatActionMetric(txP90, 'dBm')} (threshold 18)\n` +
+                        `DL quality: EcNo median = ${formatActionMetric(ecnoMed, 'dB')}\n` +
+                        `Decode collapse: BLER max = ${formatActionMetric(blerMax, '%')}\n` +
+                        `Interference proxy: strong RSCP + bad EcNo ratio = ${SB}/${S} (${ratioBad})\n` +
+                        `Strong RSCP share = ${S}/${B} (${ratioStrongShare})\n` +
+                        `Dominance/Overlap risk: ${dominanceLevel}${dominanceScore !== null ? ` (${dominanceScore}/100)` : ''}\n` +
+                        `Interference-under-strong-signal risk: ${interferenceLevel}${interferenceScore !== null ? ` (${interferenceScore}/100)` : ''}\n` +
+                        `${dominanceLine}\n` +
+                        `${strongDenominatorLine}\n` +
+                        `${dominanceUnavailableLine ? `${dominanceUnavailableLine}\n` : ''}` +
+                        `RSCP (min/med/max): ${formatActionMetric(rscpMin, 'dBm')} / ${formatActionMetric(rscpMed, 'dBm')} / ${formatActionMetric(rscpMax, 'dBm')}\n` +
+                        `EcNo (min/med/max): ${formatActionMetric(ecnoMin, 'dB')} / ${formatActionMetric(ecnoMed, 'dB')} / ${formatActionMetric(ecnoMax, 'dB')}\n` +
+                        `${servingTxt}`
+                },
+                {
+                    title: '🚦 Engineering Interpretation',
+                    body:
+                        'Strong pilot energy with poor quality usually indicates DL interference or dominance issues: overshooting neighbors, unstable active-set behavior, non-serving interference, feeder/power imbalance, or external noise rise.' +
+                        (dominanceContributionLine ? ` ${dominanceContributionLine}` : '')
+                },
+                {
+                    title: '🛠 Recommended Actions',
+                    tableRows: recRows,
+                    tableHint: prioritizeInterference ? 'Interference level is High: prioritize P0 interference actions first.' : ''
+                }
+            ]
+        };
+    }
+
+    function ensureActionModal() {
+        if (document.getElementById('actionModalOverlay')) return;
+        const overlay = document.createElement('div');
+        overlay.id = 'actionModalOverlay';
+        overlay.style.cssText = 'position: fixed; inset: 0; background: radial-gradient(circle at 20% 10%, rgba(30,64,175,0.28), rgba(0,0,0,0.82) 42%), rgba(0,0,0,0.78); display: none; align-items: center; justify-content: center; z-index: 99999; backdrop-filter: blur(4px);';
+
+        const modal = document.createElement('div');
+        modal.id = 'actionModal';
+        modal.style.cssText = 'width: min(960px, 92vw); max-height: 86vh; overflow: auto; background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: #e5e7eb; border: 1px solid rgba(96,165,250,0.25); border-radius: 16px; box-shadow: 0 24px 90px rgba(0,0,0,0.62); padding: 0; font-family: Manrope, "Segoe UI", "Helvetica Neue", Arial, sans-serif; transform: translateY(8px) scale(0.99); opacity: 0;';
+        modal.innerHTML = '' +
+            '<div style="padding:16px 18px; border-bottom:1px solid rgba(148,163,184,0.24); background: linear-gradient(90deg, rgba(30,41,59,0.95), rgba(17,24,39,0.9)); display:flex; align-items:center; justify-content:space-between; gap:12px;">' +
+            '<div style="display:flex; flex-direction:column; gap:4px;">' +
+            '<div style="font-size:11px; letter-spacing:0.08em; text-transform:uppercase; color:#93c5fd; font-weight:700;">Action Playbook</div>' +
+            '<div id="actionModalTitle" style="font-size:18px; font-weight:800; color:#e2e8f0;"></div>' +
+            '</div>' +
+            '<button id="actionModalClose" style="background: rgba(15,23,42,0.7); border: 1px solid rgba(148,163,184,0.35); color: #e5e7eb; padding: 7px 12px; border-radius: 10px; cursor:pointer; font-weight:600;">Close</button>' +
+            '</div>' +
+            '<div id="actionModalBody" style="padding:16px 18px 18px 18px;"></div>';
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        const close = () => {
+            modal.style.transition = 'all 120ms ease-in';
+            modal.style.opacity = '0';
+            modal.style.transform = 'translateY(8px) scale(0.99)';
+            setTimeout(() => { overlay.style.display = 'none'; }, 120);
+        };
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) close();
+        });
+        document.getElementById('actionModalClose').addEventListener('click', close);
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') close();
+        });
+
+        overlay.__openActionModal = () => {
+            overlay.style.display = 'flex';
+            requestAnimationFrame(() => {
+                modal.style.transition = 'all 180ms ease-out';
+                modal.style.opacity = '1';
+                modal.style.transform = 'translateY(0) scale(1)';
+            });
+        };
+    }
+
+    function renderActionDetail(actionId, sessionCandidate) {
+        ensureActionModal();
+        const overlay = document.getElementById('actionModalOverlay');
+        const titleEl = document.getElementById('actionModalTitle');
+        const bodyEl = document.getElementById('actionModalBody');
+        const canonId = canonicalActionIdUi(actionId);
+        const session = sessionCandidate || window.selectedUmtsSession || null;
+        const actionFromSession = findActionInSession(session, canonId);
+        if (canonId === 'SOLVE_INTERFERENCE_STRONG_SIGNAL') {
+            const payload = formatInterferenceStrongSignalPopup(session, actionFromSession);
+            titleEl.textContent = payload.title;
+            bodyEl.innerHTML = (payload.sections || []).map((sec) => (
+                '<div style="margin-top:12px; padding:13px 14px; border-radius:14px; background: rgba(15,23,42,0.75); border: 1px solid rgba(148,163,184,0.22);">' +
+                '<div style="font-weight:800; color:#e2e8f0; font-size:13px; margin-bottom:8px;">' + escapeHtml(sec.title || '-') + '</div>' +
+                (
+                    Array.isArray(sec.tableRows)
+                        ? (
+                            (sec.tableHint ? ('<div style="font-size:12px; color:#fcd34d; margin-bottom:6px;">' + escapeHtml(sec.tableHint) + '</div>') : '') +
+                            '<table style="width:100%; border-collapse:collapse; font-size:12px; color:#d1d5db;">' +
+                            '<thead><tr style="color:#93c5fd;"><th style="padding:6px; border:1px solid #334155; text-align:left;">Priority</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Action</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Rationale</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Owner</th></tr></thead>' +
+                            '<tbody>' +
+                            sec.tableRows.map((r) => (
+                                '<tr>' +
+                                '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.priority || '-') + '</td>' +
+                                '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.action || '-') + '</td>' +
+                                '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.rationale || '-') + '</td>' +
+                                '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.owner || '-') + '</td>' +
+                                '</tr>'
+                            )).join('') +
+                            '</tbody></table>'
+                        )
+                        : ('<div style="white-space:pre-line; color:#cbd5e1; line-height:1.55; font-size:12.5px;">' + decorateOkNokText(String(sec.body || '')) + '</div>')
+                ) +
+                '</div>'
+            )).join('');
+            if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+            else overlay.style.display = 'flex';
+            return;
+        }
+        if (actionFromSession && (actionFromSession.detailsText || actionFromSession.detailsMarkdown)) {
+            const rendered = Array.isArray(actionFromSession.detailsText)
+                ? actionFromSession.detailsText.join('\n')
+                : String(actionFromSession.detailsText || actionFromSession.detailsMarkdown || '');
+            titleEl.textContent = actionFromSession.title || actionFromSession.action || canonId;
+            bodyEl.innerHTML = '' +
+                '<div style="padding:14px; border-radius:14px; background: linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.10)); border:1px solid rgba(96,165,250,0.25);">' +
+                '<div style="font-size:13px; font-weight:800; color:#bfdbfe; margin-bottom:8px;">Analyzer-provided details</div>' +
+                '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:12.5px;">' + decorateOkNokText(rendered) + '</div>' +
+                '</div>';
+            if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+            else overlay.style.display = 'flex';
+            return;
+        }
+        const entry = ACTION_LIBRARY[canonId] || ACTION_LIBRARY[actionId];
+        if (!entry) {
+            titleEl.textContent = 'Action details';
+            const snap = session?.umts?.snapshot || session?.snapshot || session?.umts?.classification?.snapshot || null;
+            const fallbackMetrics = snap
+                ? ('<div style="margin-top:8px; color:#d1d5db;">' +
+                    'RSCP median: ' + formatActionMetric(snap?.rscpMedian, 'dBm') + '<br>' +
+                    'EcNo median: ' + formatActionMetric(snap?.ecnoMedian, 'dB') + '<br>' +
+                    'BLER max: ' + formatActionMetric(snap?.blerMax, '%') + '<br>' +
+                    'UE Tx p90: ' + formatActionMetric(snap?.txP90, 'dBm') +
+                    '</div>')
+                : '';
+            bodyEl.innerHTML = '<div style="color:#fca5a5; padding:12px; border:1px solid rgba(248,113,113,0.35); border-radius:12px; background:rgba(127,29,29,0.15);">No template found for actionId: ' + canonId + '</div>' + fallbackMetrics;
+            if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+            else overlay.style.display = 'flex';
+            return;
+        }
+        titleEl.textContent = entry.title;
+        const solvingHtml = Array.isArray(entry.solving) && entry.solving.length
+            ? '<div style="margin-top:6px; padding:14px; border-radius:14px; background: linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.10)); border:1px solid rgba(96,165,250,0.25);">' +
+            '<div style="font-weight:800; margin-bottom:8px; color:#bfdbfe; font-size:13px;">What you are solving</div>' +
+            '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:13px;">' + decorateOkNokText(entry.solving.join('\n')) + '</div>' +
+            '</div>'
+            : '';
+        const stepsHtml = (entry.steps || []).map(s => '' +
+            '<div style="margin-top:12px; padding:13px 14px; border-radius:14px; background: rgba(15,23,42,0.75); border: 1px solid rgba(148,163,184,0.22);">' +
+            '<div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">' +
+            '<span style="display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; border-radius:999px; background:rgba(34,197,94,0.2); color:#86efac; font-size:11px; font-weight:800;">' + (String(s.title || '').charAt(0) || 'S') + '</span>' +
+            '<div style="font-weight:800; color:#e2e8f0; font-size:13px;">' + s.title + '</div>' +
+            '</div>' +
+            '<div style="white-space:pre-line; color:#cbd5e1; line-height:1.55; font-size:12.5px;">' + decorateOkNokText(Array.isArray(s.bullets) ? s.bullets.join('\n') : '') + '</div>' +
+            '</div>'
+        ).join('');
+        bodyEl.innerHTML = solvingHtml +
+            '<div style="margin-top:14px; margin-bottom:2px; font-weight:800; letter-spacing:0.02em; color:#cbd5e1;">Step-by-step</div>' +
+            stepsHtml;
+        if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+        else overlay.style.display = 'flex';
+    }
+
+    function escapeHtml(v) {
+        return String(v == null ? '' : v)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function okNokBadgeHtml(status) {
+        const s = String(status || '').toUpperCase();
+        if (s === 'OK') {
+            return '<span style="display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">OK</span>';
+        }
+        if (s === 'NOK') {
+            return '<span style="display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">NOK</span>';
+        }
+        if (s === 'N/A') {
+            return '<span style="display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#cbd5e1; background:rgba(100,116,139,0.25); border:1px solid rgba(148,163,184,0.35);">N/A</span>';
+        }
+        return escapeHtml(status);
+    }
+
+    function decorateOkNokText(rawText) {
+        const text = escapeHtml(rawText);
+        return text
+            .replace(/\bNOK\b/g, okNokBadgeHtml('NOK'))
+            .replace(/\bOK\b/g, okNokBadgeHtml('OK'))
+            .replace(/\bN\/A\b/g, okNokBadgeHtml('N/A'));
+    }
+
+    function openPilotPollutionDetails(session) {
+        ensureActionModal();
+        const overlay = document.getElementById('actionModalOverlay');
+        const titleEl = document.getElementById('actionModalTitle');
+        const bodyEl = document.getElementById('actionModalBody');
+        const pp = session?.umts?.classification?.pilotPollution || session?.pilotPollution || null;
+        titleEl.textContent = 'Pilot Pollution Verification (Detailed)';
+        if (!pp) {
+            bodyEl.innerHTML = '<div style="color:#fca5a5; padding:12px; border:1px solid rgba(248,113,113,0.35); border-radius:12px; background:rgba(127,29,29,0.15);">No pilot pollution details available.</div>';
+            if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+            else overlay.style.display = 'flex';
+            return;
+        }
+        const lines = Array.isArray(pp.detailsText) ? pp.detailsText : [];
+        bodyEl.innerHTML = '' +
+            '<div style="padding:14px; border-radius:14px; background: linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.10)); border:1px solid rgba(96,165,250,0.25);">' +
+            '<div style="font-size:13px; font-weight:800; color:#bfdbfe; margin-bottom:8px;">Analyzer Evidence</div>' +
+            '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:12.5px;">' + lines.map(x => decorateOkNokText(x)).join('\n') + '</div>' +
+            '</div>';
+        if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+        else overlay.style.display = 'flex';
+    }
+
+    function openUeTxP90Details() {
+        ensureActionModal();
+        const overlay = document.getElementById('actionModalOverlay');
+        const titleEl = document.getElementById('actionModalTitle');
+        const bodyEl = document.getElementById('actionModalBody');
+        titleEl.textContent = 'What High UE Tx p90 Indicates';
+        bodyEl.innerHTML = '' +
+            '<div style="padding:14px; border-radius:14px; background: linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.10)); border:1px solid rgba(96,165,250,0.25); margin-bottom:12px;">' +
+            '<div style="color:#dbeafe; line-height:1.55; font-size:13px;">UE Tx p90 shows how hard the phone had to transmit most of the time. A high value means the phone was often transmitting near its maximum power, which can lead to call drops.</div>' +
+            '<div style="color:#dbeafe; line-height:1.55; font-size:13px; margin-top:10px;">If UE Tx p90 is high, it usually means:</div>' +
+            '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:13px; margin-top:6px;">• UE is far from NodeB\n• Indoor penetration loss\n• Uplink coverage imbalance\n• Interference on UL</div>' +
+            '<div style="color:#dbeafe; line-height:1.55; font-size:13px; margin-top:10px;">Often correlated with:</div>' +
+            '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:13px; margin-top:6px;">• Rising BLER\n• RLF\n• Voice drops</div>' +
+            '</div>' +
+            '<div style="font-size:14px; font-weight:800; color:#bfdbfe; margin-bottom:8px;">How to Interpret UE Tx p90 (3G Voice)</div>' +
+            '<table style="width:100%; border-collapse:collapse; font-size:12px; color:#d1d5db;">' +
+            '  <thead><tr style="color:#93c5fd;"><th style="padding:7px; border:1px solid #334155; text-align:left;">UE Tx p90</th><th style="padding:7px; border:1px solid #334155; text-align:left;">Interpretation</th></tr></thead>' +
+            '  <tbody>' +
+            '    <tr><td style="padding:7px; border:1px solid #334155;">&lt; 10 dBm</td><td style="padding:7px; border:1px solid #334155;">Excellent UL margin</td></tr>' +
+            '    <tr><td style="padding:7px; border:1px solid #334155;">10-18 dBm</td><td style="padding:7px; border:1px solid #334155;">Normal</td></tr>' +
+            '    <tr><td style="padding:7px; border:1px solid #334155;">&gt; 21 dBm</td><td style="padding:7px; border:1px solid #334155;">UL-limited / coverage issue</td></tr>' +
+            '    <tr><td style="padding:7px; border:1px solid #334155;">>= 23 dBm</td><td style="padding:7px; border:1px solid #334155;">Near UE power cap</td></tr>' +
+            '  </tbody>' +
+            '</table>' +
+            '<div style="font-size:12px; color:#94a3b8; margin-top:8px;">UE max power is typically about 23-24 dBm.</div>';
+        if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+        else overlay.style.display = 'flex';
+    }
+
+    function openResolvePilotPollutionDetails(session) {
+        ensureActionModal();
+        const overlay = document.getElementById('actionModalOverlay');
+        const titleEl = document.getElementById('actionModalTitle');
+        const bodyEl = document.getElementById('actionModalBody');
+        const pp = session?.umts?.classification?.pilotPollution || session?.classification?.pilotPollution || session?.pilotPollution || null;
+        const overlapLevel = String(pp?.dominanceLevel || '').toUpperCase();
+        titleEl.textContent = 'Resolve Pilot Pollution';
+
+        if (overlapLevel !== 'HIGH') {
+            bodyEl.innerHTML = '' +
+                '<div style="padding:12px; border-radius:12px; border:1px solid rgba(148,163,184,0.35); background:rgba(15,23,42,0.6); color:#d1d5db;">' +
+                'This playbook is intended for <b>Overlap / dominance risk: High</b>.<br>' +
+                'Current overlap/dominance risk: <b>' + escapeHtml(pp?.dominanceLevel || 'Unknown') + '</b>.' +
+                '</div>';
+            if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+            else overlay.style.display = 'flex';
+            return;
+        }
+
+        const formatResolveBody = (text) => {
+            const lines = String(text || '').split('\n');
+            return lines.map((line) => {
+                if (/^\s*[0-9]+️⃣\s+/.test(line)) {
+                    return '<span style="font-weight:800; color:#e2e8f0;">' + line + '</span>';
+                }
+                return line;
+            }).join('\n');
+        };
+        const secCard = (title, body) => '' +
+            '<div style="margin-top:10px; padding:13px; border-radius:12px; border:1px solid rgba(148,163,184,0.22); background:linear-gradient(180deg, rgba(15,23,42,0.9), rgba(15,23,42,0.65));">' +
+            '<div style="font-size:16px; font-weight:900; color:#93c5fd; margin-bottom:8px; letter-spacing:0.01em;">' + title + '</div>' +
+            '<div style="white-space:pre-line; color:#d1d5db; line-height:1.55; font-size:12.5px;">' + formatResolveBody(body) + '</div>' +
+            '</div>';
+        const pCard = (label, color, body) => '' +
+            '<div style="margin-top:10px; padding:13px; border-radius:12px; border:1px solid ' + color + '; background:rgba(15,23,42,0.72);">' +
+            '<div style="display:inline-block; font-size:13px; font-weight:900; color:#e2e8f0; background:' + color.replace('0.45', '0.22') + '; border:1px solid ' + color + '; border-radius:999px; padding:3px 11px; margin-bottom:8px; letter-spacing:0.01em;">' + label + '</div>' +
+            '<div style="white-space:pre-line; color:#d1d5db; line-height:1.55; font-size:12.5px;">' + formatResolveBody(body) + '</div>' +
+            '</div>';
+        bodyEl.innerHTML = '' +
+            '<div style="padding:12px; border-radius:12px; border:1px solid rgba(59,130,246,0.35); background:linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.08)); color:#dbeafe; font-size:13px; line-height:1.6;">' +
+            '<b>Condition matched:</b> Overlap / dominance risk is <b>High</b>. This playbook targets cell-edge dominance collapse.' +
+            '</div>' +
+            secCard('🔍 What does “High overlap / poor dominance under weak coverage” mean?',
+                'It means:\n\n' +
+                'RSCP is weak to moderate (e.g. −86 to −95 dBm)\n' +
+                'Multiple pilots are received at almost identical power (ΔRSCP ≈ 0–2 dB)\n' +
+                'Active-set proxy high (3–4 pilots within 3 dB)\n' +
+                'EcNo poor (because power is low and energy spreads across pilots)\n' +
+                'UE often near cell edge\n' +
+                'Setup failures or drops happen when mobility or UL margin collapses\n\n' +
+                'This is not classic interference (strong RSCP + bad EcNo).\n' +
+                'It is a cell-edge dominance collapse.'
+            ) +
+            secCard('📡 What physically happens on the network',
+                'At cell edge:\n\n' +
+                'No pilot dominates.\n' +
+                'Energy is split between 2–4 cells.\n' +
+                'UE cannot lock cleanly to one serving cell.\n' +
+                'SHO may try to help, but uplink becomes weak.\n' +
+                'Setup procedures (RRC/CC) are sensitive to instability.\n' +
+                'Failures cluster at border zones.\n\n' +
+                'So it’s more of a coverage geometry problem than a pure interference problem.'
+            ) +
+            secCard('🚦 Engineering Interpretation',
+                'This condition typically indicates one (or more) of:\n\n' +
+                'Border between sectors/sites poorly aligned\n' +
+                'Too much overlap from neighbors (overshoot)\n' +
+                'Inadequate dominance planning\n' +
+                'Wrong tilt/azimuth causing edge-to-edge fighting\n' +
+                'Layer misbalance (900/2100 edge conflict)\n' +
+                'HO thresholds too late (UE remains too long in weak cell)'
+            ) +
+            '<div style="margin-top:14px; font-size:18px; font-weight:900; color:#67e8f9; letter-spacing:0.01em;">🛠 Recommended Actions (Structured + Prioritized)</div>' +
+            '<div style="font-size:12px; color:#94a3b8; margin-top:4px;">Below is what your analyzer should output for this condition.</div>' +
+            pCard('🔥 P0 – Immediate (High Impact)', 
+                'rgba(248,113,113,0.45)',
+                '1️⃣ Improve Dominance at Cell Edge\n' +
+                'Generate ΔRSCP dominance map along the failing segment.\n' +
+                'Identify the 2–3 strongest PSCs involved.\n' +
+                'Check mechanical/electrical tilt alignment.\n' +
+                'Reduce overlap if excessive (slight down-tilt on overshooter).\n' +
+                'Ensure one sector clearly dominates by ≥4–5 dB in the border area.\n' +
+                'Owner: RAN Optimization\n' +
+                '2️⃣ Validate Border Geometry\n' +
+                'Overlay GPS route on serving cell coverage footprint.\n' +
+                'Check if failure cluster is exactly on inter-site border.\n' +
+                'Verify azimuth orientation and sector boundary alignment.\n' +
+                'Confirm no cross-sector beam overlap > expected.\n' +
+                'Owner: RAN Planning\n' +
+                '3️⃣ Validate UL Margin\n' +
+                'Even if RSCP is weak but not terrible, check UE Tx in this zone.\n' +
+                'If UE Tx rises > 20–21 dBm before failure → UL-limited.\n' +
+                'If UL-limited, fix UL margin before anything else.\n' +
+                'Owner: RAN Optimization'
+            ) +
+            pCard('⚙️ P1 – Parameter Optimization',
+                'rgba(250,204,21,0.45)',
+                '4️⃣ Tune HO Thresholds\n' +
+                'If UE remains too long in weak serving cell:\n' +
+                'Slightly increase Event 1A threshold\n' +
+                'Adjust hysteresis/TTT to allow earlier HO\n' +
+                'Reduce ping-pong risk after changes\n' +
+                'Goal:\n' +
+                'Move UE earlier to stronger cell before setup attempt.\n' +
+                '5️⃣ Review Neighbor Definitions\n' +
+                'Ensure all strongest pilots in overlap zone are declared neighbors.\n' +
+                'Check IFHO/IRAT fallback configuration.\n' +
+                'Confirm no missing PSC definitions.'
+            ) +
+            pCard('📊 P2 – Structural / Longer-Term',
+                'rgba(96,165,250,0.45)',
+                '6️⃣ Rebalance Layer Strategy\n' +
+                'If 900 & 2100 overlap poorly:\n' +
+                'Define clear dominance strategy (e.g., 900 for coverage, 2100 for capacity).\n' +
+                'Adjust layer priority or thresholds.\n' +
+                '7️⃣ Consider Densification (if persistent)\n' +
+                'If overlap area is wide and chronic:\n' +
+                'Micro-site\n' +
+                'Carrier rebalancing\n' +
+                'Sector splitting'
+            );
+        if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
+        else overlay.style.display = 'flex';
+    }
+
+    function ensureActionLinkDelegation() {
+        if (window.__actionLinkDelegationBound) return;
+        document.addEventListener('click', (e) => {
+            const a = e.target && e.target.closest ? e.target.closest('a.action-link') : null;
+            if (!a) return;
+            e.preventDefault();
+            const actionId = a.getAttribute('data-action-id');
+            if (!actionId) return;
+            if (actionId === 'RESOLVE_PILOT_POLLUTION') {
+                const current = window.selectedUmtsSession || null;
+                openResolvePilotPollutionDetails(current);
+                return;
+            }
+            const current = window.selectedUmtsSession || null;
+            renderActionDetail(actionId, current);
+        });
+        document.addEventListener('click', (e) => {
+            const btn = e.target && e.target.closest ? e.target.closest('button.btn-see-more-pp') : null;
+            if (!btn) return;
+            e.preventDefault();
+            const current = window.selectedUmtsSession || null;
+            if (current) openPilotPollutionDetails(current);
+        });
+        document.addEventListener('click', (e) => {
+            const btn = e.target && e.target.closest ? e.target.closest('button.btn-ue-tx-help') : null;
+            if (!btn) return;
+            e.preventDefault();
+            openUeTxP90Details();
+        });
+        document.addEventListener('click', (e) => {
+            const btn = e.target && e.target.closest ? e.target.closest('button.btn-mini-chart-zoom') : null;
+            if (!btn) return;
+            e.preventDefault();
+            const targetId = btn.getAttribute('data-target');
+            const op = btn.getAttribute('data-op');
+            if (targetId) applyMiniChartZoom(targetId, op || 'reset');
+        });
+        document.addEventListener('wheel', (e) => {
+            const scroller = e.target && e.target.closest ? e.target.closest('.mini-chart-scroll') : null;
+            if (!scroller) return;
+            const stage = scroller.querySelector('.mini-chart-stage');
+            if (!stage || !stage.id) return;
+            e.preventDefault();
+            const op = e.deltaY < 0 ? 'in' : 'out';
+            applyMiniChartZoom(stage.id, op);
+        }, { passive: false });
+        let miniChartDrag = null;
+        document.addEventListener('mousedown', (e) => {
+            const scroller = e.target && e.target.closest ? e.target.closest('.mini-chart-scroll') : null;
+            if (!scroller) return;
+            const stage = scroller.querySelector('.mini-chart-stage');
+            if (!stage || !stage.id) return;
+            const wrap = stage.closest('.mini-chart-zoom-wrap');
+            const payloadTxt = wrap ? (wrap.getAttribute('data-chart-payload') || '') : '';
+            if (!payloadTxt) return;
+            let payload = null;
+            try { payload = JSON.parse(decodeURIComponent(payloadTxt)); } catch (err) { payload = null; }
+            if (!payload) return;
+            miniChartDrag = {
+                stage,
+                scroller,
+                payload,
+                startX: e.clientX,
+                panStart: Number(stage.getAttribute('data-pan-ms') || '0') || 0,
+                zoom: Number(stage.getAttribute('data-zoom') || '1') || 1
+            };
+            scroller.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!miniChartDrag) return;
+            const rawSpan = getMiniChartRawSpanMs(miniChartDrag.payload);
+            if (!Number.isFinite(rawSpan) || rawSpan <= 0) return;
+            const visibleSpan = rawSpan / Math.max(1, miniChartDrag.zoom);
+            const widthPx = Math.max(1, miniChartDrag.scroller.clientWidth || 1);
+            const msPerPx = visibleSpan / widthPx;
+            const dx = e.clientX - miniChartDrag.startX;
+            const nextPan = miniChartDrag.panStart + (dx * msPerPx);
+            miniChartDrag.stage.setAttribute('data-pan-ms', String(nextPan));
+            rerenderMiniChartStage(miniChartDrag.stage);
+            e.preventDefault();
+        });
+        document.addEventListener('mouseup', () => {
+            if (!miniChartDrag) return;
+            if (miniChartDrag.scroller) miniChartDrag.scroller.style.cursor = 'grab';
+            miniChartDrag = null;
+        });
+        window.__actionLinkDelegationBound = true;
+    }
+
     const renderDropAnalysis = (log, session) => {
+        ensureActionLinkDelegation();
         ensureDropAnalysisModal();
         const titleEl = document.getElementById('dropAnalysisTitle');
         const bodyEl = document.getElementById('dropAnalysisBody');
         if (!titleEl || !bodyEl) return;
+        const umtsClassification = session?.umts?.classification || null;
+        const umtsSnapshot = session?.umts?.snapshot || null;
+        const isAuthoritativeUmtsSession = (session?._source === 'umts') && (session?.kind === 'UMTS_CALL') && !!umtsClassification;
+        if (isAuthoritativeUmtsSession) {
+            window.selectedUmtsSession = session;
+            const isSetupFailure = umtsClassification.resultType === 'CALL_SETUP_FAILURE';
+            const caseLabel = isSetupFailure ? 'Setup Failure' : (umtsClassification.resultType === 'DROP_CALL' ? 'Drop Call' : 'Call Result');
+            const trendMessage = umtsSnapshot?.trendMessage || 'No MIMOMEAS samples in last 10s.';
+            const sampleCount = Number.isFinite(umtsSnapshot?.mimoSampleCount) ? umtsSnapshot.mimoSampleCount : (Number.isFinite(umtsSnapshot?.sampleCount) ? umtsSnapshot.sampleCount : 0);
+            const timeline = Array.isArray(session?.eventTimeline) ? session.eventTimeline : [];
+            const timelineHtml = timeline.length
+                ? timeline.map(e => '<div style=\"margin-bottom:3px;\">' + (e.time || '-') + ' - ' + (e.event || '-') + '</div>').join('')
+                : '<div style=\"color:#9ca3af;\">No events in session window.</div>';
+            const fmt = (v, unit) => (typeof v === 'number' && !Number.isNaN(v)) ? (v.toFixed(1) + (unit ? (' ' + unit) : '')) : 'N/A';
+            const statusBadge = (ok) => {
+                if (ok === null) return '<span style="margin-left:8px; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#cbd5e1; background:rgba(100,116,139,0.25); border:1px solid rgba(148,163,184,0.35);">N/A</span>';
+                return ok
+                    ? '<span style="margin-left:8px; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">OK</span>'
+                    : '<span style="margin-left:8px; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">NOK</span>';
+            };
+            const metricLine = (label, valueText, ok, thresholdText) => {
+                const color = ok === null ? '#d1d5db' : (ok ? '#22c55e' : '#ef4444');
+                const hint = thresholdText ? ` <span style="color:#94a3b8; font-size:11px;">(${thresholdText})</span>` : '';
+                return `<span style="color:${color};">${label}: ${valueText}</span>${hint}${statusBadge(ok)}`;
+            };
+            const thresholdProfileByCategory = (category) => {
+                const c = String(category || '').toUpperCase();
+                if (c === 'DROP_INTERFERENCE' || c === 'SETUP_FAIL_DL_INTERFERENCE') {
+                    return { rscpMinOk: -90, ecnoMinOk: -12, blerMaxOk: 10, txP90MaxOk: 18 };
+                }
+                if (c === 'DROP_COVERAGE_UL' || c === 'SETUP_FAIL_UL_COVERAGE') {
+                    return { rscpMinOk: -98, ecnoMinOk: -16, blerMaxOk: 30, txP90MaxOk: 20 };
+                }
+                if (c === 'DROP_COVERAGE_DL') {
+                    return { rscpMinOk: -105, ecnoMinOk: -13, blerMaxOk: 25, txP90MaxOk: 21 };
+                }
+                if (c === 'SETUP_TIMEOUT') {
+                    return { rscpMinOk: -95, ecnoMinOk: -14, blerMaxOk: 30, txP90MaxOk: 21 };
+                }
+                return { rscpMinOk: -95, ecnoMinOk: -14, blerMaxOk: 20, txP90MaxOk: 21 };
+            };
+            const metricProfile = thresholdProfileByCategory(umtsClassification?.category);
+            const rscpOk = Number.isFinite(umtsSnapshot?.rscpMedian) ? (umtsSnapshot.rscpMedian > metricProfile.rscpMinOk) : null;
+            const ecnoOk = Number.isFinite(umtsSnapshot?.ecnoMedian) ? (umtsSnapshot.ecnoMedian > metricProfile.ecnoMinOk) : null;
+            const blerOk = Number.isFinite(umtsSnapshot?.blerMax) ? (umtsSnapshot.blerMax < metricProfile.blerMaxOk) : null;
+            const txOk = Number.isFinite(umtsSnapshot?.txP90) ? (umtsSnapshot.txP90 < metricProfile.txP90MaxOk) : null;
+            const interpretUeTxP90 = (txP90) => {
+                if (!Number.isFinite(txP90)) {
+                    return { label: 'N/A', color: '#94a3b8', bg: 'rgba(100,116,139,0.2)', border: 'rgba(148,163,184,0.35)', why: 'No valid UE Tx p90 sample in window.' };
+                }
+                if (txP90 >= 23) {
+                    return { label: 'Near UE power cap', color: '#fecaca', bg: 'rgba(220,38,38,0.20)', border: 'rgba(248,113,113,0.45)', why: 'UE is transmitting close to maximum power; uplink margin is critically low.' };
+                }
+                if (txP90 > 21) {
+                    return { label: 'UL-limited / coverage issue', color: '#fecaca', bg: 'rgba(220,38,38,0.20)', border: 'rgba(248,113,113,0.45)', why: 'High UE Tx indicates uplink-limited conditions or weak indoor/edge coverage.' };
+                }
+                if (txP90 < 10) {
+                    return { label: 'Excellent UL margin', color: '#93c5fd', bg: 'rgba(37,99,235,0.20)', border: 'rgba(96,165,250,0.45)', why: 'UE transmits with low power, indicating strong uplink margin.' };
+                }
+                return { label: 'Normal', color: '#bbf7d0', bg: 'rgba(22,163,74,0.22)', border: 'rgba(74,222,128,0.45)', why: 'UE Tx is in typical operating range for stable uplink.' };
+            };
+            const txInterpretation = interpretUeTxP90(umtsSnapshot?.txP90);
+            const txInterpretationHtml = '' +
+                '<div style="margin-top:4px; margin-bottom:6px; font-size:11px; color:#d1d5db;">' +
+                '<span style="display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; color:' + txInterpretation.color + '; background:' + txInterpretation.bg + '; border:1px solid ' + txInterpretation.border + ';">' + txInterpretation.label + '</span>' +
+                '<span style="margin-left:8px; color:#94a3b8;">' + txInterpretation.why + '</span>' +
+                '</div>';
+            const metricStateLabel = (ok) => ok === null ? 'N/A' : (ok ? 'OK' : 'NOK');
+            const explanationMetricStatuses = [
+                `RSCP median status: ${metricStateLabel(rscpOk)}`,
+                `EcNo median status: ${metricStateLabel(ecnoOk)}`,
+                `BLER max status: ${metricStateLabel(blerOk)}`,
+                `UE Tx p90 status: ${metricStateLabel(txOk)}`
+            ];
+            const explanationMetricStatusesHtml = [
+                '- ' + decorateOkNokText(explanationMetricStatuses[0]),
+                '- ' + decorateOkNokText(explanationMetricStatuses[1]),
+                '- ' + decorateOkNokText(explanationMetricStatuses[2]),
+                '- ' + (txOk === false
+                    ? ('UE Tx p90 status: ' + okNokBadgeHtml('NOK') + ' <button class="btn-ue-tx-help" style="margin-left:8px; background:#111827; border:1px solid rgba(248,113,113,0.45); color:#fecaca; padding:2px 8px; border-radius:8px; cursor:pointer; font-size:10px;">Why?</button>')
+                    : decorateOkNokText(explanationMetricStatuses[3]))
+            ];
+            const evidence = Array.isArray(umtsClassification.evidence) ? umtsClassification.evidence : [];
+            const explanation = umtsClassification.explanation || {};
+            const whyWeThinkSo = Array.isArray(explanation.whyWeThinkSo) ? explanation.whyWeThinkSo : [];
+            const recommendations = Array.isArray(umtsClassification.recommendations) ? umtsClassification.recommendations : [];
+            const oneParagraphSummary = umtsClassification.oneParagraphSummary || umtsClassification.reason || '-';
+            const contextBundle = session?.umts?.contextBundle || session?.contextBundle || null;
+            const showContextBundle = isSetupFailure && !!contextBundle;
+            const pilotPollution = umtsClassification.pilotPollution || null;
+            const ppScore = Number.isFinite(pilotPollution?.score) ? pilotPollution.score : (Number.isFinite(pilotPollution?.pollutionScore) ? pilotPollution.pollutionScore : null);
+            const ppLevel = pilotPollution?.riskLevel || pilotPollution?.pollutionLevel || null;
+            const ppDominanceScore = Number.isFinite(pilotPollution?.dominanceScore) ? pilotPollution.dominanceScore : null;
+            const ppDominanceLevel = pilotPollution?.dominanceLevel || null;
+            const ppInterferenceScore = Number.isFinite(pilotPollution?.interferenceScore) ? pilotPollution.interferenceScore : null;
+            const ppInterferenceLevel = pilotPollution?.interferenceLevel || null;
+            const ppFinalLabel = pilotPollution?.finalLabel || null;
+            const ppDominanceAvailable = pilotPollution?.dominanceAvailable !== false;
+            const pilotPollutionText = (!ppDominanceAvailable)
+                ? `N/A (0/${Number.isFinite(pilotPollution?.deltaStats?.totalMimoSamples) ? pilotPollution.deltaStats.totalMimoSamples : 0} >=2-pilot)`
+                : ((ppScore !== null && ppLevel) ? `${ppLevel} (${ppScore}%)` : 'n/a');
+            const pilotPollutionBadge = (() => {
+                if (!ppDominanceAvailable) {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#cbd5e1; background:rgba(100,116,139,0.25); border:1px solid rgba(148,163,184,0.35);">Pilot Pollution: N/A (no >=2 pilots)</span>';
+                }
+                if (ppScore === null || !ppLevel) {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#cbd5e1; background:rgba(100,116,139,0.25); border:1px solid rgba(148,163,184,0.35);">Pilot Pollution: N/A</span>';
+                }
+                if (ppLevel === 'High') {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">Pilot Pollution: High</span>';
+                }
+                if (ppLevel === 'Moderate') {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fde68a; background:rgba(202,138,4,0.20); border:1px solid rgba(250,204,21,0.45);">Pilot Pollution: Moderate</span>';
+                }
+                return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">Pilot Pollution: Low</span>';
+            })();
+            const toNumOrNull = (v) => {
+                if (Number.isFinite(v)) return Number(v);
+                const n = Number.parseInt(String(v ?? '').trim(), 10);
+                return Number.isFinite(n) ? n : null;
+            };
+            const decodeCadCauseUi = (cause) => {
+                const map = {
+                    16: 'Normal call clearing',
+                    17: 'User busy',
+                    18: 'No user responding',
+                    19: 'No answer from user',
+                    21: 'Call rejected',
+                    27: 'Destination out of order',
+                    34: 'No circuit/channel available',
+                    41: 'Temporary failure',
+                    42: 'Switching equipment congestion',
+                    47: 'Resource unavailable',
+                    102: 'Setup timeout'
+                };
+                return map[cause] || 'Unknown cause';
+            };
+            const renderCadCauseBadge = (causeVal) => {
+                const cause = toNumOrNull(causeVal);
+                if (!Number.isFinite(cause)) {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#cbd5e1; background:rgba(100,116,139,0.25); border:1px solid rgba(148,163,184,0.35);">Cause: N/A</span>';
+                }
+                const label = `Cause ${cause}: ${decodeCadCauseUi(cause)}`;
+                if (cause === 16) {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">' + escapeHtml(label) + '</span>';
+                }
+                if (cause === 102 || [18, 19, 34, 41, 42, 47].includes(cause)) {
+                    return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">' + escapeHtml(label) + '</span>';
+                }
+                return '<span style="display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fde68a; background:rgba(202,138,4,0.20); border:1px solid rgba(250,204,21,0.45);">' + escapeHtml(label) + '</span>';
+            };
+            const cadCauseForBadges = toNumOrNull(
+                session?.umts?.setupFailureDeepAnalysis?.signalingAssessment?.cadCause ??
+                session?.setupFailureDeepAnalysis?.signalingAssessment?.cadCause ??
+                contextBundle?.callControlContext?.cadCause ??
+                null
+            );
+            const cadCauseBadge = renderCadCauseBadge(cadCauseForBadges);
+            const ppDetails = pilotPollution?.details || {};
+            const ppDelta = pilotPollution?.deltaStats || {};
+            const ppStrong = pilotPollution?.strongRscpBadEcno || {};
+            const ppActive = pilotPollution?.activeSet || {};
+            const pilotPollutionEvidence = [];
+            if (Number.isFinite(ppDetails.deltaMedian)) pilotPollutionEvidence.push(`ΔRSCP median: ${ppDetails.deltaMedian.toFixed(2)} dB`);
+            if (Number.isFinite(ppDetails.deltaRatio)) pilotPollutionEvidence.push(`ΔRSCP<3 dB ratio: ${(ppDetails.deltaRatio * 100).toFixed(0)}%`);
+            else if (Number.isFinite(ppDelta.samplesWith2Pilots) && Number(ppDelta.samplesWith2Pilots) === 0) pilotPollutionEvidence.push('ΔRSCP<3 dB ratio: n/a (0/0)');
+            if (Number.isFinite(ppDetails.deltaStd)) pilotPollutionEvidence.push(`ΔRSCP std: ${ppDetails.deltaStd.toFixed(2)} dB`);
+            if (Number.isFinite(ppDetails.badEcnoStrongRscpRatio)) pilotPollutionEvidence.push(`Strong-RSCP with bad EcNo ratio: ${(ppDetails.badEcnoStrongRscpRatio * 100).toFixed(0)}%`);
+            if (Number.isFinite(ppDetails.pscSwitchCount)) pilotPollutionEvidence.push(`Best PSC switches: ${ppDetails.pscSwitchCount}`);
+            if (Number.isFinite(ppDetails.activeSetMean) || Number.isFinite(ppDetails.activeSetMax)) {
+                const asMean = Number.isFinite(ppDetails.activeSetMean) ? ppDetails.activeSetMean.toFixed(2) : 'n/a';
+                const asMax = Number.isFinite(ppDetails.activeSetMax) ? ppDetails.activeSetMax : 'n/a';
+                pilotPollutionEvidence.push(`Active set mean/max: ${asMean} / ${asMax}`);
+            }
+            if (Number.isFinite(ppDelta.samplesWith2Pilots) && Number.isFinite(ppDelta.totalMimoSamples)) {
+                pilotPollutionEvidence.push(`Dominance denominator (>=2 pilots): ${ppDelta.samplesWith2Pilots}/${ppDelta.totalMimoSamples}`);
+            }
+            const strongB = Number.isFinite(ppStrong.denomBestValid) ? ppStrong.denomBestValid : 0;
+            const strongN = Number.isFinite(ppStrong.denomTotalMimo) ? ppStrong.denomTotalMimo : 0;
+            const strongS = Number.isFinite(ppStrong.strongCount) ? ppStrong.strongCount : 0;
+            const strongSB = Number.isFinite(ppStrong.strongBadCount) ? ppStrong.strongBadCount : 0;
+            const strongShare = Number.isFinite(ppStrong.ratioStrongShare) ? `${(ppStrong.ratioStrongShare * 100).toFixed(0)}%` : 'n/a';
+            const strongBad = Number.isFinite(ppStrong.ratioBad) ? `${(ppStrong.ratioBad * 100).toFixed(0)}%` : 'n/a';
+            pilotPollutionEvidence.push(`Strong RSCP share: ${strongShare} (${strongS}/${strongB})`);
+            pilotPollutionEvidence.push(`Strong RSCP + bad EcNo: ${strongBad} (${strongSB}/${strongS})`);
+            if (strongB || strongN) pilotPollutionEvidence.push(`Best-server denominator: ${strongB}/${strongN}`);
+            if (Number.isFinite(ppActive.mean) || Number.isFinite(ppActive.max)) {
+                const asMean = Number.isFinite(ppActive.mean) ? ppActive.mean.toFixed(2) : 'n/a';
+                const asMax = Number.isFinite(ppActive.max) ? ppActive.max : 'n/a';
+                pilotPollutionEvidence.push(`Active set proxy mean/max: ${asMean} / ${asMax}`);
+            }
+            const confidencePct = Math.round((Number(umtsClassification.confidence) || 0) * 100);
+            const parseCsvLite = (line) => String(line || '').split(',');
+            const parseDec = (v) => {
+                const n = parseFloat(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const servingCellName = (() => {
+                const psc = umtsSnapshot?.lastPsc;
+                const uarfcn = umtsSnapshot?.lastUarfcn;
+                if (window.resolveSmartSite && Number.isFinite(psc)) {
+                    const r = window.resolveSmartSite({ sc: psc, freq: uarfcn, pci: psc });
+                    if (r && r.name && r.name !== 'Unknown') return r.name;
+                }
+                if (Number.isFinite(psc) && Number.isFinite(uarfcn)) return `PSC ${psc} / UARFCN ${uarfcn}`;
+                if (Number.isFinite(psc)) return `PSC ${psc}`;
+                return 'Unknown';
+            })();
+            const chartHtml = (() => {
+                const rscpRaw = Array.isArray(umtsSnapshot?.seriesRscp) ? umtsSnapshot.seriesRscp : [];
+                const ecnoRaw = Array.isArray(umtsSnapshot?.seriesEcno) ? umtsSnapshot.seriesEcno : [];
+                const rscpSeries = rscpRaw
+                    .map(p => ({ t: Number(p?.ts), v: Number(p?.value) }))
+                    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v));
+                const ecnoSeries = ecnoRaw
+                    .map(p => ({ t: Number(p?.ts), v: Number(p?.value) }))
+                    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v));
+                if (!rscpSeries.length && !ecnoSeries.length) {
+                    return '<div style="font-size:12px; color:#9ca3af; margin-top:6px;">No RSCP/EcNo chart samples in window.</div>';
+                }
+
+                const baseSeries = rscpSeries.length ? rscpSeries : ecnoSeries;
+                const constFreq = Number.isFinite(umtsSnapshot?.lastUarfcn) ? Number(umtsSnapshot.lastUarfcn) : null;
+                const constName = (Number.isFinite(umtsSnapshot?.lastPsc) && Number.isFinite(umtsSnapshot?.lastUarfcn))
+                    ? `${Number(umtsSnapshot.lastPsc)}/${Number(umtsSnapshot.lastUarfcn)}`
+                    : null;
+                const freqSeries = constFreq === null ? [] : baseSeries.map(p => ({ t: p.t, v: constFreq }));
+                const cellNameSeries = constName ? baseSeries.map(p => ({ t: p.t, v: constName })) : [];
+
+                const minTs = Math.min(...baseSeries.map(p => p.t));
+                const maxTs = Math.max(...baseSeries.map(p => p.t));
+                const dayMs = 24 * 3600 * 1000;
+                const seriesLooksAbsolute = maxTs >= dayMs;
+                const absAnchor = Number.isFinite(umtsSnapshot?.windowEndTs) && umtsSnapshot.windowEndTs >= dayMs
+                    ? umtsSnapshot.windowEndTs
+                    : NaN;
+                const toTodMs = (absMs) => {
+                    const d = new Date(absMs);
+                    return (((d.getUTCHours() * 60 + d.getUTCMinutes()) * 60 + d.getUTCSeconds()) * 1000) + d.getUTCMilliseconds();
+                };
+                const alignToSeriesDomain = (rawTime) => {
+                    const parsed = parseSessionTimeToMs(rawTime);
+                    if (!Number.isFinite(parsed)) return NaN;
+                    if (seriesLooksAbsolute) {
+                        if (parsed >= dayMs) return parsed;
+                        if (!Number.isFinite(absAnchor)) return NaN;
+                        const base = new Date(absAnchor);
+                        const dayStartUtc = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), 0, 0, 0, 0);
+                        const c0 = dayStartUtc + parsed;
+                        const c1 = c0 - dayMs;
+                        const c2 = c0 + dayMs;
+                        const ref = maxTs;
+                        const candidates = [c0, c1, c2];
+                        candidates.sort((a, b) => Math.abs(a - ref) - Math.abs(b - ref));
+                        return candidates[0];
+                    }
+                    return parsed >= dayMs ? toTodMs(parsed) : parsed;
+                };
+
+                const markerCandidates = [
+                    session?.markerTime,
+                    session?.markerTsIso,
+                    Number.isFinite(umtsSnapshot?.lastMimoTs) ? umtsSnapshot.lastMimoTs : null,
+                    Number.isFinite(umtsSnapshot?.windowEndTs) ? umtsSnapshot.windowEndTs : null,
+                    session?.endTime
+                ];
+                let markerTs = NaN;
+                for (let i = 0; i < markerCandidates.length; i++) {
+                    const aligned = alignToSeriesDomain(markerCandidates[i]);
+                    if (Number.isFinite(aligned)) {
+                        markerTs = Math.max(minTs, Math.min(maxTs, aligned));
+                        break;
+                    }
+                }
+                const markerEvents = Number.isFinite(markerTs) ? [{ t: markerTs, label: 'SETUP FAIL' }] : [];
+                const miniTrend = buildMiniTrendSvg(
+                    rscpSeries,
+                    ecnoSeries,
+                    freqSeries,
+                    cellNameSeries,
+                    markerEvents,
+                    { finalEventLabel: 'SETUP FAIL', endTickLabel: '0s(fail)', showDefaultFinalMarker: true }
+                );
+                const zoomableMiniTrend = buildZoomableMiniTrend(miniTrend, `${session?.sessionId || 'umts'}_main`, {
+                    rscpSeries,
+                    ecnoSeries,
+                    freqSeries,
+                    cellNameSeries,
+                    markerEvents,
+                    options: { finalEventLabel: 'SETUP FAIL', endTickLabel: '0s(fail)', showDefaultFinalMarker: true }
+                });
+                return '' +
+                    '<div style="margin-top:8px; font-size:12px; color:#d1d5db;">Serving cell: <b>' + servingCellName + '</b></div>' +
+                    '<div style="margin-top:8px; font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">RSCP / EcNo Mini Trend (Last 10s)</div>' +
+                    zoomableMiniTrend;
+            })();
+
+            titleEl.textContent = caseLabel + ' Analysis - ' + (session?.sessionId || 'Session');
+            const recRows = recommendations.length
+                ? recommendations.map(r => (
+                    (() => {
+                        const actionId = r.actionId || '';
+                        const actionText = r.action || '-';
+                        const actionHtml = actionId
+                            ? '<a href="#" class="action-link" data-action-id="' + actionId + '" style="color:#93c5fd; text-decoration:underline;">' + actionText + '</a>'
+                            : actionText;
+                        return (
+                    '<tr>' +
+                    '<td style="padding:6px; border:1px solid #334155;">' + (r.priority || '-') + '</td>' +
+                    '<td style="padding:6px; border:1px solid #334155;">' + actionHtml + '</td>' +
+                    '<td style="padding:6px; border:1px solid #334155;">' + (r.rationale || '-') + '</td>' +
+                    '<td style="padding:6px; border:1px solid #334155;">' + (r.ownerHint || '-') + '</td>' +
+                    '</tr>'
+                        );
+                    })()
+                )).join('')
+                : '<tr><td colspan="4" style="padding:6px; border:1px solid #334155; color:#9ca3af;">No recommendations provided.</td></tr>';
+            const renderTimelineRows = (rows, emptyText) => {
+                if (!Array.isArray(rows) || rows.length === 0) return '<div style="color:#9ca3af;">' + escapeHtml(emptyText) + '</div>';
+                return rows.map((r) => (
+                    '<div style="margin-bottom:4px;">' +
+                    '<span style="color:#93c5fd;">' + escapeHtml(r?.tsIso || '-') + '</span>' +
+                    ' <span style="color:#fde68a;">[' + escapeHtml(r?.header || '-') + ']</span>' +
+                    '<div style="color:#d1d5db; margin-left:8px;">' + escapeHtml(r?.raw || '-') + '</div>' +
+                    '</div>'
+                )).join('');
+            };
+            const contextBundleHtml = (() => {
+                if (!showContextBundle) return '';
+                if (!contextBundle) {
+                    return '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+                        '<div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Expanded Context Bundle (Auto)</div>' +
+                        '<div style="font-size:12px; color:#fca5a5;">Context bundle is unavailable for this session.</div>' +
+                        '</div>';
+                }
+                const w = contextBundle.windows || {};
+                const rc = contextBundle.radioContext || {};
+                const sc = contextBundle.signalingContext || {};
+                const cc = contextBundle.callControlContext || {};
+                const fmtC = (v, d = 1) => (Number.isFinite(v) ? Number(v).toFixed(d) : 'N/A');
+                const bestSeries = Array.isArray(rc.bestServerSeries) ? rc.bestServerSeries : [];
+                const rscpSeriesCtx = bestSeries
+                    .map(p => ({ t: Date.parse(p?.tsIso || ''), v: Number(p?.rscp) }))
+                    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v));
+                const ecnoSeriesCtx = bestSeries
+                    .map(p => ({ t: Date.parse(p?.tsIso || ''), v: Number(p?.ecno) }))
+                    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v));
+                const baseCtxSeries = rscpSeriesCtx.length ? rscpSeriesCtx : ecnoSeriesCtx;
+                const freqSeriesCtx = bestSeries
+                    .map(p => ({ t: Date.parse(p?.tsIso || ''), v: Number(p?.uarfcn) }))
+                    .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v));
+                const cellNameSeriesCtx = bestSeries
+                    .map(p => {
+                        const t = Date.parse(p?.tsIso || '');
+                        const psc = Number(p?.psc);
+                        const uarfcn = Number(p?.uarfcn);
+                        if (!Number.isFinite(t) || !Number.isFinite(psc)) return null;
+                        return { t, v: Number.isFinite(uarfcn) ? `${psc}/${uarfcn}` : `${psc}` };
+                    })
+                    .filter(Boolean);
+                const contextChartHtml = (() => {
+                    if (!baseCtxSeries.length) {
+                        return '<div style="font-size:12px; color:#9ca3af; margin-bottom:8px;">No RSCP/EcNo samples available for context chart.</div>';
+                    }
+                    const minTs = Math.min(...baseCtxSeries.map(p => p.t));
+                    const maxTs = Math.max(...baseCtxSeries.map(p => p.t));
+                    const clampTs = (v) => Math.max(minTs, Math.min(maxTs, v));
+                    const markerTs = (iso) => {
+                        const t = Date.parse(iso || '');
+                        return Number.isFinite(t) ? clampTs(t) : null;
+                    };
+                    const markerEvents = [];
+                    const setupTs = markerTs(cc.endTsReal || w.radioWindowEndIso);
+                    if (Number.isFinite(setupTs)) markerEvents.push({ t: setupTs, label: 'SETUP FAIL', shortLabel: 'FAIL', color: '#ef4444', tsIso: cc.endTsReal || w.radioWindowEndIso || null });
+                    const hoTs = markerTs(sc.closestRrcOrHoBeforeEnd?.tsIso);
+                    if (Number.isFinite(hoTs)) markerEvents.push({ t: hoTs, label: 'Closest RRCSM/SHO', shortLabel: 'RRCSM/SHO', color: '#22d3ee', tsIso: sc.closestRrcOrHoBeforeEnd?.tsIso || null });
+                    const relTs = markerTs(sc.closestReleaseRejectCause?.tsIso);
+                    if (Number.isFinite(relTs)) markerEvents.push({ t: relTs, label: 'Closest release/reject/failure', shortLabel: 'REL/REJ', color: '#f59e0b', tsIso: sc.closestReleaseRejectCause?.tsIso || null });
+
+                    const svg = buildMiniTrendSvg(
+                        rscpSeriesCtx,
+                        ecnoSeriesCtx,
+                        freqSeriesCtx,
+                        cellNameSeriesCtx,
+                        markerEvents,
+                        { finalEventLabel: 'SETUP FAIL', endTickLabel: '0s(fail)', showDefaultFinalMarker: false }
+                    );
+                    const zoomableSvg = buildZoomableMiniTrend(svg, `${session?.sessionId || 'umts'}_context`, {
+                        rscpSeries: rscpSeriesCtx,
+                        ecnoSeries: ecnoSeriesCtx,
+                        freqSeries: freqSeriesCtx,
+                        cellNameSeries: cellNameSeriesCtx,
+                        markerEvents,
+                        options: { finalEventLabel: 'SETUP FAIL', endTickLabel: '0s(fail)', showDefaultFinalMarker: false }
+                    });
+                    const markerLegend = markerEvents.length
+                        ? markerEvents.map((m) => (
+                            '<div style="display:flex; align-items:center; gap:6px; margin-right:12px;">' +
+                            '<span style="display:inline-block; width:8px; height:8px; border-radius:999px; background:' + escapeHtml(String(m.color || '#94a3b8')) + ';"></span>' +
+                            '<span style="color:#cbd5e1;">' + escapeHtml(String(m.label || '-')) + '</span>' +
+                            '<span style="color:#93c5fd;">' + escapeHtml(String(m.tsIso || '-')) + '</span>' +
+                            '</div>'
+                        )).join('')
+                        : '<span style="color:#9ca3af;">No markers in context window.</span>';
+                    return '' +
+                        '<div style="font-size:12px; font-weight:600; color:#bfdbfe; margin:8px 0 6px;">Context Trend (RSCP / EcNo + Key Markers)</div>' +
+                        zoomableSvg +
+                        '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:4px; font-size:11px; color:#94a3b8; margin-top:6px;">' + markerLegend + '</div>';
+                })();
+                return '' +
+                    '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+                    '  <div style="font-size:12px; font-weight:700; color:#93c5fd; margin-bottom:8px;">Expanded Context Bundle (Auto)</div>' +
+                    '  <div style="display:grid; grid-template-columns: 180px 1fr; gap:6px; font-size:12px; margin-bottom:8px;">' +
+                    '    <div style="color:#93c5fd;">Radio Window</div><div>' + escapeHtml((w.radioWindowStartIso || '-') + ' → ' + (w.radioWindowEndIso || '-')) + ' (last ' + escapeHtml(String(w.radioPreEndSec ?? '-')) + 's)</div>' +
+                    '    <div style="color:#93c5fd;">Signaling Window</div><div>' + escapeHtml((w.signalingWindowStartIso || '-') + ' → ' + (w.signalingWindowEndIso || '-')) + ' (±' + escapeHtml(String(w.signalingAroundEndSec ?? '-')) + 's)</div>' +
+                    '  </div>' +
+                    '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin:8px 0 4px;">Radio Context</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; line-height:1.5;">' +
+                    'MIMOMEAS samples: ' + escapeHtml(String(rc.mimoSampleCount ?? 0)) + '<br>' +
+                    'RSCP (min/median/max): ' + fmtC(rc.rscpMin) + ' / ' + fmtC(rc.rscpMedian) + ' / ' + fmtC(rc.rscpMax) + ' dBm<br>' +
+                    'EcNo (min/median/max): ' + fmtC(rc.ecnoMin) + ' / ' + fmtC(rc.ecnoMedian) + ' / ' + fmtC(rc.ecnoMax) + ' dB<br>' +
+                    'UE Tx (last/p90/max): ' + fmtC(rc.txLast) + ' / ' + fmtC(rc.txP90) + ' / ' + fmtC(rc.txMax) + ' dBm<br>' +
+                    'BLER (max/trend): ' + fmtC(rc.blerMax) + ' / ' + fmtC(rc.blerTrend) + '</div>' +
+                    contextChartHtml +
+                    '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin:10px 0 4px;">Call-Control Context</div>' +
+                    '  <div style="display:grid; grid-template-columns: 120px 1fr; gap:6px; font-size:12px; margin-bottom:8px;">' +
+                    '    <div style="color:#93c5fd;">CAA/CAC</div><div>' + escapeHtml((cc.cAA || '-') + ' / ' + (cc.cACConnected || '-')) + '</div>' +
+                    '    <div style="color:#93c5fd;">CAD/CAF/CARE</div><div>' + escapeHtml((cc.cAD || '-') + ' / ' + (cc.cAF || '-') + ' / ' + (cc.cARE || '-')) + '</div>' +
+                    '    <div style="color:#93c5fd;">CAD status/cause</div><div>' + escapeHtml(String(cc.cadStatus ?? '-')) + ' / ' + escapeHtml(String(cc.cadCause ?? '-')) + renderCadCauseBadge(cc.cadCause) + '</div>' +
+                    '    <div style="color:#93c5fd;">CAF reason</div><div>' + escapeHtml(String(cc.cafReason ?? '-')) + '</div>' +
+                    '    <div style="color:#93c5fd;">Connected ever</div><div>' + (cc.connectedEver ? 'Yes' : 'No') + '</div>' +
+                    '  </div>' +
+                    '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin:10px 0 4px;">Signaling Context</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:6px;">Total events in window: ' + escapeHtml(String(sc.totalEventsInWindow ?? 0)) + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;"><b>Closest RRCSM/SHO before end:</b></div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;">' + renderTimelineRows(sc.closestRrcOrHoBeforeEnd ? [sc.closestRrcOrHoBeforeEnd] : [], 'No RRCSM/SHO event found.') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;"><b>Closest release/reject/failure cause:</b></div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;">' + renderTimelineRows(sc.closestReleaseRejectCause ? [sc.closestReleaseRejectCause] : [], 'No release/reject/failure event found.') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;"><b>Last 20 events before end:</b></div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; max-height:180px; overflow:auto; border:1px solid #334155; border-radius:6px; padding:6px; margin-bottom:8px;">' +
+                    renderTimelineRows(sc.last20EventsBeforeEnd, 'No events before end in this window.') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:4px;"><b>First 10 events after start:</b></div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; max-height:180px; overflow:auto; border:1px solid #334155; border-radius:6px; padding:6px;">' +
+                    renderTimelineRows(sc.first10EventsAfterStart, 'No events after start in this window.') + '</div>' +
+                    '</div>';
+            })();
+            const deepAnalysis = isSetupFailure ? (session?.umts?.setupFailureDeepAnalysis || session?.setupFailureDeepAnalysis || null) : null;
+            const deepAnalysisHtml = (() => {
+                if (!isSetupFailure || !deepAnalysis) return '';
+                const ra = deepAnalysis.radioAssessment || {};
+                const sa = deepAnalysis.signalingAssessment || {};
+                const it = deepAnalysis.interpretation || {};
+                const cl = deepAnalysis.classification || {};
+                const cf = deepAnalysis.confidence || {};
+                const daRecs = Array.isArray(deepAnalysis.recommendedActions) ? deepAnalysis.recommendedActions : [];
+                const metricTxt = (v, u) => (Number.isFinite(v) ? `${Number(v).toFixed(1)}${u ? ` ${u}` : ''}` : 'N/A');
+                const yesNoBadge = (v) => v
+                    ? '<span style="display:inline-block; margin:0 6px; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">Yes</span>'
+                    : '<span style="display:inline-block; margin:0 6px; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">No</span>';
+                const yesNoBadgeRelease = (v) => v
+                    ? '<span style="display:inline-block; margin:0 6px; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:700; color:#fecaca; background:rgba(220,38,38,0.20); border:1px solid rgba(248,113,113,0.45);">Yes</span>'
+                    : '<span style="display:inline-block; margin:0 6px; padding:1px 8px; border-radius:999px; font-size:10px; font-weight:700; color:#bbf7d0; background:rgba(22,163,74,0.22); border:1px solid rgba(74,222,128,0.45);">No</span>';
+                const sigLine = (label, flag, yesExplain, noExplain) => (
+                    escapeHtml(label) + ': ' + yesNoBadge(!!flag) +
+                    '<span style="color:#94a3b8;">(' + escapeHtml(!!flag ? yesExplain : noExplain) + ')</span>'
+                );
+                const sigLineRelease = (label, flag, yesExplain, noExplain) => (
+                    escapeHtml(label) + ': ' + yesNoBadgeRelease(!!flag) +
+                    '<span style="color:#94a3b8;">(' + escapeHtml(!!flag ? yesExplain : noExplain) + ')</span>'
+                );
+                const deepRecRows = daRecs.length
+                    ? daRecs.map((r) => {
+                        const actionId = r.actionId || '';
+                        const actionText = r.action || '-';
+                        const actionHtml = actionId
+                            ? '<a href="#" class="action-link" data-action-id="' + actionId + '" style="color:#93c5fd; text-decoration:underline;">' + escapeHtml(actionText) + '</a>'
+                            : escapeHtml(actionText);
+                        return '<tr>' +
+                            '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.priority || '-') + '</td>' +
+                            '<td style="padding:6px; border:1px solid #334155;">' + actionHtml + '</td>' +
+                            '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.rationale || '-') + '</td>' +
+                            '<td style="padding:6px; border:1px solid #334155;">' + escapeHtml(r.ownerHint || '-') + '</td>' +
+                            '</tr>';
+                    }).join('')
+                    : '<tr><td colspan="4" style="padding:6px; border:1px solid #334155; color:#9ca3af;">No recommendations provided.</td></tr>';
+                return '' +
+                    '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;">' +
+                    '  <div style="font-size:12px; font-weight:700; color:#bfdbfe; margin-bottom:8px;">Setup Failure Deep Analysis</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;"><b>1) Radio Assessment</b><br>' +
+                    'RSCP (min/median/max): ' + metricTxt(ra?.metrics?.rscpMin, 'dBm') + ' / ' + metricTxt(ra?.metrics?.rscpMedian, 'dBm') + ' / ' + metricTxt(ra?.metrics?.rscpMax, 'dBm') + '<br>' +
+                    'EcNo (min/median/max): ' + metricTxt(ra?.metrics?.ecnoMin, 'dB') + ' / ' + metricTxt(ra?.metrics?.ecnoMedian, 'dB') + ' / ' + metricTxt(ra?.metrics?.ecnoMax, 'dB') + '<br>' +
+                    'UE Tx (p90): ' + metricTxt(ra?.metrics?.txP90, 'dBm') + '<br>' +
+                    'BLER (max): ' + metricTxt(ra?.metrics?.blerMax, '%') + '<br>' +
+                    'Evaluation: ' + escapeHtml(ra?.evaluation || '-') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;"><b>2) Signaling Assessment</b><br>' +
+                    sigLine(
+                        'RRC Direct Transfer observed',
+                        !!sa?.directTransferObserved,
+                        'RRC connection was already active -> UE and network were exchanging NAS messages',
+                        'No direct-transfer signaling seen before end'
+                    ) + '<br>' +
+                    sigLineRelease(
+                        'Explicit L3 RELEASE/REJECT near end',
+                        !!(sa?.explicitL3ReleaseRejectNearEnd ?? sa?.immediateReleaseNearEnd),
+                        'Release/reject happened close to end timestamp (control-plane termination)',
+                        'No immediate release/reject found near end'
+                    ) + '<br>' +
+                    sigLine(
+                        'Connection established (CAC state=3)',
+                        !!sa?.connectedEver,
+                        'Call reached connected state',
+                        'Call never connected (setup failure stage)'
+                    ) + '<br>' +
+                    'Terminal marker: ' + escapeHtml(
+                        String(sa?.terminalMarkerLabel || (
+                            (sa?.terminalMarker === 'CAF')
+                                ? `CAF reason ${sa?.cafReason ?? 'N/A'} (${sa?.cafReasonLabel || 'Unknown/tool-specific reason'})`
+                                : (sa?.terminalMarker || 'N/A')
+                        ))
+                    ) + '<br>' +
+                    'CAD status/cause: ' + escapeHtml(String(sa?.cadStatus ?? '-')) + ' / ' + escapeHtml(String(sa?.cadCause ?? '-')) + renderCadCauseBadge(sa?.cadCause) + '<br>' +
+                    'Evaluation: ' + escapeHtml(sa?.evaluation || '-') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;"><b>3) Technical Interpretation</b><br>' + escapeHtml(it?.summary || '-') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;"><b>4) Root Cause Classification</b><br>' +
+                    'Category: ' + escapeHtml(cl?.category || '-') + '<br>' +
+                    'Domain: ' + escapeHtml(cl?.domain || '-') + '</div>' +
+                    '  <div style="font-size:12px; color:#d1d5db; margin-bottom:8px;"><b>5) Confidence</b><br>' +
+                    'Classifier confidence: ' + Math.round((Number(cl?.confidence) || 0) * 100) + '%<br>' +
+                    'Evidence strength: ' + Math.round((Number(cf?.normalized) || 0) * 100) + '% (score ' + escapeHtml(String(cf?.score ?? '-')) + '/100)</div>' +
+                    '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;"><b>6) Structured Recommended Actions</b></div>' +
+                    '  <table style="width:100%; border-collapse:collapse; font-size:12px; color:#d1d5db;">' +
+                    '    <thead><tr style="color:#93c5fd;"><th style="padding:6px; border:1px solid #334155; text-align:left;">Priority</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Action</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Rationale</th><th style="padding:6px; border:1px solid #334155; text-align:left;">Owner</th></tr></thead>' +
+                    '    <tbody>' + deepRecRows + '</tbody>' +
+                    '  </table>' +
+                    '</div>';
+            })();
+            bodyEl.innerHTML =
+                '<div style=\"display:grid; grid-template-columns: 180px 1fr; gap:8px; font-size:12px; margin-bottom:10px;\">' +
+                '  <div style=\"color:#93c5fd;\">Log</div><div>' + (log?.name || '-') + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Session</div><div>' + (session?.sessionId || '-') + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Call ID</div><div>' + (session?.callTransactionId || '-') + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Type</div><div>' + (umtsClassification.resultType || '-') + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Category</div><div>' + (umtsClassification.category || '-') + pilotPollutionBadge + cadCauseBadge + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Domain</div><div>' + (umtsClassification.domain || 'Undetermined') + '</div>' +
+                '  <div style=\"color:#93c5fd;\">Confidence</div><div>' + confidencePct + '%</div>' +
+                '</div>' +
+                deepAnalysisHtml +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">One-Paragraph Summary</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db; line-height:1.5;\">' + oneParagraphSummary + '</div>' +
+                '</div>' +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Authoritative Summary</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (umtsClassification.reason || '-') + '</div>' +
+                '</div>' +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Explanation</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + (explanation.whatHappened || '-') + '</div>' +
+                '  <div style=\"display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;\">' +
+                '    <div style=\"font-size:12px; color:#d1d5db;\"><b>Pilot Pollution Risk:</b> ' + pilotPollutionText + '</div>' +
+                (pilotPollution
+                    ? '    <button class="btn-see-more-pp" style="background:#111827; border:1px solid rgba(255,255,255,0.15); color:#e5e7eb; padding:4px 10px; border-radius:10px; cursor:pointer; font-size:11px;">See more details</button>'
+                    : '') +
+                '  </div>' +
+                ((ppDominanceScore !== null || ppInterferenceScore !== null || ppFinalLabel)
+                    ? ('  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' +
+                        ('<div>Dominance/Overlap risk: ' + (ppDominanceAvailable ? ((ppDominanceLevel || '-') + ' (' + (ppDominanceScore ?? 0) + '/100)') : 'N/A (0/' + (ppDelta?.totalMimoSamples ?? 0) + ' >=2-pilot)') + '</div>') +
+                        (ppInterferenceScore !== null ? ('<div>Interference-under-strong-signal risk: ' + (ppInterferenceLevel || '-') + ' (' + ppInterferenceScore + '/100)</div>') : '') +
+                        (ppFinalLabel ? ('<div>Overall label: ' + ppFinalLabel + '</div>') : '') +
+                        '</div>')
+                    : '') +
+                (pilotPollutionEvidence.length
+                    ? ('  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + ('- ' + pilotPollutionEvidence.join('<br>- ')) + '</div>')
+                    : '') +
+                '  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + explanationMetricStatusesHtml.join('<br>') + '</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (whyWeThinkSo.length ? ('- ' + whyWeThinkSo.map(x => decorateOkNokText(x)).join('<br>- ')) : 'No detailed evidence bullets.') + '</div>' +
+                '</div>' +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Evidence</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (evidence.length ? ('- ' + evidence.join('<br>- ')) : 'No evidence provided.') + '</div>' +
+                '</div>' +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Recommended Actions</div>' +
+                '  <table style=\"width:100%; border-collapse:collapse; font-size:12px; color:#d1d5db;\">' +
+                '    <thead><tr style=\"color:#93c5fd;\"><th style=\"padding:6px; border:1px solid #334155; text-align:left;\">Priority</th><th style=\"padding:6px; border:1px solid #334155; text-align:left;\">Action</th><th style=\"padding:6px; border:1px solid #334155; text-align:left;\">Rationale</th><th style=\"padding:6px; border:1px solid #334155; text-align:left;\">Owner</th></tr></thead>' +
+                '    <tbody>' + recRows + '</tbody>' +
+                '  </table>' +
+                '</div>' +
+                contextBundleHtml +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Windowed Radio Snapshot</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' +
+                metricLine('RSCP median', fmt(umtsSnapshot?.rscpMedian, 'dBm'), rscpOk, `OK if > ${metricProfile.rscpMinOk} dBm`) + '<br>' +
+                metricLine('EcNo median', fmt(umtsSnapshot?.ecnoMedian, 'dB'), ecnoOk, `OK if > ${metricProfile.ecnoMinOk} dB`) + '<br>' +
+                metricLine('BLER max', fmt(umtsSnapshot?.blerMax, '%'), blerOk, `OK if < ${metricProfile.blerMaxOk}%`) + '<br>' +
+                metricLine('UE Tx (last/p90/max)', (fmt(umtsSnapshot?.txLast, 'dBm') + ' / ' + fmt(umtsSnapshot?.txP90, 'dBm') + ' / ' + fmt(umtsSnapshot?.txMax, 'dBm')), txOk, `OK if p90 < ${metricProfile.txP90MaxOk} dBm`) + '<br>' +
+                txInterpretationHtml +
+                'Trend basis: ' + (umtsSnapshot?.trendBasis || 'last 10s window') + '<br>' +
+                'RSCP trend Δ: ' + fmt(umtsSnapshot?.rscpTrendDelta, 'dB') + '<br>' +
+                'EcNo trend Δ: ' + fmt(umtsSnapshot?.ecnoTrendDelta, 'dB') + '<br>' +
+                'MIMOMEAS sample count: ' + sampleCount + '<br>' +
+                trendMessage +
+                '</div>' + chartHtml +
+                '</div>' +
+                (isSetupFailure
+                    ? '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
+                    '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Mobility / HO / RLF</div>' +
+                    '  <div style=\"font-size:12px; color:#d1d5db;\">Not applicable (call never connected).</div>' +
+                    '</div>'
+                    : '') +
+                '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-top:10px;\">' +
+                '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Session Timeline</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + timelineHtml + '</div>' +
+                '</div>';
+
+            document.getElementById('dropAnalysisModal').style.display = 'block';
+            return;
+        }
+        const isSetupFailure = !!session?.setupFailure;
+        const isDropCall = !!session?.drop;
+        const caseLabel = isSetupFailure ? 'Setup Failure' : (isDropCall ? 'Drop Call' : 'Generic Session');
+        const triggerLabel = isSetupFailure ? 'Failure Trigger' : 'Drop Trigger';
+        const radioLabel = isSetupFailure ? 'Radio Context Near Setup Failure' : 'Radio Context Near Drop';
+        const timelineLabel = isSetupFailure ? 'Event Timeline Around Setup Failure' : 'Event Timeline Around Drop';
 
         const reasonLabel = session?.failureReason?.label || '-';
         const reasonCause = session?.failureReason?.cause || '-';
@@ -9641,7 +11750,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const duration = typeof session?.durationMs === 'number' ? (session.durationMs / 1000).toFixed(1) + ' s' : '-';
         const insights = buildDropInsights(log, session);
         const root = deriveDropRootCause(insights);
-        const oneParagraph = buildDropOneParagraphSummary(session, insights, root);
+        const oneParagraph = isSetupFailure
+            ? 'Session ended during call setup before confirmed connection. Generic RRC/session indicators are shown for context; UMTS authoritative call-end markers are unavailable for this session.'
+            : buildDropOneParagraphSummary(session, insights, root);
         const likelyPostHoHtml = buildPostHoLikelyCauses(insights, root);
         const timeline = buildDropEventTimeline(log, session);
         const v = insights.values || {};
@@ -9660,14 +11771,14 @@ document.addEventListener('DOMContentLoaded', () => {
             ? timeline.map(e => '<div style="margin-bottom:3px;">[' + e.deltaSec + 's] ' + e.time + ' - ' + e.label + '</div>').join('')
             : '<div style="color:#9ca3af;">No nearby event timeline found (±15s).</div>';
 
-        titleEl.textContent = 'Drop Call Analysis - ' + (session?.sessionId || 'Session');
+        titleEl.textContent = 'RRC Session Analysis - ' + (session?.sessionId || 'Session');
         bodyEl.innerHTML =
             '<div style="display:grid; grid-template-columns: 180px 1fr; gap:8px; font-size:12px; margin-bottom:10px;">' +
             '  <div style="color:#93c5fd;">Log</div><div>' + (log?.name || '-') + '</div>' +
             '  <div style="color:#93c5fd;">Session</div><div>' + (session?.sessionId || '-') + '</div>' +
             '  <div style="color:#93c5fd;">Call ID</div><div>' + (session?.callTransactionId || '-') + '</div>' +
             '  <div style="color:#93c5fd;">Window</div><div>' + (session?.startTime || '-') + ' → ' + (session?.endTime || '-') + ' (' + duration + ')</div>' +
-            '  <div style="color:#93c5fd;">Drop Trigger</div><div>' + endTrigger + '</div>' +
+            '  <div style="color:#93c5fd;">' + triggerLabel + '</div><div>' + endTrigger + '</div>' +
             '  <div style="color:#93c5fd;">End Type</div><div>' + endType + '</div>' +
             '  <div style="color:#93c5fd;">Failure Reason</div><div>' + reasonLabel + '</div>' +
             '  <div style="color:#93c5fd;">Cause</div><div>' + reasonCause + '</div>' +
@@ -9688,11 +11799,11 @@ document.addEventListener('DOMContentLoaded', () => {
             '  <div style="font-size:12px; color:#d1d5db;">' + rrcTrail + '</div>' +
             '</div>' +
             '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px;">' +
-            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Radio Context Near Drop</div>' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">' + radioLabel + '</div>' +
             '  <div style="font-size:12px; color:#d1d5db;">' + summarizeDropRadio(session) + '</div>' +
             '</div>' +
             '<div style="padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-top:10px;">' +
-            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">Event Timeline Around Drop</div>' +
+            '  <div style="font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;">' + timelineLabel + '</div>' +
             '  <div style="font-size:12px; color:#d1d5db;">' + timelineHtml + '</div>' +
             '</div>' +
             '<div style="margin-top:10px;">' +
@@ -9765,8 +11876,28 @@ document.addEventListener('DOMContentLoaded', () => {
     const findSessionAnchorPoint = (log, session, mode) => {
         if (!log || !Array.isArray(log.points) || log.points.length === 0 || !session) return null;
         const parseT = parseSessionTimeToMs;
-        const targetTime = session.endTime || session.startTime;
+        const markerCandidate = session?.markerTime || session?.markerTsIso ||
+            (Number.isFinite(session?.umts?.snapshot?.windowEndTs) ? new Date(session.umts.snapshot.windowEndTs).toISOString() : null);
+        const targetTime = markerCandidate || (session.endTime || session.startTime);
         const targetMs = parseT(targetTime);
+        const dayMs = 24 * 3600 * 1000;
+        const parseTodMsAny = (timeValue) => {
+            if (!timeValue) return NaN;
+            const txt = String(timeValue).trim();
+            const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (m) {
+                const hh = parseInt(m[1], 10);
+                const mm = parseInt(m[2], 10);
+                const ss = parseInt(m[3], 10);
+                const ms = parseInt((m[4] || '0').padEnd(3, '0'), 10);
+                return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+            }
+            const iso = Date.parse(txt);
+            if (Number.isNaN(iso)) return NaN;
+            const d = new Date(iso);
+            return (((d.getUTCHours() * 60 + d.getUTCMinutes()) * 60 + d.getUTCSeconds()) * 1000) + d.getUTCMilliseconds();
+        };
+        const targetTodMs = parseTodMsAny(targetTime);
 
         const isDropLikeEvent = (p) => {
             const txt = [
@@ -9784,25 +11915,53 @@ document.addEventListener('DOMContentLoaded', () => {
             );
         };
 
+        const pointTypeRank = (p) => {
+            const t = String(p?.type || '').toUpperCase();
+            const hasSignal = Number.isFinite(parseFloat(p?.rscp)) || Number.isFinite(parseFloat(p?.ecno)) ||
+                Number.isFinite(parseFloat(p?.level)) || Number.isFinite(parseFloat(p?.properties?.['Serving RSCP']));
+            const hasTx = Number.isFinite(parseFloat(p?.properties?.['UE Tx Power']));
+            const hasBler = Number.isFinite(parseFloat(p?.bler_dl)) || Number.isFinite(parseFloat(p?.properties?.['BLER DL']));
+            if (hasSignal || t === 'MEASUREMENT') return 0; // MIMOMEAS/CELLMEAS-like
+            if (hasTx) return 1; // TXPC-like
+            if (hasBler) return 2; // RLCBLER-like
+            if (t === 'SIGNALING') return 3;
+            return 4; // events/fallback
+        };
+
         let exact = null;
         let best = null;
         let minDiff = Infinity;
         let bestDropLike = null;
         let minDropDiff = Infinity;
+        let bestRank = Infinity;
 
         for (let i = 0; i < log.points.length; i++) {
             const p = log.points[i];
             if (!p || !p.time) continue;
             const pMs = parseT(p.time);
-            const diff = (Number.isNaN(targetMs) || Number.isNaN(pMs)) ? Infinity : Math.abs(pMs - targetMs);
+            const pTodMs = parseTodMsAny(p.time);
+            let diff = Infinity;
+
+            // Compare in same time domain when possible
+            if (!Number.isNaN(targetMs) && !Number.isNaN(pMs)) {
+                const bothTod = targetMs < dayMs && pMs < dayMs;
+                const bothAbs = targetMs >= dayMs && pMs >= dayMs;
+                if (bothTod || bothAbs) diff = Math.min(diff, Math.abs(pMs - targetMs));
+            }
+            // Fallback for mixed formats (ISO vs HH:MM:SS.mmm): compare time-of-day
+            if (!Number.isNaN(targetTodMs) && !Number.isNaN(pTodMs)) {
+                diff = Math.min(diff, Math.abs(pTodMs - targetTodMs));
+            }
 
             if (p.time === targetTime) {
                 exact = { point: p, index: i };
                 if (mode !== 'drop' || isDropLikeEvent(p)) break;
             }
-            if (diff < minDiff) {
+            const rank = pointTypeRank(p);
+            if (diff < minDiff || (Math.abs(diff - minDiff) < 1e-6 && rank < bestRank)) {
                 minDiff = diff;
                 best = { point: p, index: i };
+                bestRank = rank;
             }
             if (mode === 'drop' && isDropLikeEvent(p) && diff < minDropDiff) {
                 minDropDiff = diff;
@@ -9815,7 +11974,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (bestDropLike && minDropDiff <= 15000) return bestDropLike;
         }
         if (exact) return exact;
-        if (best && minDiff <= 10000) return best;
+        if (best && minDiff <= 2000) return best;
         return best || null;
     };
 
@@ -9824,12 +11983,57 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!hit || !hit.point) return;
 
         const p = hit.point;
+        const enrichedPoint = (() => {
+            const lbs = session?.umts?.snapshot?.lastBestServer;
+            if (!lbs) return p;
+            const toNum = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            // For call-session drop/setup panels, force serving metrics from UMTS snapshot
+            // so Point Details matches analysis snapshot/mini-chart source.
+            const forceUmtsServing = mode === 'drop' || mode === 'setupFailure';
+            const hasServingSc = forceUmtsServing ? false : (toNum(p?.sc) !== null || toNum(p?.parsed?.serving?.sc) !== null || toNum(p?.properties?.['Serving SC']) !== null);
+            const hasServingFreq = forceUmtsServing ? false : (toNum(p?.freq) !== null || toNum(p?.parsed?.serving?.freq) !== null || toNum(p?.properties?.['Serving Freq']) !== null);
+            const hasServingRscp = forceUmtsServing ? false : (toNum(p?.rscp) !== null || toNum(p?.level) !== null || toNum(p?.parsed?.serving?.rscp) !== null || toNum(p?.properties?.['Serving RSCP']) !== null);
+            const hasServingEcno = forceUmtsServing ? false : (toNum(p?.ecno) !== null || toNum(p?.parsed?.serving?.ecno) !== null || toNum(p?.properties?.['Serving EcNo']) !== null || toNum(p?.properties?.['EcNo']) !== null);
+
+            const parsed = Object.assign({}, p.parsed || {});
+            parsed.serving = Object.assign({}, parsed.serving || {});
+            if (!hasServingSc && Number.isFinite(lbs.psc)) parsed.serving.sc = lbs.psc;
+            if (!hasServingFreq && Number.isFinite(lbs.uarfcn)) parsed.serving.freq = lbs.uarfcn;
+            if (!hasServingRscp && Number.isFinite(lbs.rscp)) parsed.serving.rscp = lbs.rscp;
+            if (!hasServingEcno && Number.isFinite(lbs.ecno)) parsed.serving.ecno = lbs.ecno;
+            if (!parsed.serving.cellId && lbs.cellId !== undefined && lbs.cellId !== null) parsed.serving.cellId = lbs.cellId;
+
+            const props = Object.assign({}, p.properties || {}, {
+                'Cell ID': p?.properties?.['Cell ID'] ?? lbs.cellId
+            });
+            if (!hasServingSc && Number.isFinite(lbs.psc) && props['Serving SC'] === undefined) props['Serving SC'] = lbs.psc;
+            if (!hasServingFreq && Number.isFinite(lbs.uarfcn) && props['Serving Freq'] === undefined) props['Serving Freq'] = lbs.uarfcn;
+            if (!hasServingRscp && Number.isFinite(lbs.rscp) && props['Serving RSCP'] === undefined) props['Serving RSCP'] = lbs.rscp;
+            if (!hasServingEcno && Number.isFinite(lbs.ecno) && props['Serving EcNo'] === undefined) props['Serving EcNo'] = lbs.ecno;
+            if (forceUmtsServing) props['Serving Source'] = 'UMTS MIMOMEAS best-server (session snapshot)';
+
+            return Object.assign({}, p, {
+                parsed,
+                properties: props,
+                sc: hasServingSc ? p.sc : (Number.isFinite(lbs.psc) ? lbs.psc : p.sc),
+                freq: hasServingFreq ? p.freq : (Number.isFinite(lbs.uarfcn) ? lbs.uarfcn : p.freq),
+                rscp: hasServingRscp ? p.rscp : (Number.isFinite(lbs.rscp) ? lbs.rscp : p.rscp),
+                ecno: hasServingEcno ? p.ecno : (Number.isFinite(lbs.ecno) ? lbs.ecno : p.ecno),
+                cellId: p.cellId ?? lbs.cellId
+            });
+        })();
+        if (window.updateFloatingInfoPanel) {
+            window.updateFloatingInfoPanel(enrichedPoint, log?.color);
+        }
         if (p.lat !== undefined && p.lng !== undefined && window.map && window.map.setView) {
             window.map.setView([p.lat, p.lng], 17);
         }
 
         if (typeof window.globalSync === 'function') {
-            window.globalSync(log.id, hit.index, 'call-session');
+            window.globalSync(log.id, hit.index, 'call-session', true);
             return;
         }
 
@@ -9902,6 +12106,7 @@ document.addEventListener('DOMContentLoaded', () => {
         filtered.forEach(s => {
             const tr = document.createElement('tr');
             tr.style.background = '#0f172a';
+            const isUmtsCall = s?._source === 'umts' && s?.kind === 'UMTS_CALL';
 
             const startMs = parseSessionTimeToMs(s.startTime);
             const endMs = parseSessionTimeToMs(s.endTime);
@@ -9912,13 +12117,13 @@ document.addEventListener('DOMContentLoaded', () => {
             const rabCount = Array.isArray(s.rabLifecycle) ? s.rabLifecycle.length : 0;
             const measCount = Array.isArray(s.radioMeasurementsTimeline) ? s.radioMeasurementsTimeline.length : 0;
             const idsText = [s.imsi || '-', s.tmsi || '-'].join(' / ');
-            const endType = s.endType || '-';
+            const endType = isUmtsCall ? (s.endType || '-') : 'RRC_SESSION';
             const failureReason = s.failureReason?.label || '-';
             const ynHtml = (val) => val
                 ? '<span style="color:#f87171; font-weight:600;">Yes</span>'
                 : '<span style="color:#22c55e; font-weight:600;">No</span>';
-            const dropText = ynHtml(!!s.drop);
-            const setupFailureText = ynHtml(!!s.setupFailure);
+            const dropText = ynHtml(isUmtsCall ? !!s.drop : false);
+            const setupFailureText = ynHtml(isUmtsCall ? !!s.setupFailure : false);
 
             const td = (value) => '<td style="padding:6px; border:1px solid #334155; vertical-align:top;">' + value + '</td>';
             tr.innerHTML =
@@ -9938,7 +12143,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const dropCell = tr.children[8];
             const setupCell = tr.children[9];
-            if (dropCell && s.drop) {
+            if (dropCell && isUmtsCall && s.drop) {
                 dropCell.style.cursor = 'pointer';
                 dropCell.style.color = '#fca5a5';
                 dropCell.title = 'Click to analyze drop and sync map';
@@ -9948,13 +12153,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     renderDropAnalysis(log, s);
                 };
             }
-            if (setupCell && s.setupFailure) {
+            if (setupCell && isUmtsCall && s.setupFailure) {
                 setupCell.style.cursor = 'pointer';
                 setupCell.style.color = '#fde68a';
-                setupCell.title = 'Click to sync setup-failure point on map';
+                setupCell.title = 'Click to analyze setup failure and sync map';
                 setupCell.onclick = (e) => {
                     e.stopPropagation();
                     syncSessionPointToMap(log, s, 'setupFailure');
+                    renderDropAnalysis(log, s);
                 };
             }
 
@@ -10639,6 +12845,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.onclick = (e) => {
                     if (type === 'event') {
                         if (window.mapRenderer) {
+                            if (typeof param === 'string' && param.startsWith('trp_event:')) {
+                                const trpEventName = param.slice('trp_event:'.length);
+                                const filteredEvents = (log.events || []).filter(ev => String(ev && ev.event_name || '') === trpEventName);
+                                const layerId = 'event__' + log.id + '__trp_' + String(trpEventName).replace(/[^a-zA-Z0-9_-]/g, '_');
+                                window.mapRenderer.addEventsLayer(layerId, filteredEvents);
+                                if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                                const eventKey = log.id + '::trp_event::' + trpEventName;
+                                window.eventLegendEntries[eventKey] = {
+                                    title: trpEventName,
+                                    iconUrl: null,
+                                    color: '#6b7280',
+                                    count: filteredEvents.length,
+                                    logId: log.id,
+                                    points: filteredEvents,
+                                    layerId: layerId,
+                                    visible: true
+                                };
+                                if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                                if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                                if (window.updateLegend) window.updateLegend();
+                            } else 
                             if (param === '3g_dropcall') {
                                 const drops = window.filter3gDropCalls(log);
                                 const layerId = 'event__' + log.id + '__3g_dropcall';
@@ -10653,6 +12880,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                     title: 'Drop Call',
                                     iconUrl: 'icons/3g_dropcall.png',
                                     count: drops.length,
+                                    logId: log.id,
+                                    points: drops,
                                     layerId: layerId,
                                     visible: true
                                 };
@@ -10673,6 +12902,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                     title: 'Call Failure',
                                     iconUrl: 'icons/3G_CallFailure.png',
                                     count: fails.length,
+                                    logId: log.id,
+                                    points: fails,
                                     layerId: layerId,
                                     visible: true
                                 };
@@ -10693,6 +12924,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                     title: 'Handover Failure',
                                     iconUrl: 'icons/HOF.png',
                                     count: hofs.length,
+                                    logId: log.id,
+                                    points: hofs,
                                     layerId: layerId,
                                     visible: true
                                 };
@@ -10717,6 +12950,12 @@ document.addEventListener('DOMContentLoaded', () => {
                                 if (window.updateLegend) window.updateLegend();
                             }
                         }
+                    } else if (type === 'throughput') {
+                        if (window.openThroughputAnalysisPanel) {
+                            window.openThroughputAnalysisPanel(log, String(param || 'dl'));
+                        }
+                    } else if (type === 'driver_entry') {
+                        window.showMetricOptions(e, log.id, param, 'driver_entry');
                     } else {
                         window.showMetricOptions(e, log.id, param, 'regular');
                     }
@@ -10735,8 +12974,163 @@ document.addEventListener('DOMContentLoaded', () => {
             // NEW: DYNAMIC METRICS VS FIXED METRICS
             // If customMetrics exist, use them. Else use Fixed NMF list.
 
+            if (log.trpRunId && (!log.customMetrics || log.customMetrics.length === 0)) {
+                actions.appendChild(addHeader('KPIs'));
+                const empty = document.createElement('div');
+                empty.textContent = 'No valid KPI samples decoded';
+                empty.style.cssText = 'font-size:11px;color:#fca5a5;padding:4px 6px;';
+                actions.appendChild(empty);
+                // IMPORTANT: this code runs inside loadedLogs.forEach(...). If we `return` here
+                // without appending the DOM nodes, the log item never shows up in the sidebar.
+                body.appendChild(stats);
+                body.appendChild(actions);
+                item.appendChild(header);
+                item.appendChild(body);
+                container.appendChild(item);
+                return;
+            }
+
             if (log.customMetrics && log.customMetrics.length > 0) {
-                const groups = {
+                if (log.trpRunId) {
+                    const orderedMetricKeys = [
+                        'RSRP',
+                        'RSRQ',
+                        'SINR',
+                        'DL throughput',
+                        'UL throughput',
+                        'Application throughput DL',
+                        'Application throughput UL',
+                        'Radio Throughput DL',
+                        'Radio Throughput UL',
+                        'Cellid',
+                        'Physical cell ID',
+                        'eNodeB ID',
+                        'Cell ID',
+                        'Downlink EARFCN',
+                        'Tracking area code'
+                    ];
+                    const byLabel = new Map();
+                    (Array.isArray(log.customMetrics) ? log.customMetrics : []).forEach(m => {
+                        const label = (log.trpMetricLabels && log.trpMetricLabels[m]) ? log.trpMetricLabels[m] : String(m || '');
+                        byLabel.set(label, m);
+                    });
+
+                    const finalMetrics = [];
+                    const seenMetric = new Set();
+                    orderedMetricKeys.forEach(k => {
+                        const metricName = byLabel.get(k);
+                        if (!metricName || seenMetric.has(metricName)) return;
+                        finalMetrics.push(metricName);
+                        seenMetric.add(metricName);
+                    });
+
+                    (Array.isArray(log.customMetrics) ? log.customMetrics : []).forEach(m => {
+                        if (seenMetric.has(m)) return;
+                        finalMetrics.push(m);
+                        seenMetric.add(m);
+                    });
+
+                    const header = addHeader('TRP KPIs');
+                    actions.appendChild(header);
+                    finalMetrics.forEach(m => {
+                        const label = (log.trpMetricLabels && log.trpMetricLabels[m]) ? log.trpMetricLabels[m] : m;
+                        const btn = addAction(label, m, 'metric');
+                        if (String(m).startsWith('__info_')) {
+                            const v = (log.trpInfoValues && log.trpInfoValues[m] !== undefined && log.trpInfoValues[m] !== null) ? log.trpInfoValues[m] : '';
+                            if (v !== '') btn.title = `${label}: ${v}`;
+                        }
+                        actions.appendChild(btn);
+                    });
+
+                    actions.appendChild(addHeader('Throughput Analysis'));
+                    actions.appendChild(addAction('DL Throughput', 'dl', 'throughput'));
+                    actions.appendChild(addAction('UL Throughput', 'ul', 'throughput'));
+                    actions.appendChild(addAction('Throughput Dips', 'dips', 'throughput'));
+                    actions.appendChild(addAction('Radio vs App Mismatch', 'mismatch', 'throughput'));
+                    actions.appendChild(addAction('Root Cause Panel', 'root_cause', 'throughput'));
+                    actions.appendChild(addAction('Events Timeline', 'events_timeline', 'throughput'));
+
+                    if (Array.isArray(window.TRP_METRIC_REGISTRY) && window.TRP_METRIC_REGISTRY.length) {
+                        actions.appendChild(addHeader('Throughput Drivers & Events'));
+                        const grouped = {};
+                        const disabledEntries = [];
+                        window.TRP_METRIC_REGISTRY.forEach(entry => {
+                            if (entry && entry.disabled) {
+                                disabledEntries.push(entry);
+                                return;
+                            }
+                            const cat = entry.category || 'Other';
+                            if (!grouped[cat]) grouped[cat] = [];
+                            grouped[cat].push(entry);
+                        });
+                        Object.keys(grouped).forEach(cat => {
+                            const gWrap = document.createElement('div');
+                            gWrap.style.marginBottom = '5px';
+                            const gHead = document.createElement('div');
+                            gHead.innerHTML = '▶ ' + cat;
+                            gHead.style.cssText = 'font-size:10px; color:#93c5fd; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px; cursor:pointer; user-select:none;';
+                            const gBody = document.createElement('div');
+                            gBody.style.display = 'none';
+                            gBody.style.paddingLeft = '5px';
+                            gBody.style.flexDirection = 'column';
+                            gBody.style.gap = '4px';
+                            gHead.onclick = () => {
+                                const hidden = gBody.style.display === 'none';
+                                gBody.style.display = hidden ? 'flex' : 'none';
+                                gHead.innerHTML = (hidden ? '▼ ' : '▶ ') + cat;
+                            };
+                            grouped[cat].forEach(entry => {
+                                gBody.appendChild(addAction(entry.label, entry.key, 'driver_entry'));
+                            });
+                            gWrap.appendChild(gHead);
+                            gWrap.appendChild(gBody);
+                            actions.appendChild(gWrap);
+                        });
+
+                        if (disabledEntries.length) {
+                            const uWrap = document.createElement('div');
+                            uWrap.style.marginTop = '6px';
+                            const uHead = document.createElement('div');
+                            uHead.innerHTML = '▶ Unsupported in this TRP (' + disabledEntries.length + ')';
+                            uHead.style.cssText = 'font-size:10px; color:#fca5a5; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px; cursor:pointer; user-select:none;';
+                            const uBody = document.createElement('div');
+                            uBody.style.display = 'none';
+                            uBody.style.paddingLeft = '6px';
+                            uBody.style.fontSize = '11px';
+                            uBody.style.color = '#94a3b8';
+                            uBody.style.lineHeight = '1.4';
+                            uBody.innerHTML = disabledEntries.map(e => '• ' + (e.label || e.key)).join('<br>');
+                            uHead.onclick = () => {
+                                const hidden = uBody.style.display === 'none';
+                                uBody.style.display = hidden ? 'block' : 'none';
+                                uHead.innerHTML = (hidden ? '▼ ' : '▶ ') + 'Unsupported in this TRP (' + disabledEntries.length + ')';
+                            };
+                            uWrap.appendChild(uHead);
+                            uWrap.appendChild(uBody);
+                            actions.appendChild(uWrap);
+                        }
+                    }
+                    // IMPORTANT: this code runs inside loadedLogs.forEach(...). If we `return` here
+                    // without appending the DOM nodes, the log item never shows up in the sidebar.
+                    body.appendChild(stats);
+                    body.appendChild(actions);
+                    item.appendChild(header);
+                    item.appendChild(body);
+                    container.appendChild(item);
+                    return;
+                }
+                const groups = log.trpRunId ? {
+                    'Serving Metrics': [],
+                    'Neighbor Metrics': [],
+                    'Throughput': [],
+                    'Quality (SINR/RSRQ/BLER)': [],
+                    'Voice / MOS': [],
+                    'IMS / VoLTE': [],
+                    'Mobility / RRC': [],
+                    'Power': [],
+                    'Call / Events / State': [],
+                    'Other': []
+                } : {
                     'Standard': [],
                     'DT Analysis': [],
                     'POWER CONTROL': [],
@@ -10749,16 +13143,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 };
 
                 log.customMetrics.forEach(m => {
-                    const low = m.toLowerCase();
-                    if (/^a\d+_/.test(low)) groups['Active Set'].push(m);
-                    else if (/^m\d+_/.test(low)) groups['Monitored Set'].push(m);
-                    else if (/^d\d+_/.test(low)) groups['Detected Set'].push(m);
-                    else if (m === 'UE Tx Power' || m === 'NodeB Tx Power' || m === 'TPC') groups['POWER CONTROL'].push(m);
-                    else if (m === 'RRC State' || m === 'bler_dl' || m === 'bler_ul' || m === 'Throughput' || m === 'RSSI') groups['DT Analysis'].push(m);
-                    else if (m === 'Active Set Size' || m === 'AS Event' || m === 'HO Command' || m === 'HO Completion') groups['HANDOVER & ACTIVE SET ANALYSIS'].push(m);
-                    else if (m === 'RLF indication' || m === 'UL sync loss (UE can’t reach NodeB)' || m === 'DL sync loss (Interference / coverage)' || m === 'T310' || m === 'T312') groups['RADIO LINK FAILURE (RLF)'].push(m);
-                    else if (m === 'rrc_rel_cause' || m === 'cs_rel_cause' || m === 'iucs_status') groups['RRC & CS RELEASE CAUSE'].push(m);
-                    else groups['Standard'].push(m);
+                    const low = String(m || '').toLowerCase();
+                    if (log.trpRunId) {
+                        if (low.includes('neighbor') || low.includes('neighbour') || low.includes('.cell[') || low.includes('[64].') || low.includes('adjacent')) {
+                            groups['Neighbor Metrics'].push(m);
+                        } else if (low.includes('throughput') || low.includes('rate') || low.includes('bitrate') || low.includes('kbit') || low.includes('mbit')) {
+                            groups['Throughput'].push(m);
+                        } else if (low.includes('sinr') || low.includes('rsrq') || low.includes('bler') || low.includes('fer') || low.includes('cqi')) {
+                            groups['Quality (SINR/RSRQ/BLER)'].push(m);
+                        } else if (low.includes('mos') || low.includes('polqa') || low.includes('voice quality') || low.includes('aqm')) {
+                            groups['Voice / MOS'].push(m);
+                        } else if (low.includes('ims') || low.includes('volte') || low.includes('sip') || low.includes('epsbearer') || low.includes('pcscf')) {
+                            groups['IMS / VoLTE'].push(m);
+                        } else if (low.includes('rrc') || low.includes('handover') || low.includes('reselection') || low.includes('mobility') || low.includes('emm')) {
+                            groups['Mobility / RRC'].push(m);
+                        } else if (low.includes('power') || low.includes('tx') || low.includes('rx') || low.includes('phich') || low.includes('headroom')) {
+                            groups['Power'].push(m);
+                        } else if (low.includes('call') || low.includes('event') || low.includes('state') || low.includes('status')) {
+                            groups['Call / Events / State'].push(m);
+                        } else if (low.includes('serving') || low.includes('rsrp') || low.includes('rscp') || low.includes('pci') || low.includes('cellname') || low.includes('earfcn') || low.includes('uarfcn')) {
+                            groups['Serving Metrics'].push(m);
+                        } else {
+                            groups['Other'].push(m);
+                        }
+                    } else {
+                        if (/^a\d+_/.test(low)) groups['Active Set'].push(m);
+                        else if (/^m\d+_/.test(low)) groups['Monitored Set'].push(m);
+                        else if (/^d\d+_/.test(low)) groups['Detected Set'].push(m);
+                        else if (m === 'UE Tx Power' || m === 'NodeB Tx Power' || m === 'TPC') groups['POWER CONTROL'].push(m);
+                        else if (m === 'RRC State' || m === 'bler_dl' || m === 'bler_ul' || m === 'Throughput' || m === 'RSSI') groups['DT Analysis'].push(m);
+                        else if (m === 'Active Set Size' || m === 'AS Event' || m === 'HO Command' || m === 'HO Completion') groups['HANDOVER & ACTIVE SET ANALYSIS'].push(m);
+                        else if (m === 'RLF indication' || m === 'UL sync loss (UE can’t reach NodeB)' || m === 'DL sync loss (Interference / coverage)' || m === 'T310' || m === 'T312') groups['RADIO LINK FAILURE (RLF)'].push(m);
+                        else if (m === 'rrc_rel_cause' || m === 'cs_rel_cause' || m === 'iucs_status') groups['RRC & CS RELEASE CAUSE'].push(m);
+                        else groups['Standard'].push(m);
+                    }
                 });
 
                 Object.keys(groups).forEach(groupName => {
@@ -10877,16 +13295,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             }
 
-            // GROUP: Events
-            if (log.events && log.events.length > 0) {
-                actions.appendChild(document.createElement('hr')).style.cssText = "border:0; border-top:1px solid #444; margin:10px 0;";
-                actions.appendChild(addHeader('Events'));
-                if (log.tech && (String(log.tech).toLowerCase().includes('3g') || String(log.tech).toLowerCase().includes('umts'))) {
-                    actions.appendChild(addAction('Drop Call', '3g_dropcall', 'event'));
-                }
-                actions.appendChild(addAction('Call Failure', '3g_call_failure', 'event'));
-                actions.appendChild(addAction('Handover Failure', 'hof_handover_failure', 'event'));
-            }
+            // Left sidebar Events group removed by request.
 
             // Resurrected Signaling Modal Button
             const sigBtn = document.createElement('div');
@@ -10943,6 +13352,766 @@ document.addEventListener('DOMContentLoaded', () => {
             item.appendChild(body);
             container.appendChild(item);
         });
+    };
+
+    let throughputPanelChart = null;
+    window.trpThroughputState = {
+        selectedStart: null,
+        selectedEnd: null,
+        lastAction: 'dl',
+        lastSummary: null,
+        lastLogId: null,
+        rawMode: false
+    };
+
+    function tpEscape(v) {
+        return String(v == null ? '' : v)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function fmtNum(v, d = 2) {
+        return Number.isFinite(Number(v)) ? Number(v).toFixed(d) : 'n/a';
+    }
+
+    function toMs(v) {
+        const t = new Date(v || '').getTime();
+        return Number.isFinite(t) ? t : null;
+    }
+
+    function clipSeriesWindow(points, start, end) {
+        if (!start || !end) return (points || []).slice();
+        const a = toMs(start);
+        const b = toMs(end);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return (points || []).slice();
+        return (points || []).filter(p => {
+            const t = toMs(p && p.x);
+            return Number.isFinite(t) && t >= a && t <= b;
+        });
+    }
+
+    async function fetchThroughputSummary(runId) {
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/throughput-summary');
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') {
+            throw new Error((data && data.message) || ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    function ensureThroughputModal() {
+        let modal = document.getElementById('throughputAnalysisModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'throughputAnalysisModal';
+            modal.className = 'analysis-modal-overlay';
+            modal.style.zIndex = '10006';
+            modal.innerHTML =
+                '<div class="analysis-modal throughput-analysis-modal" style="width:920px;max-width:96vw;">' +
+                '  <div class="analysis-header" style="display:flex;justify-content:space-between;align-items:center;background:#0f172a;">' +
+                '    <h3 id="throughputTitle">Throughput Analysis</h3>' +
+                '    <button class="analysis-close-btn" onclick="document.getElementById(\'throughputAnalysisModal\').style.display=\'none\'">×</button>' +
+                '  </div>' +
+                '  <div class="analysis-content" style="padding:12px;max-height:82vh;overflow:auto;">' +
+                '    <div id="throughputToolbar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"></div>' +
+                '    <div id="throughputSummaryCards" style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin-bottom:8px;"></div>' +
+                '    <div style="margin-bottom:8px;"><label style="font-size:12px;color:#cbd5e1;"><input type="checkbox" id="throughputRawToggle"> Compare raw vs normalized</label></div>' +
+                '    <canvas id="throughputCanvas" height="150"></canvas>' +
+                '    <div id="throughputSecondary" style="margin-top:10px;"></div>' +
+                '    <div id="throughputDebug" style="margin-top:10px;background:#0b1220;border:1px solid #22334f;border-radius:6px;padding:8px;"></div>' +
+                '  </div>' +
+                '</div>';
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.style.display = 'none';
+            });
+            document.body.appendChild(modal);
+        }
+        modal.style.display = 'flex';
+        return modal;
+    }
+
+    function renderTpChart(datasets, title) {
+        const cvs = document.getElementById('throughputCanvas');
+        if (!cvs || !window.Chart) return;
+        const ctx = cvs.getContext('2d');
+        if (throughputPanelChart) {
+            throughputPanelChart.destroy();
+            throughputPanelChart = null;
+        }
+        throughputPanelChart = new Chart(ctx, {
+            type: 'line',
+            data: { datasets: datasets || [] },
+            options: {
+                animation: false,
+                parsing: true,
+                normalized: true,
+                scales: {
+                    x: { type: 'category', ticks: { color: '#94a3b8', maxTicksLimit: 12 } },
+                    y: { ticks: { color: '#94a3b8' }, title: { display: true, text: title || 'Mbps', color: '#cbd5e1' } }
+                },
+                plugins: { legend: { labels: { color: '#e2e8f0' } } }
+            }
+        });
+    }
+
+    function renderTpCards(summary) {
+        const box = document.getElementById('throughputSummaryCards');
+        if (!box) return;
+        const dl = summary && summary.dl ? summary.dl : {};
+        const rows = [
+            ['Avg', fmtNum(dl.avg)],
+            ['Median', fmtNum(dl.median)],
+            ['P10', fmtNum(dl.p10)],
+            ['P90', fmtNum(dl.p90)],
+            ['Peak', fmtNum(dl.peak)],
+            ['%<5Mbps', fmtNum(dl.pct_below_5, 1)]
+        ];
+        box.innerHTML = rows.map(r =>
+            '<div style="background:#0b1220;border:1px solid #22334f;border-radius:6px;padding:6px;">' +
+            '<div style="font-size:11px;color:#94a3b8;">' + tpEscape(r[0]) + '</div>' +
+            '<div style="font-size:14px;color:#f8fafc;font-weight:700;">' + tpEscape(r[1]) + '</div></div>'
+        ).join('');
+    }
+
+    async function loadSeriesForMetric(runId, metricName) {
+        if (!metricName) return [];
+        if (window.trpFetchSeries) {
+            try {
+                const series = await window.trpFetchSeries(runId, metricName);
+                return (series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
+            } catch (_e) {}
+        }
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName));
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') return [];
+        return (data.series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
+    }
+
+    function renderTpDebug(summary) {
+        const d = document.getElementById('throughputDebug');
+        if (!d) return;
+        const used = (summary && summary.signals_used) || [];
+        const debugRows = used.map(s =>
+            '<tr><td>' + tpEscape(s.name) + '</td><td>' + tpEscape(s.id) + '</td><td>' + tpEscape(s.source) + '</td><td>' + tpEscape(s.confidence) + '</td></tr>'
+        ).join('');
+        d.innerHTML =
+            '<div style="font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:6px;">Declaration Validation</div>' +
+            '<table style="width:100%;font-size:11px;color:#cbd5e1;border-collapse:collapse;">' +
+            '<thead><tr><th style="text-align:left;">Signal Name</th><th>ID</th><th>Rule</th><th>Confidence</th></tr></thead><tbody>' +
+            (debugRows || '<tr><td colspan="4">No throughput signal matched for this run.</td></tr>') +
+            '</tbody></table>' +
+            '<div style="margin-top:6px;font-size:11px;color:#94a3b8;">Expected search: PDSCH/PUSCH throughput, Data.Http.Download/Upload throughput, iperf/ftp/bitrate/thp variants.</div>';
+        if (used.length) console.table(used);
+    }
+
+    async function renderRootCause(log, summary) {
+        const holder = document.getElementById('throughputSecondary');
+        if (!holder) return;
+        if (!window.trpThroughputUtils || !log || !log.trpCatalog) {
+            holder.innerHTML = '<div style="color:#fca5a5;font-size:12px;">Root cause inputs unavailable.</div>';
+            return;
+        }
+        const discover = window.trpThroughputUtils.discoverThroughputSignals(log.trpCatalog.metricsFlat || []);
+        const driverSignals = (discover.drivers || []).slice(0, 8);
+        const start = window.trpThroughputState.selectedStart;
+        const end = window.trpThroughputState.selectedEnd;
+        const rows = [];
+        const datasets = [];
+        const colors = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f43f5e', '#60a5fa'];
+        for (let i = 0; i < driverSignals.length; i++) {
+            const s = driverSignals[i];
+            const raw = await loadSeriesForMetric(log.trpRunId, s.name);
+            const clipped = clipSeriesWindow(raw, start, end);
+            const vals = clipped.map(p => Number(p.y)).filter(Number.isFinite);
+            if (!vals.length) continue;
+            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+            const median = window.trpThroughputUtils.percentile(vals, 50);
+            rows.push('<tr><td>' + tpEscape(s.name) + '</td><td>' + fmtNum(avg) + '</td><td>' + fmtNum(median) + '</td></tr>');
+            if (datasets.length < 4) {
+                datasets.push({
+                    label: s.name,
+                    data: clipped,
+                    borderColor: colors[datasets.length % colors.length],
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.2
+                });
+            }
+        }
+        holder.innerHTML =
+            '<div style="font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:6px;">Root Cause Panel (selected window)</div>' +
+            '<table style="width:100%;font-size:11px;color:#cbd5e1;border-collapse:collapse;">' +
+            '<thead><tr><th style="text-align:left;">Metric</th><th>Avg</th><th>Median</th></tr></thead><tbody>' +
+            (rows.join('') || '<tr><td colspan="3">No driver KPI available for this run window.</td></tr>') +
+            '</tbody></table>';
+        if (datasets.length) renderTpChart(datasets, 'Driver metrics (raw units)');
+    }
+
+    window.openThroughputAnalysisPanel = async (log, action) => {
+        if (!log || !log.trpRunId) return;
+        const modal = ensureThroughputModal();
+        const title = modal.querySelector('#throughputTitle');
+        const secondary = modal.querySelector('#throughputSecondary');
+        const toolbar = modal.querySelector('#throughputToolbar');
+        const rawToggle = modal.querySelector('#throughputRawToggle');
+        if (title) title.textContent = 'Throughput Analysis - ' + log.name;
+        if (secondary) secondary.innerHTML = '<div style="color:#94a3b8;font-size:12px;">Loading...</div>';
+
+        const currentAction = action || window.trpThroughputState.lastAction || 'dl';
+        window.trpThroughputState.lastAction = currentAction;
+        const prevLogId = window.trpThroughputState.lastLogId;
+
+        const labels = [
+            ['dl', 'DL Throughput'],
+            ['ul', 'UL Throughput'],
+            ['dips', 'Throughput Dips'],
+            ['mismatch', 'Radio vs App Mismatch'],
+            ['root_cause', 'Root Cause Panel'],
+            ['events_timeline', 'Events Timeline']
+        ];
+        toolbar.innerHTML = labels.map(([k, l]) =>
+            '<button class="btn header-btn" data-tp-action="' + k + '" style="' + (k === currentAction ? 'background:#2563eb;color:#fff;' : '') + '">' + l + '</button>'
+        ).join('');
+        toolbar.querySelectorAll('button[data-tp-action]').forEach(btn => {
+            btn.onclick = () => window.openThroughputAnalysisPanel(log, btn.getAttribute('data-tp-action'));
+        });
+
+        if (rawToggle) {
+            rawToggle.checked = !!window.trpThroughputState.rawMode;
+            rawToggle.onchange = () => {
+                window.trpThroughputState.rawMode = !!rawToggle.checked;
+                window.openThroughputAnalysisPanel(log, currentAction);
+            };
+        }
+
+        let summary = window.trpThroughputState.lastSummary;
+        if (!summary || prevLogId !== log.id) {
+            summary = await fetchThroughputSummary(log.trpRunId);
+            window.trpThroughputState.lastSummary = summary;
+        }
+        window.trpThroughputState.lastLogId = log.id;
+        renderTpCards(summary);
+        renderTpDebug(summary);
+
+        const util = window.trpThroughputUtils;
+        const sf = summary.signals_found || {};
+        const nmeta = summary.normalization || {};
+        let dlRadio = (summary.series && summary.series.dl_radio) || [];
+        let ulRadio = (summary.series && summary.series.ul_radio) || [];
+        let dlApp = (summary.series && summary.series.dl_app) || [];
+        let ulApp = (summary.series && summary.series.ul_app) || [];
+
+        // Raw-vs-normalized toggle (developer mode)
+        if (window.trpThroughputState.rawMode && util) {
+            const loadRawAndNormalize = async (sig, normalized, norm) => {
+                if (!sig || !sig.name) return normalized;
+                const raw = await loadSeriesForMetric(log.trpRunId, sig.name);
+                const div = (norm && Number(norm.divisor)) || 1;
+                return raw.map(p => ({ x: p.x, y: Number(p.y) / div }));
+            };
+            dlRadio = await loadRawAndNormalize(sf.dl_radio, dlRadio, nmeta.dl_radio);
+            ulRadio = await loadRawAndNormalize(sf.ul_radio, ulRadio, nmeta.ul_radio);
+            dlApp = await loadRawAndNormalize(sf.dl_app, dlApp, nmeta.dl_app);
+            ulApp = await loadRawAndNormalize(sf.ul_app, ulApp, nmeta.ul_app);
+        }
+
+        const clip = (s) => clipSeriesWindow(s, window.trpThroughputState.selectedStart, window.trpThroughputState.selectedEnd);
+        const color = { dlr: '#22d3ee', dla: '#f59e0b', ulr: '#34d399', ula: '#f97316', dlt: '#ef4444' };
+        const mk = (label, data, c) => ({ label, data: clip(data), borderColor: c, borderWidth: 2, pointRadius: 0, tension: 0.2 });
+
+        if (currentAction === 'dl') {
+            const sets = [];
+            if (dlRadio.length) sets.push(mk('DL Radio Throughput (Mbps)', dlRadio, color.dlr));
+            if (dlApp.length) sets.push(mk('DL App Throughput (Mbps)', dlApp, color.dla));
+            renderTpChart(sets, 'Mbps');
+            secondary.innerHTML = sets.length ? '' : '<div style=\"color:#fca5a5;font-size:12px;\">Not available in this run. Searched: Radio.Lte.ServingCellTotal.Pdsch.Throughput, Data.Http.Download.Throughput and regex variants.</div>';
+        } else if (currentAction === 'ul') {
+            const sets = [];
+            if (ulRadio.length) sets.push(mk('UL Radio Throughput (Mbps)', ulRadio, color.ulr));
+            if (ulApp.length) sets.push(mk('UL App Throughput (Mbps)', ulApp, color.ula));
+            renderTpChart(sets, 'Mbps');
+            secondary.innerHTML = sets.length ? '' : '<div style=\"color:#fca5a5;font-size:12px;\">Not available in this run. Searched: Radio.Lte.ServingCellTotal.Pusch.Throughput, Data.Http.Upload.Throughput, Data.Iperf.Ul.Throughput and regex variants.</div>';
+        } else if (currentAction === 'dips') {
+            if (!dlRadio.length) {
+                renderTpChart([], 'Mbps');
+                secondary.innerHTML = '<div style=\"color:#fca5a5;font-size:12px;\">Not available in this run. Searched DL radio throughput declaration variants (PDSCH/downlink/throughput).</div>';
+                return;
+            }
+            const p10 = Number(summary && summary.dl && summary.dl.p10);
+            const thr = Number.isFinite(p10) ? p10 : 5;
+            const dips = util ? util.detectDips(dlRadio, thr, 3) : (summary.dips || []);
+            renderTpChart([mk('DL Radio Throughput (Mbps)', dlRadio, color.dlr)], 'Mbps');
+            secondary.innerHTML =
+                '<div style=\"font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:6px;\">Dip intervals (threshold=' + fmtNum(thr) + ' Mbps)</div>' +
+                (dips.length ? dips.map((d, idx) =>
+                    '<div class=\"tp-dip-item\" data-idx=\"' + idx + '\" style=\"padding:6px;border:1px solid #22334f;border-radius:6px;margin-bottom:4px;cursor:pointer;\">' +
+                    '#'+(idx+1)+' ' + tpEscape(d.start) + ' → ' + tpEscape(d.end) + ' | min=' + fmtNum(d.min) + ' Mbps</div>'
+                ).join('') : '<div style=\"color:#94a3b8;font-size:12px;\">No dips detected.</div>');
+            secondary.querySelectorAll('.tp-dip-item').forEach(node => {
+                node.onclick = () => {
+                    const d = dips[Number(node.getAttribute('data-idx'))];
+                    window.trpThroughputState.selectedStart = d.start;
+                    window.trpThroughputState.selectedEnd = d.end;
+                    window.openThroughputAnalysisPanel(log, 'root_cause');
+                };
+            });
+        } else if (currentAction === 'mismatch') {
+            if (!dlRadio.length || !dlApp.length) {
+                renderTpChart([
+                    mk('DL Radio Throughput (Mbps)', dlRadio, color.dlr),
+                    mk('DL App Throughput (Mbps)', dlApp, color.dla)
+                ], 'Mbps');
+                secondary.innerHTML = '<div style=\"color:#fca5a5;font-size:12px;\">Not available in this run. Need both DL radio and DL app throughput signals to compute mismatch.</div>';
+                return;
+            }
+            const aligned = util ? util.alignSeriesBySecond(dlRadio, dlApp) : [];
+            const delta = aligned.map(r => ({ x: r.x, y: Number(r.a) - Number(r.b) }));
+            const verdict = util ? util.mismatchVerdict(aligned) : (summary.mismatch || {});
+            renderTpChart([
+                mk('DL Radio Throughput (Mbps)', dlRadio, color.dlr),
+                mk('DL App Throughput (Mbps)', dlApp, color.dla),
+                mk('Delta Radio-App (Mbps)', delta, color.dlt)
+            ], 'Mbps');
+            secondary.innerHTML =
+                '<div style=\"display:flex;gap:8px;align-items:center;flex-wrap:wrap;\">' +
+                '<span style=\"padding:4px 8px;border-radius:999px;background:#1d4ed8;color:#fff;font-size:11px;\">' + tpEscape((verdict.flag || 'mixed').toUpperCase()) + '</span>' +
+                '<span style=\"font-size:12px;color:#cbd5e1;\">ratio median=' + fmtNum(verdict.ratio_median, 3) + '</span>' +
+                '<span style=\"font-size:12px;color:#cbd5e1;\">app&lt;0.7*radio=' + fmtNum(verdict.app_lt_70_ratio_pct, 1) + '%</span>' +
+                '<span style=\"font-size:12px;color:#cbd5e1;\">corr=' + fmtNum(verdict.correlation, 3) + '</span>' +
+                '</div>';
+        } else if (currentAction === 'root_cause') {
+            await renderRootCause(log, summary);
+        } else if (currentAction === 'events_timeline') {
+            const events = (summary.events || []);
+            const dl = clip(dlRadio);
+            const maxY = dl.length ? Math.max(...dl.map(p => Number(p.y) || 0)) : 1;
+            const evPts = events.map(e => ({ x: e.time, y: maxY, event_name: e.event_name }));
+            renderTpChart([
+                mk('DL Radio Throughput (Mbps)', dlRadio, color.dlr),
+                {
+                    label: 'Events',
+                    data: clip(evPts),
+                    borderColor: '#f43f5e',
+                    backgroundColor: '#f43f5e',
+                    showLine: false,
+                    pointRadius: 3
+                }
+            ], 'Mbps');
+            secondary.innerHTML =
+                '<div style=\"font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:6px;\">Events Timeline</div>' +
+                (events.length ? events.map((e, i) =>
+                    '<div class=\"tp-event-item\" data-idx=\"' + i + '\" style=\"padding:6px;border:1px solid #22334f;border-radius:6px;margin-bottom:4px;cursor:pointer;\">' +
+                    tpEscape(e.time) + ' - ' + tpEscape(e.event_name) + '</div>'
+                ).join('') : '<div style=\"color:#94a3b8;font-size:12px;\">No throughput-related events found.</div>');
+            secondary.querySelectorAll('.tp-event-item').forEach(node => {
+                node.onclick = () => {
+                    const e = events[Number(node.getAttribute('data-idx'))];
+                    const t = toMs(e.time);
+                    if (!Number.isFinite(t)) return;
+                    window.trpThroughputState.selectedStart = new Date(t - 10000).toISOString();
+                    window.trpThroughputState.selectedEnd = new Date(t + 10000).toISOString();
+                    window.openThroughputAnalysisPanel(log, 'events_timeline');
+                };
+            });
+        }
+    };
+
+    const driverSignalsCache = new Map();
+    const driverTrackCache = new Map();
+    window.driverSelectionState = {
+        runId: null,
+        key: null,
+        label: null,
+        itemType: null,
+        signalsUsed: [],
+        unit: '',
+        window: null,
+        viewMode: 'chart',
+        verification: null
+    };
+
+    async function fetchRunSignals(runId) {
+        if (driverSignalsCache.has(runId)) return driverSignalsCache.get(runId);
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/signals');
+        const data = await res.json();
+        const rows = (res.ok && data.status === 'success') ? (data.signals || []) : [];
+        driverSignalsCache.set(runId, rows);
+        return rows;
+    }
+
+    async function fetchRunTimeseries(runId, signal) {
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/timeseries?signal=' + encodeURIComponent(signal));
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') return [];
+        return data.series || [];
+    }
+
+    async function fetchRunTrack(runId) {
+        if (driverTrackCache.has(runId)) return driverTrackCache.get(runId);
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/track');
+        const data = await res.json();
+        const rows = (res.ok && data.status === 'success') ? (data.track || []) : [];
+        driverTrackCache.set(runId, rows);
+        return rows;
+    }
+
+    async function fetchTypedEvents(runId, typeKey) {
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/events?type=' + encodeURIComponent(typeKey) + '&limit=8000');
+        const data = await res.json();
+        if (!res.ok || data.status !== 'success') return [];
+        return data.events || [];
+    }
+
+    function scoreSignalMatch(name, entry) {
+        const low = String(name || '').toLowerCase();
+        const exacts = (entry.exactCandidates || []).map(s => String(s || '').toLowerCase());
+        for (const ex of exacts) {
+            if (low === ex) return { score: 100, method: 'exact' };
+        }
+        const regs = window.trpThroughputUtils ? window.trpThroughputUtils.compileRegexList(entry.regexCandidates || []) : [];
+        let regexHit = false;
+        regs.forEach(re => { if (re.test(low)) regexHit = true; });
+        if (!regexHit) return null;
+        let score = 50;
+        if (low.includes('lte')) score += 3;
+        if (low.includes('servingcell') || low.includes('pcell')) score += 2;
+        if (/(dl|ul|pdsch|pusch)/.test(low)) score += 2;
+        const kws = ['mcs', 'cqi', 'bler', 'harq', 'prb', 'rb', 'ri', 'pmi', 'tcp', 'rtt', 'jitter', 'loss', 'pdcp', 'rlc', 'rrc', 'earfcn', 'pci'];
+        kws.forEach(k => { if (low.includes(k)) score += 1; });
+        return { score, method: 'regex' };
+    }
+
+    async function resolveSignalsForEntry(runId, entry) {
+        const signals = await fetchRunSignals(runId);
+        const scored = [];
+        signals.forEach(s => {
+            const m = scoreSignalMatch(s.signal_name, entry);
+            if (!m) return;
+            scored.push({
+                signal_id: s.signal_id,
+                signal_name: s.signal_name,
+                match: m.method,
+                score: m.score
+            });
+        });
+        // Fallback: if no strict candidate matched, use label tokens.
+        if (!scored.length) {
+            const tokens = String((entry && entry.label) || '')
+                .toLowerCase()
+                .split(/[^a-z0-9]+/)
+                .filter(t => t.length >= 3);
+            if (tokens.length) {
+                signals.forEach(s => {
+                    const low = String(s.signal_name || '').toLowerCase();
+                    let hits = 0;
+                    tokens.forEach(t => { if (low.includes(t)) hits += 1; });
+                    if (!hits) return;
+                    scored.push({
+                        signal_id: s.signal_id,
+                        signal_name: s.signal_name,
+                        match: 'label-fallback',
+                        score: 30 + hits
+                    });
+                });
+            }
+        }
+        scored.sort((a, b) => b.score - a.score || String(a.signal_name).localeCompare(String(b.signal_name)));
+        const best = scored.length ? scored[0].score : -1;
+        const selected = scored.filter(x => x.score >= best - 2).slice(0, (entry.key === 'kpi_per_carrier_throughput' ? 4 : 3));
+        return { selected, allMatches: scored };
+    }
+
+    async function prepareDriverMetricOnLog(log, entryKey) {
+        const entry = (window.TRP_METRIC_REGISTRY || []).find(x => x.key === entryKey);
+        if (!entry) throw new Error('Unknown driver entry: ' + entryKey);
+        const resolved = await resolveSignalsForEntry(log.trpRunId, entry);
+        if (!resolved.selected || !resolved.selected.length) {
+            throw new Error('No matched signal for "' + entry.label + '" in this run.');
+        }
+
+        const primary = resolved.selected[0];
+        const rows = await fetchRunTimeseries(log.trpRunId, primary.signal_id || primary.signal_name);
+        const pointsRaw = (rows || [])
+            .filter(r => Number.isFinite(Number(r && r.value)))
+            .map(r => ({ x: r.t, y: Number(r.value) }));
+        if (!pointsRaw.length) {
+            throw new Error('Matched signal has no numeric samples: ' + (primary.signal_name || primary.signal_id));
+        }
+        const norm = window.trpThroughputUtils.normalizeMetricSeries(pointsRaw, entry.normalization);
+        const s = norm.points.slice().sort((a, b) => (toMs(a.x) || 0) - (toMs(b.x) || 0));
+        const toleranceMs = 500;
+        let j = 0;
+        (log.points || []).forEach(pt => {
+            const t = Number(pt.timestamp || toMs(pt.time));
+            if (!Number.isFinite(t)) return;
+            while (j + 1 < s.length && (toMs(s[j + 1].x) || -Infinity) <= t) j++;
+            let best = s[j];
+            if (j + 1 < s.length) {
+                const a = s[j];
+                const b = s[j + 1];
+                const at = toMs(a.x);
+                const bt = toMs(b.x);
+                if (Number.isFinite(at) && Number.isFinite(bt) && Math.abs(bt - t) < Math.abs(at - t)) best = b;
+            }
+            const bt = toMs(best && best.x);
+            if (best && Number.isFinite(bt) && Math.abs(bt - t) <= toleranceMs) {
+                pt['__drv_' + entry.key] = Number(best.y);
+            }
+        });
+
+        if (!log.trpMetricLabels) log.trpMetricLabels = {};
+        const syntheticMetric = '__drv_' + entry.key;
+        log.trpMetricLabels[syntheticMetric] = entry.label + (norm.unit ? (' (' + norm.unit + ')') : '');
+        return {
+            entry,
+            resolved,
+            syntheticMetric,
+            normalization: norm
+        };
+    }
+
+    async function openDriverEntryInView(log, entryKey, viewMode) {
+        try {
+            const prepared = await prepareDriverMetricOnLog(log, entryKey);
+            if (viewMode === 'map') {
+                if (window.addMetricLegendLayer) window.addMetricLegendLayer(log, prepared.syntheticMetric);
+                return;
+            }
+            if (viewMode === 'grid') {
+                window.openGridModal(log, prepared.syntheticMetric);
+                return;
+            }
+            window.openChartModal(log, prepared.syntheticMetric);
+        } catch (err) {
+            alert('Driver metric unavailable: ' + (err && err.message ? err.message : err));
+        }
+    }
+
+    function ensureDriverModal() {
+        let el = document.getElementById('driverEntryModal');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'driverEntryModal';
+            el.className = 'analysis-modal-overlay';
+            el.style.zIndex = '10007';
+            el.innerHTML =
+                '<div class="analysis-modal driver-entry-modal" style="width:980px;max-width:96vw;">' +
+                '<div class="analysis-header" style="background:#0b2447;">' +
+                '<h3 id="driverEntryTitle">Throughput Drivers & Events</h3>' +
+                '<button class="analysis-close-btn" onclick="document.getElementById(\'driverEntryModal\').style.display=\'none\'">×</button>' +
+                '</div>' +
+                '<div class="analysis-content" style="padding:12px;max-height:82vh;overflow:auto;">' +
+                '<div id="driverViewChooser" class="driver-view-chooser"></div>' +
+                '<div id="driverMainView" style="margin-top:8px;"></div>' +
+                '<div id="driverVerificationPanel" style="margin-top:10px;"></div>' +
+                '</div></div>';
+            el.addEventListener('click', (e) => { if (e.target === el) el.style.display = 'none'; });
+            document.body.appendChild(el);
+        }
+        el.style.display = 'flex';
+        return el;
+    }
+
+    function setDriverVerificationPanel(state) {
+        const box = document.getElementById('driverVerificationPanel');
+        if (!box) return;
+        const ver = state.verification || {};
+        const matches = (ver.matches || []).map(m =>
+            '<tr><td>' + tpEscape(m.signal_name) + '</td><td>' + tpEscape(m.signal_id) + '</td><td>' + tpEscape(m.match) + '</td><td>' + tpEscape(m.score) + '</td></tr>'
+        ).join('');
+        const checks = ((ver.sanity && ver.sanity.checks) || []).map(c => '<li>' + tpEscape(c) + '</li>').join('');
+        box.innerHTML =
+            '<div style="background:#0b1220;border:1px solid #22334f;border-radius:6px;padding:8px;">' +
+            '<div style="font-size:12px;color:#93c5fd;font-weight:700;margin-bottom:6px;">Verification</div>' +
+            '<table style="width:100%;font-size:11px;color:#cbd5e1;border-collapse:collapse;">' +
+            '<thead><tr><th style="text-align:left;">Signal</th><th>ID</th><th>Method</th><th>Score</th></tr></thead><tbody>' +
+            (matches || '<tr><td colspan="4">No matched signal</td></tr>') + '</tbody></table>' +
+            '<div style="font-size:11px;color:#cbd5e1;margin-top:6px;">Samples: ' + tpEscape(ver.sample_count) + ' | Span: ' + tpEscape(ver.first_ts || 'n/a') + ' → ' + tpEscape(ver.last_ts || 'n/a') + '</div>' +
+            '<div style="font-size:11px;color:#cbd5e1;">Normalization: median=' + tpEscape(fmtNum(ver.raw_median, 3)) + ', conversion=' + tpEscape(ver.conversion || 'none') + ', unit=' + tpEscape(ver.unit || '') + '</div>' +
+            '<div style="font-size:11px;color:' + ((ver.sanity && ver.sanity.pass) ? '#86efac' : '#fca5a5') + ';">Sanity: ' + ((ver.sanity && ver.sanity.pass) ? 'PASS' : 'WARN') + '</div>' +
+            '<ul style="margin:4px 0 0 16px;padding:0;font-size:11px;color:#94a3b8;">' + checks + '</ul>' +
+            '</div>';
+    }
+
+    async function renderDriverSelectionView(log) {
+        const state = window.driverSelectionState;
+        const entry = (window.TRP_METRIC_REGISTRY || []).find(x => x.key === state.key);
+        const target = document.getElementById('driverMainView');
+        const chooser = document.getElementById('driverViewChooser');
+        if (!target || !entry) return;
+
+        chooser.innerHTML =
+            '<div class="driver-segment">' +
+            '<button data-mode="chart" class="' + (state.viewMode === 'chart' ? 'active' : '') + '">Chart</button>' +
+            '<button data-mode="map" class="' + (state.viewMode === 'map' ? 'active' : '') + '">Map</button>' +
+            '<button data-mode="grid" class="' + (state.viewMode === 'grid' ? 'active' : '') + '">Grid</button>' +
+            '</div>';
+        chooser.querySelectorAll('button[data-mode]').forEach(btn => {
+            btn.onclick = async () => {
+                state.viewMode = btn.getAttribute('data-mode');
+                await renderDriverSelectionView(log);
+            };
+        });
+
+        const seriesBySignal = [];
+        for (const sig of state.signalsUsed) {
+            const rows = await fetchRunTimeseries(log.trpRunId, sig.signal_id || sig.signal_name);
+            seriesBySignal.push({ sig, rows });
+        }
+        const primaryRows = (seriesBySignal[0] && seriesBySignal[0].rows) ? seriesBySignal[0].rows : [];
+        const pointsRaw = primaryRows.filter(r => Number.isFinite(Number(r.value))).map(r => ({ x: r.t, y: Number(r.value) }));
+        const norm = window.trpThroughputUtils.normalizeMetricSeries(pointsRaw, entry.normalization);
+        const sanity = window.trpThroughputUtils.runSanityChecks(entry.key, norm.points);
+        state.unit = norm.unit;
+        state.verification = {
+            matches: state.signalsUsed,
+            sample_count: norm.points.length,
+            first_ts: norm.points[0] ? norm.points[0].x : null,
+            last_ts: norm.points[norm.points.length - 1] ? norm.points[norm.points.length - 1].x : null,
+            raw_median: norm.raw_median,
+            conversion: norm.conversion,
+            unit: norm.unit,
+            sanity
+        };
+        setDriverVerificationPanel(state);
+
+        if (state.viewMode === 'chart') {
+            target.innerHTML = '<canvas id="driverChartCanvas" height="180"></canvas>';
+            const ctx = document.getElementById('driverChartCanvas').getContext('2d');
+            const ds = [];
+            const colors = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399'];
+            seriesBySignal.forEach((blk, i) => {
+                const r = blk.rows.filter(x => Number.isFinite(Number(x.value))).map(x => ({ x: x.t, y: Number(x.value) }));
+                const n = window.trpThroughputUtils.normalizeMetricSeries(r, entry.normalization);
+                ds.push({ label: blk.sig.signal_name + ' (' + n.unit + ')', data: n.points, borderColor: colors[i % colors.length], borderWidth: 2, tension: 0.2, pointRadius: 0 });
+            });
+            if (window.driverChartInstance) {
+                window.driverChartInstance.destroy();
+            }
+            window.driverChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: { datasets: ds },
+                options: { animation: false, scales: { x: { ticks: { color: '#94a3b8', maxTicksLimit: 10 } }, y: { ticks: { color: '#94a3b8' } } }, plugins: { legend: { labels: { color: '#e2e8f0' } } } }
+            });
+            if (entry.type === 'event') {
+                const ev = await fetchTypedEvents(log.trpRunId, entry.key);
+                const inferred = [];
+                const taMode = entry.key.includes('ta');
+                for (let i = 1; i < primaryRows.length; i++) {
+                    const a = primaryRows[i - 1];
+                    const b = primaryRows[i];
+                    const va = a && a.value;
+                    const vb = b && b.value;
+                    if (taMode && Number.isFinite(Number(va)) && Number.isFinite(Number(vb))) {
+                        if (Math.abs(Number(vb) - Number(va)) >= 5) {
+                            inferred.push({ t: b.t, kind: entry.label, details: { from: va, to: vb } });
+                        }
+                    } else if (String(va) !== String(vb)) {
+                        inferred.push({ t: b.t, kind: entry.label, details: { from: va, to: vb } });
+                    }
+                }
+                target.innerHTML += '<div style="margin-top:8px;font-size:12px;color:#cbd5e1;">Events: explicit=' + ev.length + ', inferred=' + inferred.length + '</div>';
+            }
+        } else if (state.viewMode === 'grid') {
+            const allRows = norm.points.slice(0, 20000);
+            const track = await fetchRunTrack(log.trpRunId);
+            const joined = window.trpThroughputUtils.joinSeriesWithTrack(track, norm.points, 500);
+            const latLonByTime = new Map(joined.map(j => [String(j.t || ''), { lat: j.lat, lon: j.lon }]));
+            target.innerHTML =
+                '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">' +
+                '<label style="font-size:11px;color:#94a3b8;">Min <input id="driverGridMin" type="number" step="any" style="width:90px;"></label>' +
+                '<label style="font-size:11px;color:#94a3b8;">Max <input id="driverGridMax" type="number" step="any" style="width:90px;"></label>' +
+                '<label style="font-size:11px;color:#94a3b8;">Sort <select id="driverGridSort"><option value="time">Time</option><option value="value_desc">Value desc</option><option value="value_asc">Value asc</option></select></label>' +
+                '<span id="driverGridCount" style="font-size:11px;color:#94a3b8;"></span></div>' +
+                '<table class="data-table"><thead><tr><th>Time</th><th>Value (' + tpEscape(norm.unit) + ')</th><th>Raw</th><th>Lat</th><th>Lon</th></tr></thead><tbody id="driverGridBody"></tbody></table>';
+            const minIn = target.querySelector('#driverGridMin');
+            const maxIn = target.querySelector('#driverGridMax');
+            const sortSel = target.querySelector('#driverGridSort');
+            const countEl = target.querySelector('#driverGridCount');
+            const bodyEl = target.querySelector('#driverGridBody');
+            const renderRows = () => {
+                const minV = minIn && minIn.value !== '' ? Number(minIn.value) : null;
+                const maxV = maxIn && maxIn.value !== '' ? Number(maxIn.value) : null;
+                const sortMode = sortSel ? sortSel.value : 'time';
+                let rows = allRows.filter(r => (minV === null || Number(r.y) >= minV) && (maxV === null || Number(r.y) <= maxV));
+                if (sortMode === 'value_desc') rows = rows.slice().sort((a, b) => Number(b.y) - Number(a.y));
+                else if (sortMode === 'value_asc') rows = rows.slice().sort((a, b) => Number(a.y) - Number(b.y));
+                else rows = rows.slice().sort((a, b) => (toMs(a.x) || 0) - (toMs(b.x) || 0));
+                const clipped = rows.slice(0, 5000);
+                if (countEl) countEl.textContent = 'Showing ' + clipped.length + ' / ' + rows.length;
+                if (bodyEl) {
+                    bodyEl.innerHTML = clipped.map(r =>
+                        '<tr><td>' + tpEscape(r.x) + '</td><td>' + tpEscape(fmtNum(r.y, 3)) + '</td><td>' + tpEscape(fmtNum(r.raw_y, 3)) + '</td><td>' + tpEscape(latLonByTime.get(String(r.x || '')) ? fmtNum(latLonByTime.get(String(r.x || '')).lat, 6) : '') + '</td><td>' + tpEscape(latLonByTime.get(String(r.x || '')) ? fmtNum(latLonByTime.get(String(r.x || '')).lon, 6) : '') + '</td></tr>'
+                    ).join('');
+                }
+            };
+            if (minIn) minIn.oninput = renderRows;
+            if (maxIn) maxIn.oninput = renderRows;
+            if (sortSel) sortSel.onchange = renderRows;
+            renderRows();
+        } else if (state.viewMode === 'map') {
+            const track = await fetchRunTrack(log.trpRunId);
+            if (!track.length) {
+                target.innerHTML = '<div style="color:#fca5a5;font-size:12px;">Map not available (no GPS)</div>';
+                return;
+            }
+            const joined = window.trpThroughputUtils.joinSeriesWithTrack(track, norm.points, 500);
+            if (!joined.length) {
+                target.innerHTML = '<div style="color:#fca5a5;font-size:12px;">No time join found between GPS and metric (<=0.5s)</div>';
+                return;
+            }
+            target.innerHTML = '<div style="font-size:12px;color:#cbd5e1;">Rendering ' + joined.length + ' joined samples on map.</div>';
+            if (window.mapRenderer && typeof window.mapRenderer.renderMetricOnMap === 'function') {
+                const legend = (window.trpThroughputUtils && typeof window.trpThroughputUtils.buildDefaultLegend === 'function')
+                    ? window.trpThroughputUtils.buildDefaultLegend(state.key, norm.unit, norm.points)
+                    : null;
+
+                const r = window.mapRenderer.renderMetricOnMap({
+                    key: state.key,
+                    label: state.label,
+                    unit: norm.unit,
+                    legend,
+                    mapPoints: joined
+                });
+
+                // Default legend UI (metric-aware)
+                if (window.trpThroughputUtils && typeof window.trpThroughputUtils.legendToHtml === 'function' && legend) {
+                    const html = window.trpThroughputUtils.legendToHtml(legend);
+                    const st = (legend && legend.stats) ? legend.stats : (r && r.stats ? r.stats : null);
+                    if (st) {
+                        target.innerHTML += '<div style="font-size:11px;color:#94a3b8;margin-top:6px;">Stats: min=' + fmtNum(st.min) + ', median=' + fmtNum(st.median) + ', max=' + fmtNum(st.max) + ' ' + tpEscape(legend.unit || norm.unit) + '</div>';
+                    }
+                    target.innerHTML += html;
+                } else if (r && r.stats) {
+                    target.innerHTML += '<div style="font-size:11px;color:#94a3b8;margin-top:6px;">Stats: min=' + fmtNum(r.stats.min) + ', median=' + fmtNum(r.stats.median) + ', max=' + fmtNum(r.stats.max) + ' ' + tpEscape(norm.unit) + '</div>';
+                }
+            }
+        }
+    }
+
+    window.openDriverEntryPanel = async (log, entryKey, preferredViewMode) => {
+        if (!log || !log.trpRunId) return;
+        const entry = (window.TRP_METRIC_REGISTRY || []).find(x => x.key === entryKey);
+        if (!entry) return;
+        const modal = ensureDriverModal();
+        const title = modal.querySelector('#driverEntryTitle');
+        if (title) title.textContent = entry.label + ' - ' + log.name;
+        const resolved = await resolveSignalsForEntry(log.trpRunId, entry);
+        window.driverSelectionState = {
+            runId: log.trpRunId,
+            key: entry.key,
+            label: entry.label,
+            itemType: entry.type,
+            signalsUsed: resolved.selected,
+            unit: '',
+            window: null,
+            viewMode: (preferredViewMode || 'chart'),
+            verification: { matches: resolved.allMatches.slice(0, 8) }
+        };
+        await renderDriverSelectionView(log);
     };
 
     // DEBUG EXPORT FOR TESTING

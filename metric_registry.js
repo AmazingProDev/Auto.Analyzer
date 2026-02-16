@@ -1,0 +1,51 @@
+(function (root) {
+    // Registry tuned to the KPIs/events confirmed in the current TRP family.
+    // Unsupported items are kept for traceability but hidden in UI via `disabled: true`.
+    const REGISTRY = [
+        { key: 'kpi_cqi_dl', label: 'CQI (DL)', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 15 }, exactCandidates: ['Radio.Lte.ServingCell[8].Stream[2].Cqi'], regexCandidates: ['(lte).*cqi', '(dl).*cqi', '(servingcell|pcell).*cqi', 'cqi\\b'] },
+        { key: 'kpi_mcs_dl', label: 'DL MCS', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 31 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pdsch.Stream[2].Mcs'], regexCandidates: ['(dl).*mcs', 'mcs.*(dl)', '(pdsch|dlsch).*mcs'] },
+        { key: 'kpi_mcs_ul', label: 'UL MCS', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 31 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pusch.Mcs'], regexCandidates: ['(ul).*mcs', 'mcs.*(ul)', '(pusch|ulsch).*mcs'] },
+        { key: 'kpi_modulation', label: 'Modulation (DL/UL)', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.ServingCell[8].Pdsch.Stream[2].Modulation'], regexCandidates: ['modulation', '(dl|ul).*modulation', '(pdsch|pusch).*modulation', '(qam|qpsk)'] },
+        { key: 'kpi_pmi', label: 'PMI', type: 'kpi', category: 'MIMO/CA', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.ServingCell[8].Pmi'], regexCandidates: ['\\bpmi\\b', 'precoding.*matrix.*indicator'] },
+        { key: 'kpi_bler_dl', label: 'BLER DL', type: 'kpi', category: 'Reliability', normalization: 'percent', sanity: { min: 0, max: 100 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pdsch.Bler'], regexCandidates: ['(dl).*bler', '(pdsch|dlsch).*bler'] },
+        { key: 'kpi_rank_layers', label: 'Rank/Layers (feedback proxy)', type: 'kpi', category: 'MIMO/CA', normalization: 'count', sanity: { min: 0, max: null }, exactCandidates: ['Radio.Lte.ServingCell[8].Rank1.FeedbackCount', 'Radio.Lte.ServingCell[8].Rank2.FeedbackCount', 'Radio.Lte.ServingCell[8].Rank3.FeedbackCount', 'Radio.Lte.ServingCell[8].Rank4.FeedbackCount'], regexCandidates: ['rank\\d+\\.feedbackcount', 'rank.*feedback'] },
+        { key: 'kpi_pci', label: 'Serving PCI', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 1008 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pci'], regexCandidates: ['\\bpci\\b', 'physical.*cell.*id'] },
+        { key: 'kpi_earfcn', label: 'EARFCN', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: null }, exactCandidates: ['Radio.Lte.ServingCell[8].Earfcn', 'Radio.Lte.Neighbor[64].Earfcn'], regexCandidates: ['earfcn', 'dl.*arfcn', 'frequency.*channel'] },
+        { key: 'kpi_rrc_state', label: 'RRC State', type: 'kpi', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['statistics\\.network\\.lte\\.rrcstate', '\\brrc\\b.*state', 'rrc.*connected', 'rrc.*idle'] },
+        { key: 'kpi_timing_advance', label: 'Timing Advance', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: null }, exactCandidates: ['Radio.Lte.ServingCell[8].TimingAdvance'], regexCandidates: ['timing.*advance', '\\bta\\b'] },
+
+        { key: 'ev_handover', label: 'HO Start/Complete', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.IntraFrequencyHandoverEvent', 'Radio.Lte.InterFrequencyHandoverEvent'], regexCandidates: ['handover', '\\bho\\b', 'intra.*freq.*ho', 'inter.*freq.*ho'] },
+        { key: 'ev_pci_change', label: 'Cell/PCI Change (inferred)', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.ServingCell[8].Pci'], regexCandidates: ['\\bpci\\b', 'physical.*cell.*id'] },
+        { key: 'ev_earfcn_change', label: 'EARFCN/Band Change (inferred)', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.ServingCell[8].Earfcn', 'Radio.Lte.Neighbor[64].Earfcn'], regexCandidates: ['earfcn', 'dl.*arfcn', 'frequency.*channel'] },
+        { key: 'ev_rrc_state', label: 'RRC State Transition', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['statistics\\.network\\.lte\\.rrcstate', '\\brrc\\b.*state'] },
+        { key: 'ev_bearer', label: 'Bearer / EPS Bearer', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Message.Layer3.Esm.ActivateDefaultEpsBearerContextRequest'], regexCandidates: ['bearer', '\\beps\\b.*bearer', 'esm.*activate'] },
+        { key: 'ev_ta_jumps', label: 'TA Jumps', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Radio.Lte.ServingCell[8].TimingAdvance'], regexCandidates: ['timing.*advance', '\\bta\\b'] },
+
+        // Not found in this TRP (hidden from sidebar buttons).
+        { key: 'kpi_noise_interference', label: 'Noise / Interference', type: 'kpi', category: 'PHY', normalization: 'dB', sanity: null, exactCandidates: [], regexCandidates: ['noise', 'interfer', '\\bio\\b', 'isr'], disabled: true },
+        { key: 'kpi_tbs', label: 'Transport Block Size (TBS)', type: 'kpi', category: 'PHY', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['\\btbs\\b', 'transport.*block.*size'], disabled: true },
+        { key: 'kpi_code_rate', label: 'Code Rate', type: 'kpi', category: 'PHY', normalization: 'percent', sanity: null, exactCandidates: [], regexCandidates: ['code.*rate', 'coderate'], disabled: true },
+        { key: 'kpi_ca_status', label: 'CA Status', type: 'kpi', category: 'MIMO/CA', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['carrier.*aggregation', 'num.*scell'], disabled: true },
+        { key: 'kpi_dl_prb_used', label: 'DL PRB/RB Used', type: 'kpi', category: 'Scheduling', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['(dl|downlink).*(prb|rb)'], disabled: true },
+        { key: 'kpi_ul_prb_used', label: 'UL PRB/RB Used', type: 'kpi', category: 'Scheduling', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['(ul|uplink).*(prb|rb)'], disabled: true },
+        { key: 'kpi_harq_retx_dl', label: 'HARQ Retransmissions DL', type: 'kpi', category: 'Reliability', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['(dl).*(harq).*(retrans|retx)'], disabled: true },
+        { key: 'kpi_harq_retx_ul', label: 'HARQ Retransmissions UL', type: 'kpi', category: 'Reliability', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['(ul).*(harq).*(retrans|retx)'], disabled: true },
+        { key: 'kpi_bler_ul', label: 'BLER UL', type: 'kpi', category: 'Reliability', normalization: 'percent', sanity: null, exactCandidates: [], regexCandidates: ['(ul).*bler'], disabled: true },
+        { key: 'kpi_rlc_retx', label: 'RLC Retransmissions', type: 'kpi', category: 'Reliability', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['\\brlc\\b.*(retrans|retx)'], disabled: true },
+        { key: 'kpi_pdcp_discard', label: 'PDCP Discard / Reordering', type: 'kpi', category: 'Reliability', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['\\bpdcp\\b.*(discard|drop)'], disabled: true },
+        { key: 'kpi_packet_loss', label: 'Packet Loss', type: 'kpi', category: 'TCP/IP', normalization: 'percent', sanity: null, exactCandidates: [], regexCandidates: ['packet.*loss', 'ip.*loss'], disabled: true },
+        { key: 'kpi_rtt', label: 'RTT', type: 'kpi', category: 'TCP/IP', normalization: 'ms', sanity: null, exactCandidates: [], regexCandidates: ['\\brtt\\b', 'round.*trip'], disabled: true },
+        { key: 'kpi_tcp_retx', label: 'TCP Retransmissions', type: 'kpi', category: 'TCP/IP', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['\\btcp\\b.*(retrans|retx)'], disabled: true },
+        { key: 'kpi_server_stall', label: 'HTTP Stall / App Pause', type: 'kpi', category: 'TCP/IP', normalization: 'ms', sanity: null, exactCandidates: [], regexCandidates: ['http.*stall', 'app.*pause', 'ttfb'], disabled: true },
+        { key: 'kpi_tcp_window', label: 'TCP CWND/RWND', type: 'kpi', category: 'TCP/IP', normalization: 'count', sanity: null, exactCandidates: [], regexCandidates: ['cwnd', 'rwnd'], disabled: true },
+        { key: 'kpi_jitter', label: 'Jitter', type: 'kpi', category: 'TCP/IP', normalization: 'ms', sanity: null, exactCandidates: [], regexCandidates: ['jitter'], disabled: true },
+        { key: 'ev_rlf', label: 'RLF', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['rlf', 'radio.*link.*failure'], disabled: true },
+        { key: 'ev_rrc_reestab', label: 'RRC Re-establishment', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['re-?establishment', 'rrc.*reestab'], disabled: true },
+        { key: 'ev_scell_change', label: 'CA SCell Add/Remove', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['num.*scell', 'scell.*active'], disabled: true },
+        { key: 'ev_session_start_stop', label: 'Data Session Start/Stop', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['http.*(start|stop)', 'ftp.*(start|stop)', 'iperf.*(start|stop)'], disabled: true },
+        { key: 'ev_volte_call', label: 'VoLTE Call Start/End', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: ['Call.Properties.VoLTESupport.Audio'], regexCandidates: ['volte', 'ims.*call', 'call.*(start|end)'], disabled: true },
+        { key: 'ev_drx_gap', label: 'DRX / Measurement Gaps', type: 'event', category: 'Events', normalization: 'unitless', sanity: null, exactCandidates: [], regexCandidates: ['meas.*gap', '\\bdrx\\b'], disabled: true }
+    ];
+
+    root.TRP_METRIC_REGISTRY = REGISTRY;
+})(window);

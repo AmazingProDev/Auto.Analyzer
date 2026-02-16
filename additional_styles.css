@@ -157,3 +157,84 @@
     color: #fff;
     font-weight: 500;
 }
+
+.throughput-analysis-modal .analysis-content {
+    background: #020817;
+    color: #e2e8f0;
+}
+
+.throughput-analysis-modal .btn.header-btn {
+    font-size: 11px;
+    padding: 5px 8px;
+}
+
+.throughput-analysis-modal .tp-dip-item:hover,
+.throughput-analysis-modal .tp-event-item:hover {
+    background: rgba(37, 99, 235, 0.12);
+    border-color: #1d4ed8;
+}
+
+.driver-view-chooser {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.driver-segment {
+    display: inline-flex;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.driver-segment button {
+    background: #0f172a;
+    color: #cbd5e1;
+    border: 0;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.driver-segment button.active {
+    background: #2563eb;
+    color: #fff;
+}
+
+
+/* Metric-aware legend for driver map view */
+.driver-legend {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.85);
+  width: 260px;
+}
+.driver-legend-title {
+  font-size: 11px;
+  color: #cbd5e1;
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.driver-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #e2e8f0;
+  margin: 3px 0;
+}
+.driver-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(148,163,184,0.35);
+  flex: 0 0 auto;
+}
+.driver-legend-range {
+  margin-left: auto;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
