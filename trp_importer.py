@@ -8,6 +8,7 @@ import zlib
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from trp_raw_decoder import decode_raw_trp_variant, decode_provider_channels_variant
+from db_client import connect_db, sync_if_needed
 
 MAX_KPI_ROWS = 500000
 MAX_EVENT_ROWS = 200000
@@ -100,12 +101,6 @@ INFO_LABELS = {
     'enodeb_id': 'eNodeB ID',
     'cell_id': 'Cell ID'
 }
-
-
-
-def open_db(db_path):
-    is_uri = isinstance(db_path, str) and db_path.startswith('file:')
-    return sqlite3.connect(db_path, uri=is_uri)
 
 def utc_iso_from_epoch_seconds(epoch_s):
     try:
@@ -679,6 +674,7 @@ def ensure_schema(conn):
         """
     )
     conn.commit()
+    sync_if_needed(conn)
 
 
 def _derive_tags(name):
@@ -1326,7 +1322,7 @@ def import_trp_file(trp_path, db_path, storage_dir):
     }
 
     stages.append('saving')
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     try:
         ensure_schema(conn)
         cur = conn.cursor()
@@ -1418,6 +1414,7 @@ def import_trp_file(trp_path, db_path, storage_dir):
         )
 
         conn.commit()
+        sync_if_needed(conn)
         stages.append('done')
         return {
             'runId': run_id,
@@ -1453,7 +1450,7 @@ def import_trp_file(trp_path, db_path, storage_dir):
 
 
 def fetch_run_detail(db_path, run_id, event_limit=2000):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1494,7 +1491,7 @@ def fetch_run_detail(db_path, run_id, event_limit=2000):
 
 
 def fetch_kpi_series(db_path, run_id, name, limit=20000):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1506,7 +1503,7 @@ def fetch_kpi_series(db_path, run_id, name, limit=20000):
 
 
 def fetch_events(db_path, run_id, event_name=None, limit=5000):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1539,7 +1536,7 @@ def fetch_events(db_path, run_id, event_name=None, limit=5000):
 
 
 def fetch_run_signals(db_path, run_id):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1567,7 +1564,7 @@ def fetch_run_signals(db_path, run_id):
 
 
 def fetch_timeseries_by_signal(db_path, run_id, signal, limit=50000):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1600,7 +1597,7 @@ def fetch_timeseries_by_signal(db_path, run_id, signal, limit=50000):
 
 
 def fetch_run_track(db_path, run_id):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1628,7 +1625,7 @@ def fetch_events_by_type(db_path, run_id, event_type=None, limit=5000):
 
 
 def fetch_run_catalog(db_path, run_id):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1706,7 +1703,7 @@ def fetch_run_catalog(db_path, run_id):
 
 
 def fetch_run_sidebar(db_path, run_id):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -1985,7 +1982,7 @@ def fetch_throughput_summary(db_path, run_id, low_threshold_mbps=5.0, dip_min_se
 
 
 def list_runs(db_path, limit=200):
-    conn = open_db(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         ensure_schema(conn)
@@ -2010,50 +2007,5 @@ def list_runs(db_path, limit=200):
                 'metadata': metadata
             })
         return out
-    finally:
-        conn.close()
-
-
-def delete_run(db_path, run_id):
-    conn = open_db(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        ensure_schema(conn)
-        cur = conn.cursor()
-        run = cur.execute("SELECT id, filename FROM runs WHERE id=?", (int(run_id),)).fetchone()
-        if not run:
-            return {'deleted': False, 'runId': int(run_id), 'message': 'Run not found'}
-
-        deleted_counts = {}
-        tables = ['kpi_samples', 'events', 'track_points', 'run_metrics', 'run_events_catalog', 'kpi_summary']
-        for table in tables:
-            cur.execute(f"DELETE FROM {table} WHERE run_id=?", (int(run_id),))
-            deleted_counts[table] = int(cur.rowcount or 0)
-
-        cur.execute("DELETE FROM runs WHERE id=?", (int(run_id),))
-        deleted_counts['runs'] = int(cur.rowcount or 0)
-        conn.commit()
-        return {
-            'deleted': True,
-            'runId': int(run_id),
-            'filename': run['filename'],
-            'counts': deleted_counts
-        }
-    finally:
-        conn.close()
-
-
-def purge_all_runs(db_path):
-    conn = open_db(db_path)
-    try:
-        ensure_schema(conn)
-        cur = conn.cursor()
-        deleted_counts = {}
-        tables = ['kpi_samples', 'events', 'track_points', 'run_metrics', 'run_events_catalog', 'kpi_summary', 'runs']
-        for table in tables:
-            cur.execute(f"DELETE FROM {table}")
-            deleted_counts[table] = int(cur.rowcount or 0)
-        conn.commit()
-        return {'purged': True, 'counts': deleted_counts}
     finally:
         conn.close()

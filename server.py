@@ -2,12 +2,12 @@ import csv
 import json
 import os
 import shutil
-import sqlite3
 import tempfile
 import http.server
 import socketserver
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
+from db_client import connect_db, db_backend_name
 
 from trp_importer import (
     import_trp_file,
@@ -22,37 +22,24 @@ from trp_importer import (
     fetch_run_sidebar,
     fetch_throughput_summary,
     list_runs,
-    ensure_schema,
-    delete_run,
-    purge_all_runs
+    ensure_schema
 )
 
 PORT = 8000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-IS_VERCEL = bool(os.environ.get('VERCEL') or os.environ.get('VERCEL_ENV'))
-if IS_VERCEL:
-    # Serverless runtime: keep transient storage under /tmp and DB in shared in-memory SQLite.
-    DATA_DIR = os.path.join('/tmp', 'optim_analyzer')
-    UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
-    DB_PATH = 'file:optim_analyzer_memdb?mode=memory&cache=shared'
-else:
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
-    UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
-    DB_PATH = os.path.join(DATA_DIR, 'trp_runs.db')
+IS_VERCEL = bool((os.getenv('VERCEL') or '').strip())
+DEFAULT_DATA_DIR = '/tmp/optim_analyzer_data' if IS_VERCEL else os.path.join(BASE_DIR, 'data')
+DATA_DIR = os.getenv('OPTIM_DATA_DIR') or DEFAULT_DATA_DIR
+UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
+DEFAULT_DB_PATH = '/tmp/trp_runs.db' if IS_VERCEL else os.path.join(DATA_DIR, 'trp_runs.db')
+DB_PATH = os.getenv('TRP_DB_PATH') or DEFAULT_DB_PATH
 MAX_UPLOAD_BYTES = 300 * 1024 * 1024
-
-
-def connect_db(path):
-    is_uri = isinstance(path, str) and path.startswith('file:')
-    return sqlite3.connect(path, uri=is_uri)
-
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-# Keep one anchor connection open for shared in-memory DB mode.
-_DB_ANCHOR_CONN = connect_db(DB_PATH)
-conn = _DB_ANCHOR_CONN
+conn = connect_db(DB_PATH)
 ensure_schema(conn)
+conn.close()
 
 
 def json_response(handler, status, payload):
@@ -205,74 +192,6 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/trp/import':
             return self._handle_trp_import()
 
-        if path == '/api/runs/purge':
-            try:
-                result = purge_all_runs(DB_PATH)
-                return json_response(self, 200, {'status': 'success', **result})
-            except Exception as e:
-                return json_response(self, 500, {'status': 'error', 'message': f'Failed to purge runs: {e}'})
-
-        if path == '/api/runs/reset-storage':
-            try:
-                db_deleted = False
-                uploads_deleted = False
-
-                if isinstance(DB_PATH, str) and DB_PATH.startswith('file:'):
-                    # In-memory DB: clear tables instead of removing a file.
-                    purge_all_runs(DB_PATH)
-                    db_deleted = True
-                elif os.path.isfile(DB_PATH):
-                    os.remove(DB_PATH)
-                    db_deleted = True
-
-                if os.path.isdir(UPLOAD_DIR):
-                    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-                    uploads_deleted = True
-
-                os.makedirs(DATA_DIR, exist_ok=True)
-                os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-                conn = connect_db(DB_PATH)
-                ensure_schema(conn)
-                conn.close()
-
-                return json_response(self, 200, {
-                    'status': 'success',
-                    'reset': True,
-                    'dbDeleted': db_deleted,
-                    'uploadsDeleted': uploads_deleted
-                })
-            except Exception as e:
-                return json_response(self, 500, {'status': 'error', 'message': f'Failed to reset storage: {e}'})
-
-        self.send_error(404)
-
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if path.startswith('/api/runs/'):
-            parts = [p for p in path.split('/') if p]
-            if len(parts) == 3 and parts[0] == 'api' and parts[1] == 'runs':
-                try:
-                    run_id = int(parts[2])
-                except Exception:
-                    return json_response(self, 400, {'status': 'error', 'message': 'Invalid run id'})
-                try:
-                    result = delete_run(DB_PATH, run_id)
-                    if not result.get('deleted'):
-                        return json_response(self, 404, {'status': 'error', 'message': result.get('message') or 'Run not found'})
-                    fname = os.path.basename(str(result.get('filename') or ''))
-                    if fname:
-                        candidate = os.path.join(UPLOAD_DIR, fname)
-                        if os.path.isfile(candidate):
-                            try:
-                                os.remove(candidate)
-                                result['deletedUploadFile'] = True
-                            except Exception:
-                                result['deletedUploadFile'] = False
-                    return json_response(self, 200, {'status': 'success', **result})
-                except Exception as e:
-                    return json_response(self, 500, {'status': 'error', 'message': f'Failed to delete run: {e}'})
         self.send_error(404)
 
     def _handle_save_sites(self):
@@ -387,6 +306,7 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_server(port=PORT):
     print(f'Starting server on port {port}...')
+    print(f'DB backend: {db_backend_name()} ({DB_PATH})')
     print('Use Ctrl+C to stop.')
     with socketserver.TCPServer(('', port), CustomHandler) as httpd:
         try:

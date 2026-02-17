@@ -48,3 +48,32 @@ python3 server.py
 
 - If no track exists, UI shows **No track found**.
 - If MOS/any KPI is missing, UI still works with available KPI names.
+
+## Turso + Vercel backend config
+
+The backend now supports Turso automatically when environment variables are set.
+
+### Required env vars
+
+- `TURSO_DATABASE_URL` (example: `libsql://<db-name>-<org>.turso.io`)
+- `TURSO_AUTH_TOKEN`
+
+### Optional env vars
+
+- `TURSO_LOCAL_REPLICA_PATH` (default follows `TRP_DB_PATH`, useful on Vercel: `/tmp/trp_runs.db`)
+- `TRP_DB_PATH` (local fallback sqlite path)
+- `OPTIM_DATA_DIR` (where uploads/temp DB live; default is `/tmp/optim_analyzer_data` on Vercel)
+
+### Vercel steps
+
+1. In Turso:
+   - create DB and token
+2. In Vercel project settings -> Environment Variables, add:
+   - `TURSO_DATABASE_URL`
+   - `TURSO_AUTH_TOKEN`
+   - `TRP_DB_PATH=/tmp/trp_runs.db`
+   - `OPTIM_DATA_DIR=/tmp/optim_analyzer_data`
+3. Deploy backend.
+4. In the frontend header `API` setting, set your backend base URL.
+
+When Turso env vars are present, writes are committed locally then synced to Turso.
