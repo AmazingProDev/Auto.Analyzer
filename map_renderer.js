@@ -427,14 +427,40 @@ class MapRenderer {
             all: allVisibleSectors
         };
 
+        const normalizeId = (v) => String(v == null ? '' : v).replace(/\s/g, '');
+        const toEnbCidCanonical = (v) => {
+            if (v === undefined || v === null) return null;
+            const s = String(v).trim();
+            if (!s) return null;
+            const m = s.match(/(\d+)\D+(\d+)/);
+            if (!m) return null;
+            return `${Number(m[1])}-${Number(m[2])}`;
+        };
         allVisibleSectors.forEach(s => {
             if (s.cellId) {
-                const normId = String(s.cellId).replace(/\s/g, '');
+                const normId = normalizeId(s.cellId);
                 this.siteIndex.byId.set(normId, s);
                 if (s.rnc && s.cid) {
-                    const rncCid = `${s.rnc}/${s.cid}`.replace(/\s/g, '');
+                    const rncCid = normalizeId(`${s.rnc}/${s.cid}`);
                     this.siteIndex.byId.set(rncCid, s);
+                    this.siteIndex.byId.set(normalizeId(`${s.rnc}-${s.cid}`), s);
                 }
+            }
+            if (s.rawEnodebCellId) {
+                const raw = normalizeId(s.rawEnodebCellId);
+                if (raw) {
+                    this.siteIndex.byId.set(raw, s);
+                    this.siteIndex.byId.set(raw.replace(/\//g, '-'), s);
+                    this.siteIndex.byId.set(raw.replace(/-/g, '/'), s);
+                }
+                const canonical = toEnbCidCanonical(s.rawEnodebCellId);
+                if (canonical) {
+                    this.siteIndex.byId.set(normalizeId(canonical), s);
+                    this.siteIndex.byId.set(normalizeId(canonical.replace(/-/g, '/')), s);
+                }
+            }
+            if (s.calculatedEci !== undefined && s.calculatedEci !== null) {
+                this.siteIndex.byId.set(normalizeId(String(s.calculatedEci)), s);
             }
             const sc = s.sc || s.pci;
             if (sc !== undefined) {
@@ -450,7 +476,7 @@ class MapRenderer {
 
     getServingCell(p) {
         // PERFORMANCE: Check Cache
-        if (p._cachedServing !== undefined) return p._cachedServing;
+        if (p && p._cachedServing) return p._cachedServing;
 
         if (!this.siteIndex) {
             console.warn('[MapRenderer] getServingCell: Site Index missing, attempting to rebuild...');
@@ -466,10 +492,157 @@ class MapRenderer {
         }
 
         // ... logic continues ...
+        const normalizeId = (v) => String(v == null ? '' : v).replace(/\s/g, '');
+        const findByKeyPattern = (obj, predicate) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const keys = Object.keys(obj);
+            for (const k of keys) {
+                if (predicate(String(k || '').toLowerCase())) return obj[k];
+            }
+            return undefined;
+        };
+        const toEnbCidCanonical = (v) => {
+            if (v === undefined || v === null) return null;
+            const s = String(v).trim();
+            if (!s) return null;
+            const m = s.match(/(\d+)\D+(\d+)/);
+            if (!m) return null;
+            return `${Number(m[1])}-${Number(m[2])}`;
+        };
+        const getValCI = (obj, name) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const wanted = String(name || '').toLowerCase();
+            const key = Object.keys(obj).find(k => String(k || '').toLowerCase() === wanted);
+            return key ? obj[key] : undefined;
+        };
+        const parseFiniteInt = (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            return Math.round(n);
+        };
+        const pointLteEci = (() => {
+            const direct = [
+                p.lteEci,
+                p.eci,
+                p['Radio.Lte.ServingCell[8].CellIdentity.Complete'],
+                p['radio.lte.servingcell[8].cellidentity.complete'],
+                p.cellIdentityComplete
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null && v > 255) return v;
+            }
+            const fuzzyTop = findByKeyPattern(p, (k) =>
+                ((k.includes('servingcell') && k.includes('cellidentity') && k.includes('complete')) || k.includes('cellidentitycomplete') || k === 'eci')
+            );
+            {
+                const v = parseFiniteInt(fuzzyTop);
+                if (v !== null && v > 255) return v;
+            }
+            const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
+            if (props) {
+                const fromProps = getValCI(props, 'Radio.Lte.ServingCell[8].CellIdentity.Complete')
+                    || getValCI(props, 'radio.lte.servingcell[8].cellidentity.complete')
+                    || getValCI(props, 'cellidentity.complete');
+                const v = parseFiniteInt(fromProps);
+                if (v !== null && v > 255) return v;
+                const fuzzyProps = findByKeyPattern(props, (k) =>
+                    (k.includes('servingcell') && k.includes('cellidentity') && k.includes('complete')) || k.includes('cellidentitycomplete') || k === 'eci'
+                );
+                const v2 = parseFiniteInt(fuzzyProps);
+                if (v2 !== null && v2 > 255) return v2;
+            }
+            const fromCellId = parseFiniteInt(p.cellId);
+            if (fromCellId !== null && fromCellId > 65535) return fromCellId;
+            return null;
+        })();
+
+        if (pointLteEci !== null) {
+            const eciKey = normalizeId(String(pointLteEci));
+            if (this.siteIndex.byId.has(eciKey)) {
+                const hit = this.siteIndex.byId.get(eciKey);
+                p._cachedServing = hit;
+                return hit;
+            }
+            const eciHit = siteData.find(x => Number(x.calculatedEci) === pointLteEci);
+            if (eciHit) {
+                p._cachedServing = eciHit;
+                return eciHit;
+            }
+        }
+
+        const pointEnodebCellId = (() => {
+            const directCandidates = [
+                p.enodebCellId,
+                p.enodebCellIdKey,
+                p.rawEnodebCellId,
+                p.enodeb_id_cell_id,
+                p.enodebid_cellid,
+                p['eNodeB ID-Cell ID'],
+                p['eNodeB ID - Cell ID']
+            ];
+            for (const c of directCandidates) {
+                if (c !== undefined && c !== null && String(c).trim()) return String(c).trim();
+            }
+            const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
+            if (props) {
+                const fromProps = getValCI(props, 'eNodeB ID-Cell ID')
+                    || getValCI(props, 'eNodeB ID - Cell ID')
+                    || getValCI(props, 'enodebid-cellid')
+                    || getValCI(props, 'enodebidcellid')
+                    || getValCI(props, 'enodeb id-cell id');
+                if (fromProps !== undefined && fromProps !== null && String(fromProps).trim()) {
+                    return String(fromProps).trim();
+                }
+                const fuzzyProps = findByKeyPattern(props, (k) => (k.includes('enodeb') || k.includes('nodeb')) && k.includes('cell') && k.includes('id'));
+                if (fuzzyProps !== undefined && fuzzyProps !== null && String(fuzzyProps).trim()) {
+                    return String(fuzzyProps).trim();
+                }
+            }
+            const cellText = p.cellId !== undefined && p.cellId !== null ? String(p.cellId).trim() : '';
+            if (/^\d+\s*[-/]\s*\d+$/.test(cellText)) return cellText;
+            if (p.rnc != null && p.cid != null && Number.isFinite(Number(p.rnc)) && Number.isFinite(Number(p.cid))) {
+                return `${Number(p.rnc)}-${Number(p.cid)}`;
+            }
+            if (pointLteEci !== null) {
+                const enb = Math.floor(pointLteEci / 256);
+                const cid = pointLteEci % 256;
+                return `${enb}-${cid}`;
+            }
+            return null;
+        })();
+
         const pci = p.sc;
         const lac = p.lac || (p.parsed && p.parsed.serving ? p.parsed.serving.lac : null);
         const freq = p.freq || (p.parsed && p.parsed.serving ? p.parsed.serving.freq : null);
         const cellId = p.cellId;
+
+        // 0. PRIORITY: Strict eNodeB ID-Cell ID Matching for LTE
+        if (pointEnodebCellId) {
+            const raw = normalizeId(pointEnodebCellId);
+            const variants = [raw, raw.replace(/\//g, '-'), raw.replace(/-/g, '/')];
+            const canonical = toEnbCidCanonical(pointEnodebCellId);
+            if (canonical) {
+                variants.push(normalizeId(canonical), normalizeId(canonical.replace(/-/g, '/')));
+            }
+            for (const key of variants) {
+                if (this.siteIndex.byId.has(key)) {
+                    const hit = this.siteIndex.byId.get(key);
+                    p._cachedServing = hit;
+                    return hit;
+                }
+            }
+            const fallback = siteData.find(x => {
+                const siteRaw = normalizeId(x.rawEnodebCellId || '');
+                if (siteRaw === raw) return true;
+                const siteCanonical = toEnbCidCanonical(x.rawEnodebCellId || x.cellId || x.calculatedEci);
+                return canonical && siteCanonical === canonical;
+            });
+            if (fallback) {
+                p._cachedServing = fallback;
+                return fallback;
+            }
+        }
 
         // NEW: Priority RNC/CID Lookup (3G)
         if (p.rnc != null && p.cid != null) {
@@ -496,7 +669,7 @@ class MapRenderer {
             if (shortKeyMatch) return shortKeyMatch;
         }
 
-        // 0. PRIORITY: Strict eNodeB ID-Cell ID Matching
+        // 1. PRIORITY: Strict eNodeB ID-Cell ID / CellID Matching
         if (cellId) {
             if (typeof cellId === 'number' && cellId > 65535) {
                 const s = siteData.find(x => x.calculatedEci === cellId);
@@ -613,7 +786,7 @@ class MapRenderer {
             }
         }
 
-        p._cachedServing = null; // Cache Miss
+        delete p._cachedServing; // Do not cache misses; site layers may load/update later.
         return null;
     }
 
@@ -1324,7 +1497,11 @@ class MapRenderer {
                 // 1. External Highlight (User Click) - Highest Priority
                 let currentRadius = range; // Base radius
 
-                if (this.externalHighlight && (s.cellId == this.externalHighlight.id || `${s.rnc}/${s.cid}` == this.externalHighlight.id)) {
+                if (this.externalHighlight && (
+                    s.cellId == this.externalHighlight.id ||
+                    `${s.rnc}/${s.cid}` == this.externalHighlight.id ||
+                    String(s.rawEnodebCellId || '').replace(/\s/g, '') === String(this.externalHighlight.id || '').replace(/\s/g, '')
+                )) {
                     color = this.externalHighlight.color;
                     finalOpacity = 1;
                     finalFillOpacity = 0.8;
@@ -1608,52 +1785,97 @@ class MapRenderer {
         // Clear previous connections
         this.connectionsLayer.clearLayers();
         if (!startPt || !targets || targets.length === 0) return;
+        const toFiniteNumber = (v) => {
+            if (v === undefined || v === null || v === '') return null;
+            if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+            const n = Number(String(v).replace(',', '.').trim());
+            return Number.isFinite(n) ? n : null;
+        };
+        const startLat = toFiniteNumber(startPt.lat);
+        const startLng = toFiniteNumber(startPt.lng);
+        if (startLat === null || startLng === null) return;
+        const normalizeId = (v) => String(v == null ? '' : v).replace(/\s/g, '');
+        const resolveCoordsFromCellId = (cellId) => {
+            if (!cellId) return null;
+            const raw = String(cellId);
+            const keys = [raw, raw.replace(/\//g, '-'), raw.replace(/-/g, '/')].map(normalizeId);
+            for (const k of keys) {
+                const poly = this.sitePolygons && this.sitePolygons[k];
+                if (!poly) continue;
+                const b = poly.getBounds && poly.getBounds();
+                if (!b || !b.isValid || !b.isValid()) continue;
+                const c = b.getCenter();
+                if (Number.isFinite(c.lat) && Number.isFinite(c.lng)) return { lat: c.lat, lng: c.lng };
+            }
+            if (this.siteIndex && this.siteIndex.byId) {
+                for (const k of keys) {
+                    if (!this.siteIndex.byId.has(k)) continue;
+                    const s = this.siteIndex.byId.get(k);
+                    const lat = toFiniteNumber(s && s.lat);
+                    const lng = toFiniteNumber(s && s.lng);
+                    if (lat !== null && lng !== null) return { lat, lng };
+                }
+            }
+            return null;
+        };
 
         targets.forEach(t => {
-            if (t.lat === undefined || t.lng === undefined) {
-                return;
+            let baseLat = toFiniteNumber(t.lat);
+            let baseLng = toFiniteNumber(t.lng);
+            if (baseLat === null || baseLng === null) {
+                const fallback = resolveCoordsFromCellId(t.cellId);
+                if (!fallback) return;
+                baseLat = fallback.lat;
+                baseLng = fallback.lng;
             }
 
-            let destLat = t.lat;
-            let destLng = t.lng;
+            let destLat = baseLat;
+            let destLng = baseLng;
 
             // 1. Precise Tip Calculation via precomputed tip (preferred)
-            if (t.tipLat !== undefined && t.tipLng !== undefined) {
-                destLat = t.tipLat;
-                destLng = t.tipLng;
+            const tipLat = toFiniteNumber(t.tipLat);
+            const tipLng = toFiniteNumber(t.tipLng);
+            if (tipLat !== null && tipLng !== null) {
+                destLat = tipLat;
+                destLng = tipLng;
             }
             // 2. Precise Tip Calculation via Azimuth
-            else if (t.azimuth !== undefined && t.range !== undefined) {
+            else {
+                const azimuth = toFiniteNumber(t.azimuth);
+                const range = toFiniteNumber(t.range);
+                if (azimuth !== null && range !== null && range > 0) {
                 const rad = Math.PI / 180;
-                const latRad = t.lat * rad;
-                const azRad = t.azimuth * rad;
-                const dist = t.range; // meters
+                    const latRad = baseLat * rad;
+                    const azRad = azimuth * rad;
+                    const dist = range; // meters
 
-                const dy = Math.cos(azRad) * dist;
-                const dx = Math.sin(azRad) * dist;
-                const dLat = dy / 111111;
-                const dLng = dx / (111111 * Math.cos(latRad));
+                    const dy = Math.cos(azRad) * dist;
+                    const dx = Math.sin(azRad) * dist;
+                    const dLat = dy / 111111;
+                    const dLng = dx / (111111 * Math.cos(latRad));
 
-                destLat = t.lat + dLat;
-                destLng = t.lng + dLng;
-            }
-            // 3. Fallback: Polygon Centroid Logic
-            else if (t.cellId && this.sitePolygons[t.cellId]) {
-                const poly = this.sitePolygons[t.cellId];
-                // Polygon structure: [center, p1, p2]
-                // Leaflet polygons often return nested arrays: [[center, p1, p2]]
-                const latLngs = poly.getLatLngs();
-                const points = Array.isArray(latLngs[0]) ? latLngs[0] : latLngs;
+                    destLat = baseLat + dLat;
+                    destLng = baseLng + dLng;
+                }
+                // 3. Fallback: Polygon Centroid Logic
+                else if (t.cellId && this.sitePolygons[t.cellId]) {
+                    const poly = this.sitePolygons[t.cellId];
+                    // Polygon structure: [center, p1, p2]
+                    // Leaflet polygons often return nested arrays: [[center, p1, p2]]
+                    const latLngs = poly.getLatLngs();
+                    const points = Array.isArray(latLngs[0]) ? latLngs[0] : latLngs;
 
-                if (points.length >= 3) {
-                    const p1 = points[1];
-                    const p2 = points[2];
-                    destLat = (p1.lat + p2.lat) / 2;
-                    destLng = (p1.lng + p2.lng) / 2;
+                    if (points.length >= 3) {
+                        const p1 = points[1];
+                        const p2 = points[2];
+                        destLat = (p1.lat + p2.lat) / 2;
+                        destLng = (p1.lng + p2.lng) / 2;
+                    }
                 }
             }
 
-            L.polyline([[startPt.lat, startPt.lng], [destLat, destLng]], {
+            if (!Number.isFinite(destLat) || !Number.isFinite(destLng)) return;
+            L.polyline([[startLat, startLng], [destLat, destLng]], {
                 color: t.color,
                 weight: t.weight || 3,
                 opacity: 1.0,

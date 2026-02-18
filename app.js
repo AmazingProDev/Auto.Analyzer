@@ -14,100 +14,6 @@ document.addEventListener('DOMContentLoaded', () => {
     window.map = map.map; // Expose Leaflet instance globally for inline onclicks
     window.mapRenderer = map; // Expose Renderer helper for debugging/verification
 
-    const buildApiUrl = (path) => {
-        if (window.trpBuildApiUrl && typeof window.trpBuildApiUrl === 'function') {
-            return window.trpBuildApiUrl(path);
-        }
-        const base = (window.API_BASE_URL || '').trim();
-        if (!base) return path;
-        return base.replace(/\/+$/, '') + path;
-    };
-    const API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
-
-    const isLikelyVercelHost = () => {
-        try { return /\.vercel\.app$/i.test(window.location.hostname || ''); }
-        catch (_e) { return false; }
-    };
-
-    const ensureBackendConfigured = (actionLabel) => {
-        const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
-        if (isLikelyVercelHost() && !base) {
-            const msg = (actionLabel || 'This action') + ' requires a backend API URL on Vercel.\nEnter it now (example: https://your-backend.example.com).';
-            const entered = prompt(msg, '');
-            const saved = setApiBase(entered || '');
-            refreshApiBaseUi();
-            if (!saved) {
-                if (fileStatus) fileStatus.textContent = 'Backend API URL not configured.';
-                return false;
-            }
-            if (fileStatus) fileStatus.textContent = 'Backend API URL saved: ' + saved;
-        }
-        return true;
-    };
-
-    if (isLikelyVercelHost()) {
-        const base = (window.trpGetApiBase && window.trpGetApiBase()) || (window.API_BASE_URL || '').trim();
-        if (!base && fileStatus) {
-            fileStatus.textContent = 'Set backend API URL from header API settings to enable TRP actions.';
-        }
-    }
-
-    const readApiBase = () => {
-        const fromBridge = (window.trpGetApiBase && window.trpGetApiBase()) || '';
-        if (String(fromBridge).trim()) return String(fromBridge).trim();
-        try {
-            const fromStorage = localStorage.getItem(API_BASE_STORAGE_KEY);
-            if (fromStorage && String(fromStorage).trim()) return String(fromStorage).trim();
-        } catch (_e) {}
-        return (window.API_BASE_URL || '').trim();
-    };
-
-    const setApiBase = (url) => {
-        const normalized = String(url || '').trim().replace(/\/+$/, '');
-        if (window.setOptimApiBase && typeof window.setOptimApiBase === 'function') {
-            window.setOptimApiBase(normalized);
-            return normalized;
-        }
-        try {
-            if (normalized) localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
-            else localStorage.removeItem(API_BASE_STORAGE_KEY);
-        } catch (_e) {}
-        return normalized;
-    };
-
-    const apiBaseInput = document.getElementById('apiBaseInput');
-    const apiBaseSaveBtn = document.getElementById('apiBaseSaveBtn');
-    const apiBaseClearBtn = document.getElementById('apiBaseClearBtn');
-    const refreshApiBaseUi = () => {
-        if (!apiBaseInput) return;
-        const current = readApiBase();
-        apiBaseInput.value = current;
-        apiBaseInput.title = current || 'Backend API URL for TRP actions';
-    };
-    if (apiBaseInput) {
-        refreshApiBaseUi();
-    }
-    if (apiBaseSaveBtn) {
-        apiBaseSaveBtn.onclick = () => {
-            const raw = apiBaseInput ? apiBaseInput.value : '';
-            const value = String(raw || '').trim();
-            if (!value) {
-                alert('Enter a backend URL (for example: https://your-backend.example.com)');
-                return;
-            }
-            const saved = setApiBase(value);
-            refreshApiBaseUi();
-            if (fileStatus) fileStatus.textContent = 'Backend API URL saved: ' + saved;
-        };
-    }
-    if (apiBaseClearBtn) {
-        apiBaseClearBtn.onclick = () => {
-            setApiBase('');
-            refreshApiBaseUi();
-            if (fileStatus) fileStatus.textContent = 'Backend API URL cleared.';
-        };
-    }
-
     // ------------------------------
     // Dynamic SmartCare Thresholds
     // ------------------------------
@@ -384,6 +290,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Discrete identity metrics (Cell/Network identifiers)
         if (m.startsWith('__info_') || m.startsWith('__derived_') || m.includes('earfcn') || m.includes('tracking area') || m.includes('tac') || m.includes('enodeb') || m.includes('physical cell') || m.includes('pci') || m === 'cellid' || m.includes('cell id') || m.includes('cellidentity')) return 'discrete';
 
+        // LTE neighbors specific legends
+        if (m.includes('radio.lte.neighbor[') && m.endsWith('.rsrp')) return 'neighbor_rsrp';
+        if (m.includes('radio.lte.neighbor[') && m.endsWith('.rsrq')) return 'neighbor_rsrq';
+
         // ---- Explicit KPI-specific legends ----
         // RSRP
         if (m.includes('rsrp') || m.includes('rscp') || m.includes('signallevel') || m.includes('level')) return 'rsrp';
@@ -457,6 +367,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 { min: -15, max: -10, color: '#84cc16', label: 'Good (-15 to -10 dB)' },
                 { min: -20, max: -15, color: '#eab308', label: 'Fair (-20 to -15 dB)' },
                 { min: undefined, max: -20, color: '#ef4444', label: 'Poor (< -20 dB)' }
+            ],
+            // LTE Neighbor presets
+            'neighbor_rsrp': [
+                { min: -80, max: undefined, color: '#22c55e', label: 'Good (>= -80 dBm)' },
+                { min: -90, max: -80, color: '#84cc16', label: 'Fair (-90 to -80 dBm)' },
+                { min: -100, max: -90, color: '#eab308', label: 'Weak (-100 to -90 dBm)' },
+                { min: -110, max: -100, color: '#f97316', label: 'Poor (-110 to -100 dBm)' },
+                { min: undefined, max: -110, color: '#ef4444', label: 'Bad (< -110 dBm)' }
+            ],
+            'neighbor_rsrq': [
+                { min: -10, max: undefined, color: '#22c55e', label: 'Good (>= -10 dB)' },
+                { min: -15, max: -10, color: '#84cc16', label: 'Fair (-15 to -10 dB)' },
+                { min: -20, max: -15, color: '#f97316', label: 'Poor (-20 to -15 dB)' },
+                { min: undefined, max: -20, color: '#ef4444', label: 'Bad (< -20 dB)' }
             ],
             'sinr': [
                 { min: 20, max: undefined, color: '#22c55e', label: 'Excellent (>= 20 dB)' },
@@ -595,36 +519,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const servingCell = mapRenderer.getServingCell(point);
 
         if (servingCell) {
-            // 2. Draw Connection Line
-            // Color can be static (e.g. green) or dynamic (based on point color)
-            const color = mapRenderer.getColor(mapRenderer.getMetricValue(point, mapRenderer.activeMetric), mapRenderer.activeMetric);
-
-            // Construct target object for drawConnections
-            const target = {
-                lat: servingCell.lat,
-                lng: servingCell.lng,
-                azimuth: servingCell.azimuth, // Pass Azimuth
-                range: (servingCell.currentRadius || servingCell.range || 100), // Go to Sector Tip (uses rendered radius)
-                tipLat: servingCell.tipLat,
-                tipLng: servingCell.tipLng,
-                color: color || '#3b82f6', // Default Blue
-                cellId: servingCell.cellId // For polygon centroid logic (legacy fallback)
-            };
-
-            // Use Best Available ID for Polygon Lookup
+            // Only highlight in this legacy path. Point-details renderer owns line drawing/colors.
             const bestId = servingCell.rawEnodebCellId || servingCell.calculatedEci || servingCell.cellId;
-            if (bestId) target.cellId = bestId;
-
-            mapRenderer.drawConnections(startPt, [target]);
-
-            // 3. Optional: Highlight Serving Cell (Visual Feedback)
             mapRenderer.highlightCell(bestId);
-
-            // console.log('[App] Drawn line to Serving Cell: ' + (servingCell.cellName || servingCell.cellId));
         } else {
-            console.warn('[App] Serving Cell not found for clicked point.');
-            // Clear previous connections if any
-            mapRenderer.connectionsLayer.clearLayers();
+            // Do not clear here: point-details resolver can still resolve serving/neighbors
+            // with richer LTE key handling and should own the final connection rendering.
+            console.warn('[App] Serving Cell not found in legacy click path.');
         }
     });
 
@@ -756,59 +657,6 @@ document.addEventListener('DOMContentLoaded', () => {
             e.preventDefault();
             const modal = document.getElementById('importModal');
             if (modal) modal.style.display = 'block';
-        };
-    }
-
-    const clearTrpDbBtn = document.getElementById('clearTrpDbBtn');
-    if (clearTrpDbBtn) {
-        clearTrpDbBtn.onclick = async () => {
-            if (!ensureBackendConfigured('Clear DB')) return;
-            const ok = confirm('Clear all TRP data from trp_runs.db now? This cannot be undone.');
-            if (!ok) return;
-            clearTrpDbBtn.disabled = true;
-            try {
-                const res = await fetch(buildApiUrl('/api/runs/reset-storage'), { method: 'POST' });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok || data.status !== 'success') {
-                    if (res.status === 404) {
-                        throw new Error('Endpoint /api/runs/reset-storage not found. Restart backend from the updated Optim_Analyzer folder.');
-                    }
-                    throw new Error((data && data.message) || ('HTTP ' + res.status));
-                }
-
-                const removedLogIds = loadedLogs.filter(l => l && l.trpRunId).map(l => String(l.id));
-                if (map && typeof map.removeLogLayer === 'function') {
-                    removedLogIds.forEach(id => map.removeLogLayer(id));
-                }
-                const kept = loadedLogs.filter(l => !(l && l.trpRunId));
-                loadedLogs.length = 0;
-                kept.forEach(l => loadedLogs.push(l));
-
-                if (driverSignalsCache && typeof driverSignalsCache.clear === 'function') driverSignalsCache.clear();
-                if (driverTrackCache && typeof driverTrackCache.clear === 'function') driverTrackCache.clear();
-
-                if (window.metricLegendEntries) {
-                    Object.keys(window.metricLegendEntries).forEach(key => {
-                        const e = window.metricLegendEntries[key];
-                        if (e && removedLogIds.includes(String(e.logId))) delete window.metricLegendEntries[key];
-                    });
-                }
-                if (window.eventLegendEntries) {
-                    Object.keys(window.eventLegendEntries).forEach(key => {
-                        const e = window.eventLegendEntries[key];
-                        if (e && removedLogIds.includes(String(e.logId))) delete window.eventLegendEntries[key];
-                    });
-                }
-
-                if (typeof updateLogsList === 'function') updateLogsList();
-                if (typeof window.updateDTLayersSidebar === 'function') window.updateDTLayersSidebar();
-                if (typeof window.updateLegend === 'function') window.updateLegend();
-                if (fileStatus) fileStatus.textContent = 'TRP database file and uploads folder were reset.';
-            } catch (err) {
-                alert('Failed to clear TRP DB: ' + (err && err.message ? err.message : err));
-            } finally {
-                clearTrpDbBtn.disabled = false;
-            }
         };
     }
 
@@ -1175,6 +1023,20 @@ document.addEventListener('DOMContentLoaded', () => {
             '        ';
 
         document.body.appendChild(menu);
+        const isNeighborMetric = /^radio\.lte\.neighbor\[\d+\]\./i.test(String(metric || ''));
+        const noSampleMsg = isNeighborMetric
+            ? 'No samples for this neighbor metric.'
+            : 'No samples for this metric in this run.';
+        const ensurePreparedMetric = async () => {
+            if (!(log.trpRunId && window.prepareTrpMetric)) return true;
+            const prepared = await window.prepareTrpMetric(layerId, metric);
+            if (prepared === false) {
+                console.warn('[Neighbors] no samples for metric:', metric);
+                alert(noSampleMsg);
+                return false;
+            }
+            return true;
+        };
 
         // Map Click Handler (add overlay metric layer, keep existing)
         menu.querySelector('#menu-map-' + (layerId)).onclick = async () => {
@@ -1183,9 +1045,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 menu.remove();
                 return;
             }
-            if (log.trpRunId && window.prepareTrpMetric) {
-                await window.prepareTrpMetric(layerId, metric);
-            }
+            const ready = await ensurePreparedMetric();
+            if (!ready) { menu.remove(); return; }
             if (window.addMetricLegendLayer) {
                 window.addMetricLegendLayer(log, metric);
             }
@@ -1199,9 +1060,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 menu.remove();
                 return;
             }
-            if (log.trpRunId && window.prepareTrpMetric) {
-                await window.prepareTrpMetric(layerId, metric);
-            }
+            const ready = await ensurePreparedMetric();
+            if (!ready) { menu.remove(); return; }
             window.openGridModal(log, metric);
             menu.remove();
         };
@@ -1213,9 +1073,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 menu.remove();
                 return;
             }
-            if (log.trpRunId && window.prepareTrpMetric) {
-                await window.prepareTrpMetric(layerId, metric);
-            }
+            const ready = await ensurePreparedMetric();
+            if (!ready) { menu.remove(); return; }
             window.openChartModal(log, metric);
             menu.remove();
         };
@@ -5151,21 +5010,31 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const s = window.mapRenderer.getServingCell(p);
 
             if (s) {
-                // Fix: Align ID format with MapRenderer.getSiteColor (RNC/CID priority)
+                const tech = String(s.tech || '').toLowerCase();
+                const isLte = tech.includes('4g') || tech.includes('lte') || Boolean(s.rawEnodebCellId);
+
+                // LTE priority: use eNodeB ID-Cell ID as identity key.
                 let finalId = s.cellId || s.calculatedEci || s.id;
-                if (s.rnc && s.cid) finalId = (s.rnc) + '/' + (s.cid);
+                if (isLte && s.rawEnodebCellId) {
+                    finalId = s.rawEnodebCellId;
+                } else if (s.rnc && s.cid) {
+                    finalId = (s.rnc) + '/' + (s.cid);
+                }
 
                 return {
                     name: s.cellName || s.name || s.siteName,
                     id: finalId,
                     lat: s.lat,
                     lng: s.lng,
+                    tipLat: s.tipLat,
+                    tipLng: s.tipLng,
                     azimuth: s.azimuth,
-                    range: s.currentRadius, // Expose Visual Radius
+                    range: s.currentRadius || s.range || 100, // Expose visual radius with safe fallback
                     rnc: s.rnc,
                     cid: s.cid,
                     pci: s.pci || s.sc,
-                    freq: s.currentFreq || s.freq
+                    freq: s.currentFreq || s.freq,
+                    rawEnodebCellId: s.rawEnodebCellId
                 };
             }
 
@@ -5204,10 +5073,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
         // 1. Serving Cell Connection
         let servingRes = window.resolveSmartSite(p);
-        if (servingRes.lat && servingRes.lng) {
+        const servingCellKey = servingRes && (servingRes.rawEnodebCellId || servingRes.id);
+        if ((servingRes && Number.isFinite(Number(servingRes.lat)) && Number.isFinite(Number(servingRes.lng))) || servingCellKey) {
             connectionTargets.push({
-                lat: servingRes.lat, lng: servingRes.lng, color: logColor || '#3b82f6', weight: 8, cellId: servingRes.id,
-                azimuth: servingRes.azimuth, range: servingRes.range // Enable "Tip" connection
+                lat: Number.isFinite(Number(servingRes.lat)) ? Number(servingRes.lat) : null,
+                lng: Number.isFinite(Number(servingRes.lng)) ? Number(servingRes.lng) : null,
+                color: '#3b82f6', weight: 8, cellId: servingCellKey,
+                azimuth: servingRes.azimuth, range: servingRes.range, // Enable "Tip" connection
+                tipLat: servingRes.tipLat, tipLng: servingRes.tipLng
             });
         }
 
@@ -5220,11 +5093,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         // 2. Active Set Connections
         if (p.a2_sc !== undefined && p.a2_sc !== null) {
             const a2Res = resolveNeighbor(p.a2_sc, null, sFreq);
-            if (a2Res.lat && a2Res.lng) connectionTargets.push({ lat: a2Res.lat, lng: a2Res.lng, color: '#ef4444', weight: 8, cellId: a2Res.id });
+            if (a2Res.lat && a2Res.lng) connectionTargets.push({
+                lat: a2Res.lat, lng: a2Res.lng, color: '#ef4444', weight: 8, cellId: a2Res.id,
+                azimuth: a2Res.azimuth, range: a2Res.range, tipLat: a2Res.tipLat, tipLng: a2Res.tipLng
+            });
         }
         if (p.a3_sc !== undefined && p.a3_sc !== null) {
             const a3Res = resolveNeighbor(p.a3_sc, null, sFreq);
-            if (a3Res.lat && a3Res.lng) connectionTargets.push({ lat: a3Res.lat, lng: a3Res.lng, color: '#ef4444', weight: 8, cellId: a3Res.id });
+            if (a3Res.lat && a3Res.lng) connectionTargets.push({
+                lat: a3Res.lat, lng: a3Res.lng, color: '#ef4444', weight: 8, cellId: a3Res.id,
+                azimuth: a3Res.azimuth, range: a3Res.range, tipLat: a3Res.tipLat, tipLng: a3Res.tipLng
+            });
         }
 
         // Generate RAW Data HTML
@@ -7920,13 +7799,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     
     // Global function to update the Floating Info Panel (Single Point)
-    window.updateFloatingInfoPanel = (p, logColor) => {
+    window.updateFloatingInfoPanel = (p, logColor, contextLog) => {
         try {
             const panel = document.getElementById('floatingInfoPanel');
             const content = document.getElementById('infoPanelContent');
             const headerDom = document.getElementById('infoPanelHeader'); // GET HEADER
 
             if (!panel || !content) return;
+            window.__activePointLog = getOwningLogForPoint(p, contextLog || window.__activePointLog);
 
             if (panel.style.display !== 'block') panel.style.display = 'block';
 
@@ -7964,8 +7844,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
             content.innerHTML = html;
 
-            // Update Connections
-            if (window.mapRenderer && !window.isSpiderMode) {
+            // Update Connections (always for point details, independent from spider mode)
+            if (window.mapRenderer) {
                 let startPt = { lat: p.lat, lng: p.lng };
                 window.mapRenderer.drawConnections(startPt, connectionTargets);
             }
@@ -8002,11 +7882,127 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             , null);
     }
 
+    function getOwningLogForPoint(point, preferredLog) {
+        const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+        const inLog = (log) => {
+            if (!log || !Array.isArray(log.points)) return false;
+            if (log.points.includes(point)) return true;
+            const pid = point && point.id;
+            const ptime = point && point.time;
+            const plat = Number(point && point.lat);
+            const plng = Number(point && point.lng);
+            return log.points.some(lp => {
+                if (!lp) return false;
+                if (pid !== undefined && lp.id === pid && ptime && lp.time === ptime) return true;
+                if (ptime && lp.time === ptime && Number.isFinite(plat) && Number.isFinite(plng)) {
+                    return Math.abs(Number(lp.lat) - plat) < 1e-7 && Math.abs(Number(lp.lng) - plng) < 1e-7;
+                }
+                return false;
+            });
+        };
+        if (inLog(preferredLog)) return preferredLog;
+        return logs.find(inLog) || null;
+    }
+
+    function extractLteTrpServingAndNeighbors(point) {
+        const toNumIfFinite = (v) => {
+            if (v === null || v === undefined || v === '') return null;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const resolveField = (suffix) => {
+            const s = String(suffix || '').toLowerCase();
+            if (!s) return null;
+            if (/(^|\.)(pci)$/.test(s) || s.includes('physicalcellid')) return 'pci';
+            if (/(^|\.)(rsrp)$/.test(s)) return 'rsrp';
+            if (/(^|\.)(rsrq)$/.test(s)) return 'rsrq';
+            if (s.includes('earfcn')) return 'earfcn';
+            if (s.includes('cellidentity') || s.endsWith('.cellid') || s.endsWith('cellid')) return 'cellid';
+            return null;
+        };
+        const ensureBucket = (obj, key) => {
+            if (!obj[key]) obj[key] = { pci: null, rsrp: null, rsrq: null, earfcn: null, cellid: null };
+            return obj[key];
+        };
+
+        const servingByCell = {};
+        const neighborsByCell = {};
+        const sources = [point, point && point.properties];
+        sources.forEach((src) => {
+            if (!src || typeof src !== 'object') return;
+            Object.entries(src).forEach(([rawKey, rawValue]) => {
+                if (rawValue === null || rawValue === undefined || rawValue === '' || typeof rawValue === 'object') return;
+                const key = String(rawKey || '').toLowerCase();
+                let m = key.match(/radio\.lte\.servingcell(?:total)?(?:\[(\d+)\])?\.(.+)$/i);
+                if (m) {
+                    const idx = m[1] || 'serving';
+                    const field = resolveField(m[2]);
+                    if (!field) return;
+                    const bucket = ensureBucket(servingByCell, idx);
+                    const n = toNumIfFinite(rawValue);
+                    bucket[field] = n !== null ? n : bucket[field];
+                    return;
+                }
+                m = key.match(/radio\.lte\.neighbor\[(\d+)\]\.(.+)$/i);
+                if (m) {
+                    const idx = m[1] || '0';
+                    const field = resolveField(m[2]);
+                    if (!field) return;
+                    const bucket = ensureBucket(neighborsByCell, idx);
+                    const n = toNumIfFinite(rawValue);
+                    bucket[field] = n !== null ? n : bucket[field];
+                }
+            });
+        });
+
+        const serving = Object.values(servingByCell)
+            .sort((a, b) => {
+                const score = (x) =>
+                    (Number.isFinite(x.rsrp) ? 3 : 0) +
+                    (Number.isFinite(x.rsrq) ? 2 : 0) +
+                    (Number.isFinite(x.pci) ? 2 : 0) +
+                    (Number.isFinite(x.earfcn) ? 1 : 0);
+                return score(b) - score(a);
+            })[0] || null;
+
+        const precomputedWindowNeighbors = Array.isArray(point && point.__lteTrpNeighborWindow && point.__lteTrpNeighborWindow.neighbors)
+            ? point.__lteTrpNeighborWindow.neighbors
+                .map((n, idx) => ({
+                    idx: idx + 1,
+                    pci: toNumIfFinite(n && n.pci),
+                    rsrp: toNumIfFinite(n && n.rsrp),
+                    rsrq: toNumIfFinite(n && n.rsrq),
+                    earfcn: toNumIfFinite(n && n.earfcn),
+                    cellid: null
+                }))
+                .filter(n => Number.isFinite(n.rsrp) || Number.isFinite(n.rsrq) || Number.isFinite(n.pci))
+            : [];
+
+        const neighborsBase = precomputedWindowNeighbors.length
+            ? precomputedWindowNeighbors
+            : Object.entries(neighborsByCell)
+                .map(([idx, n]) => ({ idx: Number(idx), ...n }))
+                .filter(n => Number.isFinite(n.rsrp) || Number.isFinite(n.rsrq) || Number.isFinite(n.pci));
+
+        const neighbors = neighborsBase
+            .sort((a, b) => {
+                const ra = Number.isFinite(a.rsrp) ? a.rsrp : -999;
+                const rb = Number.isFinite(b.rsrp) ? b.rsrp : -999;
+                if (rb !== ra) return rb - ra;
+                return (a.idx || 0) - (b.idx || 0);
+            });
+
+        return { serving, neighbors };
+    }
+
     // --- NEW: Log View Generator ---
     function generatePointInfoHTMLLog(p, logColor) {
         // Extract Serving
         let sName = 'Unknown', sSC = '-', sRSCP = '-', sEcNo = '-', sFreq = '-', sRnc = null, sCid = null, sLac = null;
         let isLTE = false;
+        const activeLog = getOwningLogForPoint(p, window.__activePointLog);
+        const isTrpPoint = Boolean((p && p.properties && p.properties.source === 'trp_track') || (activeLog && activeLog.trpRunId));
+        const logTech = String((activeLog && activeLog.tech) || p?.Tech || p?.tech || '').toUpperCase();
 
         // Explicit Name Resolution (Matches Map Logic)
         let servingRes = null;
@@ -8042,11 +8038,6 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         }
 
         const connectionTargets = [];
-        if (servingRes && servingRes.lat && servingRes.lng) {
-            connectionTargets.push({
-                lat: servingRes.lat, lng: servingRes.lng, color: '#3b82f6', weight: 8, cellId: servingRes.id
-            });
-        }
 
         if (p.parsed && p.parsed.serving) {
             const s = p.parsed.serving;
@@ -8074,6 +8065,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             sLac = p.lac;
             isLTE = p.Tech === 'LTE';
         }
+        if (!isLTE && logTech.includes('LTE')) isLTE = true;
 
         // DATABASE FALLBACK: If RNC/CID are still missing but we resolved a site, use its IDs
         if ((sRnc === null || sRnc === undefined) && servingRes && servingRes.rnc) {
@@ -8082,18 +8074,21 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (sName === 'Unknown') sName = servingRes.name || sName;
         }
 
+        // TRP LTE override: extract serving + neighbors from decoded LTE metric keys at this timestamp.
+        const lteTrpCtx = (isTrpPoint && isLTE) ? extractLteTrpServingAndNeighbors(p) : null;
+        if (lteTrpCtx && lteTrpCtx.serving) {
+            const sv = lteTrpCtx.serving;
+            if (Number.isFinite(sv.pci)) sSC = sv.pci;
+            if (Number.isFinite(sv.rsrp)) sRSCP = sv.rsrp;
+            if (Number.isFinite(sv.rsrq)) sEcNo = sv.rsrq;
+            if (Number.isFinite(sv.earfcn)) sFreq = sv.earfcn;
+            isLTE = true;
+        }
+
+        const isLteTrp = Boolean(isTrpPoint && isLTE);
+        const idHeader = isLteTrp ? 'PCI' : 'SC';
         const levelHeader = isLTE ? 'RSRP' : 'RSCP';
         const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
-
-        // Determine Identity Label
-        let identityLabel = sSC + ' / ' + sFreq; // Default
-        if (servingRes && servingRes.id) {
-            identityLabel = servingRes.id;
-        } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
-            identityLabel = sRnc + '/' + sCid; // UMTS RNC/CID
-        } else if (p.cellId && p.cellId !== 'N/A') {
-            identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
-        }
 
         // Helpers for case-insensitive key lookup (from p or p.properties)
         const getValCI = (key) => {
@@ -8105,6 +8100,126 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             return undefined;
         };
+        const findByKeyPattern = (obj, predicate) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const keys = Object.keys(obj);
+            for (const k of keys) {
+                if (predicate(String(k || '').toLowerCase())) return obj[k];
+            }
+            return undefined;
+        };
+        const toCleanIdString = (v) => {
+            if (v === undefined || v === null) return null;
+            const s = String(v).trim();
+            if (!s || s === '-' || s.toLowerCase() === 'n/a' || s.toLowerCase() === 'unknown') return null;
+            return s;
+        };
+        const parseFiniteInt = (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            return Math.round(n);
+        };
+        const pointLteEci = (() => {
+            const direct = [
+                getValCI('Radio.Lte.ServingCell[8].CellIdentity.Complete'),
+                getValCI('radio.lte.servingcell[8].cellidentity.complete'),
+                getValCI('cellidentity.complete'),
+                p.lteEci,
+                p.eci
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null && v > 255) return v;
+            }
+            const fuzzyTop = findByKeyPattern(p, (k) =>
+                ((k.includes('servingcell') && k.includes('cellidentity') && k.includes('complete')) || k.includes('cellidentitycomplete') || k === 'eci')
+            );
+            {
+                const v = parseFiniteInt(fuzzyTop);
+                if (v !== null && v > 255) return v;
+            }
+            const fuzzyProps = findByKeyPattern(p.properties, (k) =>
+                ((k.includes('servingcell') && k.includes('cellidentity') && k.includes('complete')) || k.includes('cellidentitycomplete') || k === 'eci')
+            );
+            {
+                const v = parseFiniteInt(fuzzyProps);
+                if (v !== null && v > 255) return v;
+            }
+            const cellV = parseFiniteInt(p.cellId);
+            if (cellV !== null && cellV > 65535) return cellV;
+            return null;
+        })();
+        const decodedLteId = (pointLteEci !== null)
+            ? { eci: pointLteEci, enb: Math.floor(pointLteEci / 256), cid: pointLteEci % 256 }
+            : null;
+        if ((!servingRes || !servingRes.name || servingRes.name === 'Unknown' || !Number.isFinite(Number(servingRes.lat)) || !Number.isFinite(Number(servingRes.lng))) && window.resolveSmartSite) {
+            const probe = {
+                ...p,
+                sc: sSC,
+                pci: sSC,
+                freq: sFreq,
+                lac: sLac,
+                lat: p.lat,
+                lng: p.lng
+            };
+            if (decodedLteId) {
+                probe.cellId = decodedLteId.eci;
+                probe.rawEnodebCellId = `${decodedLteId.enb}-${decodedLteId.cid}`;
+                probe.enodebCellId = probe.rawEnodebCellId;
+            }
+            const resolvedServing = window.resolveSmartSite(probe);
+            if (resolvedServing && (resolvedServing.id || resolvedServing.name || (resolvedServing.lat && resolvedServing.lng))) {
+                servingRes = resolvedServing;
+                if (sName === 'Unknown' && resolvedServing.name) sName = resolvedServing.name;
+                if ((sRnc === null || sRnc === undefined) && Number.isFinite(Number(resolvedServing.rnc))) sRnc = resolvedServing.rnc;
+                if ((sCid === null || sCid === undefined) && Number.isFinite(Number(resolvedServing.cid))) sCid = resolvedServing.cid;
+            }
+        }
+        if ((sRnc === null || sRnc === undefined) && decodedLteId) sRnc = decodedLteId.enb;
+        if ((sCid === null || sCid === undefined) && decodedLteId) sCid = decodedLteId.cid;
+        const servingEnodebCellId = (() => {
+            const fromResolver = toCleanIdString(servingRes && (servingRes.rawEnodebCellId || servingRes.id));
+            if (fromResolver && /^\d+\s*[-/]\s*\d+$/.test(fromResolver)) return fromResolver.replace(/\s+/g, '');
+            if (decodedLteId) return `${decodedLteId.enb}-${decodedLteId.cid}`;
+            const candidates = [
+                'eNodeB ID-Cell ID',
+                'eNodeB ID - Cell ID',
+                'enodeb id-cell id',
+                'enodebid-cellid',
+                'enodebidcellid',
+                'rawEnodebCellId'
+            ];
+            for (const key of candidates) {
+                const val = toCleanIdString(getValCI(key));
+                if (!val) continue;
+                if (/^\d+\s*[-/]\s*\d+$/.test(val)) return val.replace(/\s+/g, '');
+            }
+            const cellTxt = toCleanIdString(p.cellId);
+            if (cellTxt && /^\d+\s*[-/]\s*\d+$/.test(cellTxt)) return cellTxt.replace(/\s+/g, '');
+            if (Number.isFinite(Number(sRnc)) && Number.isFinite(Number(sCid))) return `${Number(sRnc)}-${Number(sCid)}`;
+            return null;
+        })();
+
+        // Determine Identity Label
+        let identityLabel = sSC + ' / ' + sFreq; // Default
+        if (isLTE && servingEnodebCellId) {
+            identityLabel = servingEnodebCellId;
+        } else if (servingRes && servingRes.id) {
+            identityLabel = servingRes.id;
+        } else if (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined) {
+            identityLabel = sRnc + '/' + sCid; // UMTS RNC/CID
+        } else if (p.cellId && p.cellId !== 'N/A') {
+            identityLabel = p.cellId; // LTE ECI or synthesized UMTS CID
+        }
+        const servingLineCellId = (servingRes && (servingRes.rawEnodebCellId || servingRes.id)) || servingEnodebCellId || null;
+        if ((servingRes && Number.isFinite(Number(servingRes.lat)) && Number.isFinite(Number(servingRes.lng))) || servingLineCellId) {
+            connectionTargets.push({
+                lat: (servingRes && Number.isFinite(Number(servingRes.lat))) ? Number(servingRes.lat) : null,
+                lng: (servingRes && Number.isFinite(Number(servingRes.lng))) ? Number(servingRes.lng) : null,
+                color: '#3b82f6', weight: 8, cellId: servingLineCellId,
+                azimuth: servingRes.azimuth, range: servingRes.range, tipLat: servingRes.tipLat, tipLng: servingRes.tipLng
+            });
+        }
 
         const readNeighborMetric = (prefix, idx) => {
             const base = `${prefix}${idx}`;
@@ -8145,6 +8260,19 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         // Neighbors
         let rawNeighbors = [];
         let explicitNeighbors = [];
+        let lteTrpNeighbors = [];
+
+        if (isLteTrp && lteTrpCtx && Array.isArray(lteTrpCtx.neighbors)) {
+            lteTrpNeighbors = lteTrpCtx.neighbors.map((n, idx) => ({
+                type: 'N' + (idx + 1),
+                sc: Number.isFinite(n.pci) ? n.pci : '-',
+                rsrp: Number.isFinite(n.rsrp) ? n.rsrp : '-',
+                rscp: Number.isFinite(n.rsrp) ? n.rsrp : '-',
+                ecno: Number.isFinite(n.rsrq) ? n.rsrq : '-',
+                freq: Number.isFinite(n.earfcn) ? n.earfcn : '-',
+                cellName: null
+            }));
+        }
 
         // Prefer explicit M/A/D metrics if available (UMTS DT style)
         if (!isLTE) {
@@ -8178,10 +8306,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 }
 
                 if (nRes && nRes.name && nRes.name !== 'Unknown') {
-                    return { name: nRes.name, rnc: nRes.rnc, cid: nRes.cid, id: nRes.id, lat: nRes.lat, lng: nRes.lng };
+                    return {
+                        name: nRes.name, rnc: nRes.rnc, cid: nRes.cid, id: nRes.id, lat: nRes.lat, lng: nRes.lng,
+                        azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
+                    };
                 }
             }
-            return { name: cellName || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null };
+            return {
+                name: cellName || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null,
+                azimuth: null, range: null, tipLat: null, tipLng: null
+            };
         };
 
         if (explicitNeighbors.length === 0 && p.parsed && p.parsed.neighbors) {
@@ -8194,6 +8328,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
                 rawNeighbors.push({
                     sc: sc !== undefined ? sc : '-',
+                    rsrp: n.rsrp !== undefined ? n.rsrp : (n.rscp !== undefined ? n.rscp : -140),
                     rscp: n.rscp !== undefined ? n.rscp : -140, // Default low for sort
                     ecno: n.ecno !== undefined ? n.ecno : '-',
                     freq: n.freq !== undefined ? n.freq : '-',
@@ -8209,16 +8344,26 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (p.n3_sc !== undefined && (p.n3_sc != sSC)) rawNeighbors.push({ sc: p.n3_sc, rscp: p.n3_rscp || -140, ecno: p.n3_ecno, freq: sFreq });
         }
 
-        // Sort by RSCP Descending (strongest to weakest)
-        const neighborsSource = (explicitNeighbors.length > 0 ? explicitNeighbors : rawNeighbors)
+        // Sort by RSRP (fallback RSCP) descending (strongest to weakest)
+        const sourceNeighbors = (lteTrpNeighbors.length > 0)
+            ? lteTrpNeighbors
+            : (explicitNeighbors.length > 0 ? explicitNeighbors : rawNeighbors);
+        const neighborSignalLevel = (n) => {
+            const rsrp = parseFloat(n && n.rsrp);
+            if (!isNaN(rsrp)) return rsrp;
+            const rscp = parseFloat(n && n.rscp);
+            if (!isNaN(rscp)) return rscp;
+            return null;
+        };
+        const neighborsSource = sourceNeighbors
             .filter(n => !isServingEquivalentNeighbor(n))
             .slice()
             .sort((a, b) => {
-                const valA = parseFloat(a.rscp);
-                const valB = parseFloat(b.rscp);
-                if (isNaN(valA) && isNaN(valB)) return 0;
-                if (isNaN(valA)) return 1;
-                if (isNaN(valB)) return -1;
+                const valA = neighborSignalLevel(a);
+                const valB = neighborSignalLevel(b);
+                if (valA === null && valB === null) return 0;
+                if (valA === null) return 1;
+                if (valB === null) return -1;
                 return valB - valA;
             });
 
@@ -8232,6 +8377,10 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 id: resolved.id, // Pass ID
                 lat: resolved.lat,
                 lng: resolved.lng,
+                tipLat: resolved.tipLat,
+                tipLng: resolved.tipLng,
+                azimuth: resolved.azimuth,
+                range: resolved.range,
                 sc: n.sc,
                 rscp: n.rscp === -140 ? '-' : n.rscp,
                 ecno: n.ecno,
@@ -8392,6 +8541,36 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 '</div>';
         }
 
+        let availableCatalogSection = '';
+        if (activeLog && activeLog.trpRunId) {
+            const metricLabels = Array.from(new Set((Array.isArray(activeLog.customMetrics) ? activeLog.customMetrics : [])
+                .map(m => (activeLog.trpMetricLabels && activeLog.trpMetricLabels[m]) ? activeLog.trpMetricLabels[m] : String(m || ''))
+                .filter(Boolean)))
+                .sort((a, b) => String(a).localeCompare(String(b)));
+
+            const eventLabels = (() => {
+                const fromCatalog = Array.isArray(activeLog.trpEventTypes)
+                    ? activeLog.trpEventTypes.map(e => e && e.event_name).filter(Boolean)
+                    : [];
+                const fromEvents = Array.isArray(activeLog.events)
+                    ? activeLog.events.map(e => e && e.event_name).filter(Boolean)
+                    : [];
+                return Array.from(new Set(fromCatalog.concat(fromEvents))).sort((a, b) => String(a).localeCompare(String(b)));
+            })();
+
+            const listHtml = (arr) => arr.length
+                ? arr.map(x => '<div style="padding:2px 0;border-bottom:1px dashed #374151;color:#cbd5e1;">' + x + '</div>').join('')
+                : '<div style="color:#9ca3af;">None</div>';
+
+            availableCatalogSection = '<div style="margin-top:10px; border-top:1px solid #374151; padding-top:10px;">' +
+                '<div style="font-size:12px; font-weight:bold; color:#93c5fd; margin-bottom:6px;">Available in This TRP</div>' +
+                '<div style="font-size:11px; color:#cbd5e1; margin-bottom:4px;"><b>KPIs / Metrics (' + metricLabels.length + ')</b></div>' +
+                '<div style="max-height:120px; overflow-y:auto; margin-bottom:8px;">' + listHtml(metricLabels) + '</div>' +
+                '<div style="font-size:11px; color:#cbd5e1; margin-bottom:4px;"><b>Events (' + eventLabels.length + ')</b></div>' +
+                '<div style="max-height:120px; overflow-y:auto;">' + listHtml(eventLabels) + '</div>' +
+                '</div>';
+        }
+
         // --- NEW: Extract eNodeB Specific Fields ---
         let enbNameDisplay = '';
         let enbIdDisplay = '';
@@ -8428,7 +8607,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '<tr>' +
             '<th style="width:10%">Type</th>' +
             '<th style="width:40%">Cell Name</th>' +
-            '<th>SC</th>' +
+            '<th>' + idHeader + '</th>' +
             '<th>' + levelHeader + '</th>' +
             '<th>' + qualHeader + '</th>' +
             '<th>Freq</th>' +
@@ -8440,6 +8619,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '</table>' +
 
             extraMetricsSection +
+            availableCatalogSection +
 
             '<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
             '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
@@ -8464,11 +8644,35 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
         // Add connection targets for top 3 neighbors if they resolve
         neighbors.slice(0, 3).forEach(n => {
-            if (window.resolveSmartSite) {
-                const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
-                if (nRes && nRes.lat && nRes.lng) {
-                    connectionTargets.push({ lat: nRes.lat, lng: nRes.lng, color: '#ef4444', weight: 4, cellId: nRes.id });
-                }
+            const hasDirectCoords = Number.isFinite(Number(n.lat)) && Number.isFinite(Number(n.lng));
+            if (hasDirectCoords) {
+                connectionTargets.push({
+                    lat: Number(n.lat), lng: Number(n.lng), color: '#ef4444', weight: 4, cellId: n.id,
+                    azimuth: n.azimuth, range: n.range, tipLat: n.tipLat, tipLng: n.tipLng
+                });
+                return;
+            }
+            if (!window.resolveSmartSite) return;
+            const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
+            if (nRes && Number.isFinite(Number(nRes.lat)) && Number.isFinite(Number(nRes.lng))) {
+                connectionTargets.push({
+                    lat: Number(nRes.lat), lng: Number(nRes.lng), color: '#ef4444', weight: 4, cellId: nRes.id,
+                    azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
+                });
+                return;
+            }
+            if (nRes && (nRes.rawEnodebCellId || nRes.id)) {
+                connectionTargets.push({
+                    lat: null, lng: null, color: '#ef4444', weight: 4, cellId: (nRes.rawEnodebCellId || nRes.id),
+                    azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
+                });
+                return;
+            }
+            if (n && n.id) {
+                connectionTargets.push({
+                    lat: null, lng: null, color: '#ef4444', weight: 4, cellId: n.id,
+                    azimuth: n.azimuth, range: n.range, tipLat: n.tipLat, tipLng: n.tipLng
+                });
             }
         });
 
@@ -8539,7 +8743,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             });
 
             // Update Connections (Draw ALL lines from ALL layers)
-            if (window.mapRenderer && !window.isSpiderMode && hits.length > 0) {
+            if (window.mapRenderer && hits.length > 0) {
                 const primary = hits[0].point;
                 window.mapRenderer.drawConnections({ lat: primary.lat, lng: primary.lng }, allConnectionTargets);
             }
@@ -8611,7 +8815,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
         // 3. Update Floating Panel
         if (window.updateFloatingInfoPanel && !skipPanel) {
-            window.updateFloatingInfoPanel(point, log.color);
+            window.__activePointLog = log;
+            window.updateFloatingInfoPanel(point, log.color, log);
         }
 
         // 4. Update Grid
@@ -8721,7 +8926,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 console.warn("[App] Sync Index not found for clicked point.");
                 // Fallback: If we can't sync index, just update the panel directly
                 if (window.updateFloatingInfoPanel) {
-                    window.updateFloatingInfoPanel(point);
+                    window.__activePointLog = log;
+                    window.updateFloatingInfoPanel(point, log.color, log);
                 }
             }
         }
@@ -12121,7 +12327,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             });
         })();
         if (window.updateFloatingInfoPanel) {
-            window.updateFloatingInfoPanel(enrichedPoint, log?.color);
+            window.__activePointLog = log;
+            window.updateFloatingInfoPanel(enrichedPoint, log?.color, log);
         }
         if (p.lat !== undefined && p.lng !== undefined && window.map && window.map.setView) {
             window.map.setView([p.lat, p.lng], 17);
@@ -13075,6 +13282,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 empty.textContent = 'No valid KPI samples decoded';
                 empty.style.cssText = 'font-size:11px;color:#fca5a5;padding:4px 6px;';
                 actions.appendChild(empty);
+                const neighborsHeader = addHeader('Neighbors');
+                actions.appendChild(neighborsHeader);
+                const noN = document.createElement('div');
+                noN.textContent = 'No neighbor samples';
+                noN.style.cssText = 'font-size:11px;color:#94a3b8;padding:4px 6px;';
+                actions.appendChild(noN);
                 // IMPORTANT: this code runs inside loadedLogs.forEach(...). If we `return` here
                 // without appending the DOM nodes, the log item never shows up in the sidebar.
                 body.appendChild(stats);
@@ -13087,43 +13300,59 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
             if (log.customMetrics && log.customMetrics.length > 0) {
                 if (log.trpRunId) {
-                    const orderedMetricKeys = [
-                        'RSRP',
-                        'RSRQ',
-                        'SINR',
-                        'DL throughput',
-                        'UL throughput',
-                        'Application throughput DL',
-                        'Application throughput UL',
-                        'Radio Throughput DL',
-                        'Radio Throughput UL',
-                        'Cellid',
-                        'Physical cell ID',
-                        'eNodeB ID',
-                        'Cell ID',
-                        'Downlink EARFCN',
-                        'Tracking area code'
+                    const orderedMetricDefs = [
+                        { label: 'RSRP', keys: ['rsrp'] },
+                        { label: 'RSRQ', keys: ['rsrq'] },
+                        { label: 'SINR', keys: ['sinr', 'rs-sinr', 'rssinr'] },
+                        { label: 'DL throughput', keys: ['dl throughput', 'pdsch.throughput', 'downlink throughput'] },
+                        { label: 'Application throughput DL', keys: ['application throughput dl', 'data.http.download.throughput', 'http.download.throughput'] },
+                        { label: 'UL throughput', keys: ['ul throughput', 'pusch.throughput', 'uplink throughput'] },
+                        { label: 'Radio Throughput DL', keys: ['radio throughput dl', 'servingcelltotal.pdsch.throughput', 'pdsch.throughput'] },
+                        { label: 'Radio Throughput UL', keys: ['radio throughput ul', 'servingcelltotal.pusch.throughput', 'pusch.throughput'] },
+                        { label: 'Cellid', keys: ['cellid', 'cellidentity'] },
+                        { label: 'Physical cell ID', keys: ['physical cell id', '.pci'] },
+                        { label: 'eNodeB ID', keys: ['enodeb id', '.enodebid'] },
+                        { label: 'Cell ID', keys: ['cell id', '.cell.id'] },
+                        { label: 'Downlink EARFCN', keys: ['earfcn'] },
+                        { label: 'Tracking area code', keys: ['tracking area code', '.tac'] }
                     ];
                     const byLabel = new Map();
+                    const byMetricLower = new Map();
                     (Array.isArray(log.customMetrics) ? log.customMetrics : []).forEach(m => {
                         const label = (log.trpMetricLabels && log.trpMetricLabels[m]) ? log.trpMetricLabels[m] : String(m || '');
-                        byLabel.set(label, m);
+                        if (label && !byLabel.has(label)) byLabel.set(label, m);
+                        byMetricLower.set(String(m || '').toLowerCase(), m);
                     });
 
                     const finalMetrics = [];
                     const seenMetric = new Set();
-                    orderedMetricKeys.forEach(k => {
-                        const metricName = byLabel.get(k);
+                    orderedMetricDefs.forEach(def => {
+                        let metricName = byLabel.get(def.label);
+                        if (!metricName) {
+                            const targetKeys = (def.keys || []).map(k => String(k).toLowerCase());
+                            for (const m of (Array.isArray(log.customMetrics) ? log.customMetrics : [])) {
+                                const raw = String(m || '').toLowerCase();
+                                const label = String((log.trpMetricLabels && log.trpMetricLabels[m]) ? log.trpMetricLabels[m] : m || '').toLowerCase();
+                                if (targetKeys.some(k => raw.includes(k) || label.includes(k))) {
+                                    metricName = m;
+                                    break;
+                                }
+                            }
+                        }
                         if (!metricName || seenMetric.has(metricName)) return;
                         finalMetrics.push(metricName);
                         seenMetric.add(metricName);
                     });
 
-                    (Array.isArray(log.customMetrics) ? log.customMetrics : []).forEach(m => {
-                        if (seenMetric.has(m)) return;
-                        finalMetrics.push(m);
-                        seenMetric.add(m);
-                    });
+                    // Keep TRP KPI list clean and deterministic (avoid long noisy tails / duplicates).
+                    // If none of the ordered KPIs are available, fall back to first sample-backed metrics.
+                    if (!finalMetrics.length) {
+                        (Array.isArray(log.customMetrics) ? log.customMetrics : []).forEach(m => {
+                            if (seenMetric.has(m)) return;
+                            finalMetrics.push(m);
+                            seenMetric.add(m);
+                        });
+                    }
 
                     const header = addHeader('TRP KPIs');
                     actions.appendChild(header);
@@ -13137,13 +13366,123 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                         actions.appendChild(btn);
                     });
 
-                    actions.appendChild(addHeader('Throughput Analysis'));
-                    actions.appendChild(addAction('DL Throughput', 'dl', 'throughput'));
-                    actions.appendChild(addAction('UL Throughput', 'ul', 'throughput'));
-                    actions.appendChild(addAction('Throughput Dips', 'dips', 'throughput'));
-                    actions.appendChild(addAction('Radio vs App Mismatch', 'mismatch', 'throughput'));
-                    actions.appendChild(addAction('Root Cause Panel', 'root_cause', 'throughput'));
-                    actions.appendChild(addAction('Events Timeline', 'events_timeline', 'throughput'));
+                    // Build dynamic LTE Neighbors group from decoded TRP sample-backed neighbor list.
+                    // Verification:
+                    // 1) import run, inspect console -> "[Neighbors] found X neighbor signals"
+                    // 2) click N1 RSRP -> request /api/runs/<id>/kpi?name=Radio.Lte.Neighbor[1].Rsrp
+                    // 3) map/grid/chart should render when samples exist
+                    const neighborsHeader = addHeader('Neighbors');
+                    actions.appendChild(neighborsHeader);
+                    const sampleNeighborRows = Array.isArray(log.trpNeighborMetrics)
+                        ? log.trpNeighborMetrics
+                        : [];
+                    const neighborIdxPattern = /^Radio\.Lte\.Neighbor\[(\d+)\]\./i;
+                    const fieldOrder = ['pci', 'rsrp', 'rsrq', 'earfcn'];
+                    const fieldLabel = { pci: 'PCI', rsrp: 'RSRP', rsrq: 'RSRQ', earfcn: 'Freq' };
+                    const subgroupDefs = [
+                        { field: 'pci', title: 'PCI neighbors' },
+                        { field: 'rsrp', title: 'RSRP neighbors' },
+                        { field: 'rsrq', title: 'RSRQ neighbors' },
+                        { field: 'earfcn', title: 'Freq neighbors' }
+                    ];
+                    const byNeighbor = new Map();
+                    const upsert = (metricName, sampleCountHint) => {
+                        const metric = String(metricName || '');
+                        const m = neighborIdxPattern.exec(metric);
+                        if (!m) return;
+                        const idx = Number(m[1]);
+                        if (!Number.isFinite(idx)) return;
+                        const low = metric.toLowerCase();
+                        let field = null;
+                        if (/(\.|_)pci\b/.test(low) || low.includes('physicalcellid')) field = 'pci';
+                        else if (/(\.|_)rsrp\b/.test(low)) field = 'rsrp';
+                        else if (/(\.|_)rsrq\b/.test(low)) field = 'rsrq';
+                        else if (/earfcn\b/.test(low) || /frequency\b/.test(low)) field = 'earfcn';
+                        if (!fieldOrder.includes(field)) return;
+                        const sc = Number(sampleCountHint);
+                        if (Number.isFinite(sc) && sc <= 0) return;
+                        if (!byNeighbor.has(idx)) byNeighbor.set(idx, {});
+                        const slot = byNeighbor.get(idx);
+                        const prev = slot[field];
+                        const exactScore = (name) => {
+                            const n = String(name || '').toLowerCase();
+                            if (field === 'pci') return n.endsWith('.pci') ? 3 : (n.includes('physicalcellid') ? 2 : 1);
+                            if (field === 'rsrp') return n.endsWith('.rsrp') ? 3 : 1;
+                            if (field === 'rsrq') return n.endsWith('.rsrq') ? 3 : 1;
+                            if (field === 'earfcn') return n.endsWith('.earfcn') ? 3 : (n.endsWith('.frequency') ? 2 : 1);
+                            return 0;
+                        };
+                        const prevScore = prev ? exactScore(prev.name) : -1;
+                        const currScore = exactScore(metricName);
+                        // Prefer better semantic match and higher sample_count.
+                        if (!prev || currScore > prevScore || (currScore === prevScore && (Number(sc) || 0) > (Number(prev.sampleCount) || 0))) {
+                            slot[field] = { name: metric, sampleCount: Number.isFinite(sc) ? sc : null };
+                        }
+                    };
+                    // Primary source: decoded TRP neighbor samples pushed via /api/runs/<id>/sidebar.
+                    // This avoids /catalog-driven neighbor discovery and keeps only sample-backed neighbors.
+                    sampleNeighborRows.forEach(row => upsert(row && row.name, row && row.sample_count));
+
+                    const neighborByField = { pci: [], rsrp: [], rsrq: [], earfcn: [] };
+                    const sortedNeighborIdx = Array.from(byNeighbor.keys()).sort((a, b) => a - b);
+                    sortedNeighborIdx.forEach((idx, ord) => {
+                        const displayIndex = ord + 1; // UI compact index: N1, N2, ...
+                        const slot = byNeighbor.get(idx) || {};
+                        fieldOrder.forEach(f => {
+                            if (!slot[f]) return;
+                            neighborByField[f].push({
+                                label: `N${displayIndex} ${fieldLabel[f]}`,
+                                metric: slot[f].name,
+                                originalIndex: idx
+                            });
+                        });
+                    });
+                    const neighborSignals = fieldOrder.reduce((acc, f) => acc + (neighborByField[f] ? neighborByField[f].length : 0), 0);
+                    console.log('[Neighbors] found', neighborSignals, 'neighbor signals across', sortedNeighborIdx.length, 'neighbor indexes (from sidebar/TRP samples)');
+
+                    if (!neighborSignals) {
+                        const noN = document.createElement('div');
+                        noN.textContent = 'No neighbor samples';
+                        noN.style.cssText = 'font-size:11px;color:#94a3b8;padding:4px 6px;';
+                        actions.appendChild(noN);
+                    } else {
+                        subgroupDefs.forEach(def => {
+                            const wrap = document.createElement('div');
+                            wrap.style.marginBottom = '4px';
+                            const head = document.createElement('div');
+                            head.innerHTML = '▶ ' + def.title;
+                            head.style.cssText = 'font-size:10px; color:#93c5fd; margin-bottom:4px; font-weight:bold; text-transform:uppercase; letter-spacing:0.5px; cursor:pointer; user-select:none;';
+                            const body = document.createElement('div');
+                            body.style.display = 'none';
+                            body.style.paddingLeft = '6px';
+                            body.style.flexDirection = 'column';
+                            body.style.gap = '4px';
+                            head.onclick = () => {
+                                const hidden = body.style.display === 'none';
+                                body.style.display = hidden ? 'flex' : 'none';
+                                head.innerHTML = (hidden ? '▼ ' : '▶ ') + def.title;
+                            };
+
+                            const rows = neighborByField[def.field] || [];
+                            if (!rows.length) {
+                                const noRow = document.createElement('div');
+                                noRow.textContent = 'No samples';
+                                noRow.style.cssText = 'font-size:11px;color:#94a3b8;padding:2px 0;';
+                                body.appendChild(noRow);
+                            } else {
+                                rows.forEach(ns => {
+                                    const btn = addAction(ns.label, ns.metric, 'metric');
+                                    if (Number.isFinite(Number(ns.originalIndex))) {
+                                        btn.title = `${ns.label} (source Neighbor[${ns.originalIndex}])`;
+                                    }
+                                    body.appendChild(btn);
+                                });
+                            }
+                            wrap.appendChild(head);
+                            wrap.appendChild(body);
+                            actions.appendChild(wrap);
+                        });
+                    }
 
                     if (Array.isArray(window.TRP_METRIC_REGISTRY) && window.TRP_METRIC_REGISTRY.length) {
                         actions.appendChild(addHeader('Throughput Drivers & Events'));
@@ -13489,7 +13828,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchThroughputSummary(runId) {
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/throughput-summary'));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/throughput-summary');
         const data = await res.json();
         if (!res.ok || data.status !== 'success') {
             throw new Error((data && data.message) || ('HTTP ' + res.status));
@@ -13579,7 +13918,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 return (series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
             } catch (_e) {}
         }
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName)));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return (data.series || []).filter(r => Number.isFinite(Number(r.value_num))).map(r => ({ x: r.time, y: Number(r.value_num) }));
@@ -13830,7 +14169,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     async function fetchRunSignals(runId) {
         if (driverSignalsCache.has(runId)) return driverSignalsCache.get(runId);
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/signals'));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/signals');
         const data = await res.json();
         const rows = (res.ok && data.status === 'success') ? (data.signals || []) : [];
         driverSignalsCache.set(runId, rows);
@@ -13838,7 +14177,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchRunTimeseries(runId, signal) {
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/timeseries?signal=' + encodeURIComponent(signal)));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/timeseries?signal=' + encodeURIComponent(signal));
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return data.series || [];
@@ -13846,7 +14185,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     async function fetchRunTrack(runId) {
         if (driverTrackCache.has(runId)) return driverTrackCache.get(runId);
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/track'));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/track');
         const data = await res.json();
         const rows = (res.ok && data.status === 'success') ? (data.track || []) : [];
         driverTrackCache.set(runId, rows);
@@ -13854,7 +14193,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function fetchTypedEvents(runId, typeKey) {
-        const res = await fetch(buildApiUrl('/api/runs/' + encodeURIComponent(runId) + '/events?type=' + encodeURIComponent(typeKey) + '&limit=8000'));
+        const res = await fetch('/api/runs/' + encodeURIComponent(runId) + '/events?type=' + encodeURIComponent(typeKey) + '&limit=8000');
         const data = await res.json();
         if (!res.ok || data.status !== 'success') return [];
         return data.events || [];
@@ -13916,7 +14255,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         scored.sort((a, b) => b.score - a.score || String(a.signal_name).localeCompare(String(b.signal_name)));
         const best = scored.length ? scored[0].score : -1;
         const selected = scored.filter(x => x.score >= best - 2).slice(0, (entry.key === 'kpi_per_carrier_throughput' ? 4 : 3));
-        return { selected, allMatches: scored };
+        return { selected, allMatches: scored, signalCount: signals.length };
     }
 
     async function prepareDriverMetricOnLog(log, entryKey) {
@@ -13924,7 +14263,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         if (!entry) throw new Error('Unknown driver entry: ' + entryKey);
         const resolved = await resolveSignalsForEntry(log.trpRunId, entry);
         if (!resolved.selected || !resolved.selected.length) {
-            throw new Error('No matched signal for "' + entry.label + '" in this run.');
+            const searched = []
+                .concat((entry.exactCandidates || []).slice(0, 4))
+                .concat((entry.regexCandidates || []).slice(0, 4).map(r => '/' + r + '/i'));
+            const details = searched.length ? ('Searched: ' + searched.join(', ')) : 'No candidate patterns configured.';
+            throw new Error('No matched signal for "' + entry.label + '" in this run. ' + details);
         }
 
         const primary = resolved.selected[0];
@@ -13969,6 +14312,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     async function openDriverEntryInView(log, entryKey, viewMode) {
+        const entry = (window.TRP_METRIC_REGISTRY || []).find(x => x.key === entryKey);
         try {
             const prepared = await prepareDriverMetricOnLog(log, entryKey);
             if (viewMode === 'map') {
@@ -13981,7 +14325,27 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             window.openChartModal(log, prepared.syntheticMetric);
         } catch (err) {
-            alert('Driver metric unavailable: ' + (err && err.message ? err.message : err));
+            const state = window.driverSelectionState || {};
+            const msg = (err && err.message ? err.message : String(err || 'Unknown error'));
+            const target = document.getElementById('driverMainView');
+            if (target) {
+                target.innerHTML =
+                    '<div style="padding:10px;border:1px solid #3f2431;border-radius:8px;background:#1a1016;color:#fecdd3;font-size:13px;">' +
+                    '<div style="font-weight:700;margin-bottom:6px;">Not available in this run</div>' +
+                    '<div>' + tpEscape(msg) + '</div>' +
+                    '</div>';
+            }
+            state.verification = {
+                matches: [],
+                sample_count: 0,
+                first_ts: null,
+                last_ts: null,
+                raw_median: 0,
+                conversion: 'none',
+                unit: (entry && entry.normalization) || 'unitless',
+                sanity: { pass: true, checks: ['No matching signal found in this run'] }
+            };
+            setDriverVerificationPanel(state);
         }
     }
 
@@ -14770,7 +15134,7 @@ window.syncToBackend = function (siteData) {
     const status = document.getElementById('fileStatus');
     if (status) status.textContent = "Saving to Excel...";
 
-    fetch(buildApiUrl('/save_sites'), {
+    fetch('/save_sites', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'

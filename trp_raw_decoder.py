@@ -297,6 +297,26 @@ def parse_declarations(buf):
     return metric_map, unknown_records
 
 
+# Compatibility aliases for importer variants expecting *_cdf names.
+def _read_cdf_input(src):
+    if isinstance(src, (bytes, bytearray)):
+        return bytes(src)
+    if isinstance(src, str):
+        with open(src, 'rb') as f:
+            raw = f.read()
+        dec = decode_maybe_compressed(raw)
+        return dec.get('dataBuf') or b''
+    return b''
+
+
+def parse_lookup_tables_cdf(buf_or_path):
+    return parse_lookup_tables(_read_cdf_input(buf_or_path))
+
+
+def parse_declarations_cdf(buf_or_path):
+    return parse_declarations(_read_cdf_input(buf_or_path))
+
+
 def _parse_record_varint_len(data, offset):
     ln, p = read_varint(data, offset)
     if ln is None or p <= offset or ln <= 0 or ln > MAX_RECORD_LEN:
@@ -844,6 +864,157 @@ def decode_provider_channels_variant(extracted_root, metric_map, lookups, base_t
         'report': {
             'channelLogFrames': total_frames,
             'unknownFrames': unknown_frames,
+            'decodedSamples': len(kpis),
+            'decodedEvents': len(events),
+            'warnings': warnings
+        }
+    }
+
+
+def decode_cdf_data_variant(extracted_root, metric_map, lookups, base_time_iso=None):
+    def iter_len_prefixed_records(buf, max_records=5_000_000):
+        if not buf:
+            return
+        pos = 0
+        count = 0
+        while pos < len(buf) and count < max_records:
+            ln, p = read_varint(buf, pos)
+            if ln is None or p <= pos or ln <= 0:
+                break
+            end = p + ln
+            if end > len(buf):
+                break
+            rec = buf[p:end]
+            if rec:
+                yield rec
+                count += 1
+            pos = end
+
+    def parse_metric_sample(msg_bytes):
+        metric_id = None
+        value_num = None
+        value_str = None
+        varints = []
+        for f, w, v in iter_fields(msg_bytes, max_fields=200):
+            if w == 0 and isinstance(v, int):
+                if f == 1 and metric_id is None and v > 0:
+                    metric_id = int(v)
+                else:
+                    varints.append((f, int(v)))
+            elif w == 5 and value_num is None:
+                value_num = _decode_float32_le(v)
+            elif w == 1 and value_num is None:
+                value_num = _decode_float64_le(v)
+            elif w == 2 and value_str is None:
+                s = try_decode_text(v)
+                if s is not None:
+                    value_str = s
+
+        if metric_id is None:
+            for _, vv in varints:
+                if vv > 1000:
+                    metric_id = vv
+                    break
+        if value_num is None and value_str is None and varints:
+            vv = varints[0][1]
+            if -10_000_000_000 < vv < 10_000_000_000:
+                value_num = float(vv)
+        return metric_id, value_num, value_str
+
+    trp_root = os.path.join(extracted_root, 'trp')
+    providers_root = os.path.join(trp_root, 'providers')
+    if not os.path.isdir(providers_root):
+        return {'kpiSamples': [], 'events': [], 'frames': 0, 'report': {'decodedSamples': 0, 'decodedEvents': 0, 'warnings': ['providers root missing']}}
+
+    data_paths = []
+    for root, _, files in os.walk(providers_root):
+        for f in files:
+            if f.lower() == 'data.cdf':
+                data_paths.append(os.path.join(root, f))
+    data_paths.sort()
+    if not data_paths:
+        return {'kpiSamples': [], 'events': [], 'frames': 0, 'report': {'decodedSamples': 0, 'decodedEvents': 0, 'warnings': ['data.cdf not found']}}
+
+    MAX_KPI_ROWS = 500000
+    MAX_EVENT_ROWS = 200000
+    kpis = []
+    events = []
+    warnings = []
+    total_frames = 0
+
+    for path in data_paths:
+        try:
+            data_bytes = _read_cdf_input(path)
+            for rec in iter_len_prefixed_records(data_bytes):
+                total_frames += 1
+                ts_iso = None
+                samples = []
+
+                for f, w, v in iter_fields(rec, max_fields=200):
+                    if f == 1 and w == 2 and v:
+                        sec = None
+                        nanos = 0
+                        for f2, w2, v2 in iter_fields(v, max_fields=20):
+                            if f2 == 1 and w2 == 0 and isinstance(v2, int):
+                                sec = int(v2)
+                            elif f2 == 2 and w2 == 0 and isinstance(v2, int):
+                                nanos = int(v2)
+                        if sec is not None and 946684800 <= sec <= 4102444800:
+                            ts_iso = utc_iso_from_epoch_seconds(sec + (nanos / 1e9 if nanos else 0))
+                    elif w == 2 and v:
+                        mid, vn, vs = parse_metric_sample(v)
+                        if mid:
+                            samples.append((mid, vn, vs))
+
+                if not ts_iso or not samples:
+                    continue
+
+                for metric_id, value_num, value_str in samples:
+                    meta = metric_map.get(metric_id, {})
+                    name = meta.get('name') or f'Metric.{metric_id}'
+                    dtype = meta.get('dtype') or 'unknown'
+                    lookup_name = meta.get('lookup')
+                    mapped_str = value_str
+                    if mapped_str is None and value_num is not None and lookup_name and lookup_name in lookups:
+                        mapped = lookups[lookup_name].get(int(value_num))
+                        if mapped is not None:
+                            mapped_str = str(mapped)
+
+                    kpis.append({
+                        'time': ts_iso,
+                        'metric_id': int(metric_id),
+                        'name': name,
+                        'value_num': value_num,
+                        'value_str': mapped_str,
+                        'dtype': dtype,
+                        'lookup': lookup_name
+                    })
+
+                    lname = name.lower()
+                    if any(t in lname for t in ('volte', 'call', 'ims', 'rrc', 'sip', 'voice', 'event', 'state')):
+                        events.append({
+                            'time': ts_iso,
+                            'event_name': name,
+                            'metric_id': int(metric_id),
+                            'params': [
+                                {'param_id': 'value_num', 'param_value': value_num, 'param_type': 'float'},
+                                {'param_id': 'value_str', 'param_value': mapped_str, 'param_type': 'string'}
+                            ]
+                        })
+                    if len(kpis) >= MAX_KPI_ROWS:
+                        break
+                if len(kpis) >= MAX_KPI_ROWS:
+                    break
+        except Exception as e:
+            warnings.append(f'data.cdf parse failed {os.path.basename(path)}: {e}')
+
+    if len(events) > MAX_EVENT_ROWS:
+        events = events[:MAX_EVENT_ROWS]
+    return {
+        'kpiSamples': kpis,
+        'events': events,
+        'frames': total_frames,
+        'report': {
             'decodedSamples': len(kpis),
             'decodedEvents': len(events),
             'warnings': warnings

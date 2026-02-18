@@ -1,7 +1,6 @@
 (function () {
     function qs(id) { return document.getElementById(id); }
     let trpApiBase = '';
-    const API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
 
     const trpState = {
         runId: null,
@@ -13,27 +12,192 @@
         eventRows: []
     };
 
-    function readConfiguredApiBase() {
-        try {
-            if (window.API_BASE_URL && String(window.API_BASE_URL).trim()) return String(window.API_BASE_URL).trim();
-        } catch (_e) {}
-        try {
-            const fromStorage = localStorage.getItem(API_BASE_STORAGE_KEY);
-            if (fromStorage && String(fromStorage).trim()) return String(fromStorage).trim();
-        } catch (_e) {}
-        return '';
+    const TRP_NEIGHBOR_WINDOW_STORAGE_KEY = 'OPTIM_TRP_NEIGHBOR_WINDOW_MS';
+    const TRP_NEIGHBOR_ALIGN_STORAGE_KEY = 'OPTIM_TRP_NEIGHBOR_ALIGN_MS';
+    const TRP_NEIGHBOR_WINDOW_DEFAULT_MS = 1000;
+    const TRP_NEIGHBOR_ALIGN_DEFAULT_MS = 300;
+    const TRP_NEIGHBOR_WINDOW_MIN_MS = 100;
+    const TRP_NEIGHBOR_WINDOW_MAX_MS = 10000;
+    const TRP_NEIGHBOR_ALIGN_MIN_MS = 20;
+    const TRP_NEIGHBOR_ALIGN_MAX_MS = 2000;
+    let trpNeighborConfigBusy = false;
+
+    function clampIntInRange(raw, fallback, min, max) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return fallback;
+        const v = Math.round(n);
+        return Math.min(max, Math.max(min, v));
     }
 
-    function isLikelyVercelHost() {
+    function getNeighborWindowConfig() {
+        let windowMs = TRP_NEIGHBOR_WINDOW_DEFAULT_MS;
+        let alignMs = TRP_NEIGHBOR_ALIGN_DEFAULT_MS;
         try {
-            return /\.vercel\.app$/i.test(window.location.hostname || '');
+            const w = localStorage.getItem(TRP_NEIGHBOR_WINDOW_STORAGE_KEY);
+            const a = localStorage.getItem(TRP_NEIGHBOR_ALIGN_STORAGE_KEY);
+            windowMs = clampIntInRange(w, TRP_NEIGHBOR_WINDOW_DEFAULT_MS, TRP_NEIGHBOR_WINDOW_MIN_MS, TRP_NEIGHBOR_WINDOW_MAX_MS);
+            alignMs = clampIntInRange(a, TRP_NEIGHBOR_ALIGN_DEFAULT_MS, TRP_NEIGHBOR_ALIGN_MIN_MS, TRP_NEIGHBOR_ALIGN_MAX_MS);
+        } catch (_e) {}
+        return { windowMs, alignMs };
+    }
+
+    function setNeighborWindowConfig(windowMs, alignMs) {
+        const w = clampIntInRange(windowMs, TRP_NEIGHBOR_WINDOW_DEFAULT_MS, TRP_NEIGHBOR_WINDOW_MIN_MS, TRP_NEIGHBOR_WINDOW_MAX_MS);
+        const a = clampIntInRange(alignMs, TRP_NEIGHBOR_ALIGN_DEFAULT_MS, TRP_NEIGHBOR_ALIGN_MIN_MS, TRP_NEIGHBOR_ALIGN_MAX_MS);
+        try {
+            localStorage.setItem(TRP_NEIGHBOR_WINDOW_STORAGE_KEY, String(w));
+            localStorage.setItem(TRP_NEIGHBOR_ALIGN_STORAGE_KEY, String(a));
+        } catch (_e) {}
+        return { windowMs: w, alignMs: a };
+    }
+
+    function setNeighborConfigStatus(text, isError) {
+        const el = qs('trpNeighborCfgStatus');
+        if (!el) return;
+        el.textContent = String(text || '');
+        el.style.color = isError ? '#fca5a5' : '#93c5fd';
+    }
+
+    function syncNeighborConfigUi() {
+        const cfg = getNeighborWindowConfig();
+        const w = qs('trpNeighborWindowMs');
+        const a = qs('trpNeighborAlignMs');
+        if (w) w.value = String(cfg.windowMs);
+        if (a) a.value = String(cfg.alignMs);
+        setNeighborConfigStatus('Current: window +/-' + cfg.windowMs + ' ms, align +/-' + cfg.alignMs + ' ms');
+        return cfg;
+    }
+
+    async function rebuildNeighborContextForLoadedRuns() {
+        const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+        const lteTrpLogs = logs.filter(log =>
+            log &&
+            log.trpRunId &&
+            Array.isArray(log.points) &&
+            log.points.length > 0 &&
+            String(log.tech || '').toUpperCase().includes('LTE')
+        );
+        if (!lteTrpLogs.length) return { runs: 0, points: 0 };
+
+        const cfg = getNeighborWindowConfig();
+        let runs = 0;
+        let points = 0;
+
+        for (const log of lteTrpLogs) {
+            let neighborMetrics = Array.isArray(log.trpNeighborMetrics) ? log.trpNeighborMetrics : [];
+            if (!neighborMetrics.length) {
+                try {
+                    const sidebar = await fetchRunSidebar(log.trpRunId);
+                    neighborMetrics = Array.isArray(sidebar && sidebar.neighbors) ? sidebar.neighbors : [];
+                    if (neighborMetrics.length) log.trpNeighborMetrics = neighborMetrics;
+                } catch (_e) {
+                    neighborMetrics = [];
+                }
+            }
+            let servingEarfcnSet = Array.isArray(log.trpServingEarfcnSet) ? log.trpServingEarfcnSet : [];
+            if (!servingEarfcnSet.length) {
+                try {
+                    servingEarfcnSet = await fetchServingEarfcnSet(log.trpRunId, log.trpAllMetricNames || log.customMetrics || []);
+                    if (servingEarfcnSet.length) log.trpServingEarfcnSet = servingEarfcnSet.slice();
+                } catch (_e) {
+                    servingEarfcnSet = [];
+                }
+            }
+            await hydrateLteNeighborWindowContext(log.points, log.trpRunId, neighborMetrics, {
+                ...cfg,
+                servingEarfcnSet
+            });
+            runs += 1;
+            points += log.points.length;
+        }
+        return { runs, points };
+    }
+
+    async function fetchServingEarfcnSet(runId, metricNames) {
+        const candidates = (metricNames || []).filter((name) => {
+            const n = String(name || '').toLowerCase();
+            return n.includes('radio.lte.servingcell') && n.includes('earfcn') && !n.includes('neighbor');
+        });
+        if (!candidates.length) return [];
+        const name = candidates[0];
+        try {
+            const rows = await fetchSeries(runId, name);
+            const out = new Set();
+            (rows || []).forEach((r) => {
+                const v = Number(r && r.value_num);
+                if (!Number.isFinite(v)) return;
+                out.add(Math.round(v));
+            });
+            return Array.from(out.values()).sort((a, b) => a - b);
         } catch (_e) {
-            return false;
+            return [];
         }
     }
 
+    async function applyNeighborConfigFromUi(useDefaults = false) {
+        if (trpNeighborConfigBusy) return;
+        trpNeighborConfigBusy = true;
+
+        const applyBtn = qs('trpNeighborCfgApply');
+        const resetBtn = qs('trpNeighborCfgReset');
+        if (applyBtn) applyBtn.disabled = true;
+        if (resetBtn) resetBtn.disabled = true;
+
+        try {
+            const wInput = qs('trpNeighborWindowMs');
+            const aInput = qs('trpNeighborAlignMs');
+            const current = getNeighborWindowConfig();
+            const nextW = useDefaults ? TRP_NEIGHBOR_WINDOW_DEFAULT_MS : clampIntInRange(wInput && wInput.value, current.windowMs, TRP_NEIGHBOR_WINDOW_MIN_MS, TRP_NEIGHBOR_WINDOW_MAX_MS);
+            const nextA = useDefaults ? TRP_NEIGHBOR_ALIGN_DEFAULT_MS : clampIntInRange(aInput && aInput.value, current.alignMs, TRP_NEIGHBOR_ALIGN_MIN_MS, TRP_NEIGHBOR_ALIGN_MAX_MS);
+            setNeighborWindowConfig(nextW, nextA);
+            syncNeighborConfigUi();
+
+            setNeighborConfigStatus('Saved. Rebuilding LTE neighbor context...');
+            const info = await rebuildNeighborContextForLoadedRuns();
+            if (info.runs > 0) {
+                setNeighborConfigStatus('Saved. Rebuilt ' + info.runs + ' LTE run(s) (' + info.points + ' points).');
+            } else {
+                setNeighborConfigStatus('Saved. New values will apply to next LTE TRP import.');
+            }
+        } catch (err) {
+            setNeighborConfigStatus('Failed to apply settings: ' + (err && err.message ? err.message : err), true);
+        } finally {
+            if (applyBtn) applyBtn.disabled = false;
+            if (resetBtn) resetBtn.disabled = false;
+            trpNeighborConfigBusy = false;
+        }
+    }
+
+    function bindNeighborConfigControls() {
+        const applyBtn = qs('trpNeighborCfgApply');
+        const resetBtn = qs('trpNeighborCfgReset');
+        const wInput = qs('trpNeighborWindowMs');
+        const aInput = qs('trpNeighborAlignMs');
+
+        if (applyBtn && !applyBtn.dataset.bound) {
+            applyBtn.addEventListener('click', async () => { await applyNeighborConfigFromUi(false); });
+            applyBtn.dataset.bound = '1';
+        }
+        if (resetBtn && !resetBtn.dataset.bound) {
+            resetBtn.addEventListener('click', async () => { await applyNeighborConfigFromUi(true); });
+            resetBtn.dataset.bound = '1';
+        }
+
+        const bindEnter = (el) => {
+            if (!el || el.dataset.boundEnter) return;
+            el.addEventListener('keydown', async (ev) => {
+                if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    await applyNeighborConfigFromUi(false);
+                }
+            });
+            el.dataset.boundEnter = '1';
+        };
+        bindEnter(wInput);
+        bindEnter(aInput);
+    }
+
     function buildApiUrl(path) {
-        if (!trpApiBase) trpApiBase = readConfiguredApiBase();
         if (!trpApiBase) return path;
         return trpApiBase.replace(/\/+$/, '') + path;
     }
@@ -86,6 +250,124 @@ function inferAltApiBase() {
         return { res, payload };
     }
 
+    function ensureUploadProgressUi() {
+        let wrap = qs('trpUploadProgressWrap');
+        if (wrap) return wrap;
+        const status = qs('fileStatus');
+        const parent = status && status.parentElement ? status.parentElement : document.body;
+        wrap = document.createElement('div');
+        wrap.id = 'trpUploadProgressWrap';
+        wrap.style.cssText = 'display:none;align-items:center;gap:8px;min-width:190px;';
+        wrap.innerHTML =
+            '<div style="width:120px;height:6px;background:#1f2937;border-radius:999px;overflow:hidden;border:1px solid #334155;">' +
+            '  <div id="trpUploadProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#22d3ee,#2bb3a3);transition:width .15s ease;"></div>' +
+            '</div>' +
+            '<span id="trpUploadProgressText" style="font-size:11px;color:#93c5fd;white-space:nowrap;">0%</span>';
+        if (status && status.nextSibling) parent.insertBefore(wrap, status.nextSibling);
+        else parent.appendChild(wrap);
+        return wrap;
+    }
+
+    const uploadProgressState = {
+        percent: 0,
+        ticker: null,
+        hasComputableProgress: false
+    };
+
+    function stopUploadProgressTicker() {
+        if (uploadProgressState.ticker) {
+            clearInterval(uploadProgressState.ticker);
+            uploadProgressState.ticker = null;
+        }
+    }
+
+    function resetUploadProgressState() {
+        stopUploadProgressTicker();
+        uploadProgressState.percent = 0;
+        uploadProgressState.hasComputableProgress = false;
+    }
+
+    function startUploadProgressTicker() {
+        stopUploadProgressTicker();
+        uploadProgressState.ticker = setInterval(() => {
+            if (uploadProgressState.hasComputableProgress) return;
+            const next = uploadProgressState.percent < 50
+                ? uploadProgressState.percent + 2
+                : uploadProgressState.percent + 1;
+            const clamped = Math.min(90, next);
+            if (clamped <= uploadProgressState.percent) return;
+            setUploadProgress(clamped, Math.round(clamped) + '%');
+            setStatus('Uploading TRP: ' + Math.round(clamped) + '%');
+        }, 400);
+    }
+
+    function startFinalizingProgressTicker() {
+        stopUploadProgressTicker();
+        uploadProgressState.ticker = setInterval(() => {
+            const next = Math.min(99, uploadProgressState.percent + 1);
+            if (next <= uploadProgressState.percent) return;
+            setUploadProgress(next, Math.round(next) + '%');
+            setStatus('Importing KPIs: ' + Math.round(next) + '%');
+        }, 300);
+    }
+
+    function setUploadProgress(percent, text) {
+        const wrap = ensureUploadProgressUi();
+        const bar = qs('trpUploadProgressBar');
+        const lbl = qs('trpUploadProgressText');
+        wrap.style.display = 'inline-flex';
+        if (Number.isFinite(Number(percent))) {
+            const requested = Math.max(0, Math.min(100, Number(percent)));
+            const p = Math.max(uploadProgressState.percent, requested);
+            uploadProgressState.percent = p;
+            if (bar) bar.style.width = p.toFixed(1) + '%';
+            if (lbl) lbl.textContent = text || (Math.round(p) + '%');
+        } else {
+            if (bar) bar.style.width = uploadProgressState.percent.toFixed(1) + '%';
+            if (lbl) lbl.textContent = text || 'Uploading...';
+        }
+    }
+
+    function hideUploadProgress() {
+        stopUploadProgressTicker();
+        const wrap = qs('trpUploadProgressWrap');
+        if (wrap) wrap.style.display = 'none';
+    }
+
+    async function postFormWithProgress(path, formData, onProgress) {
+        const sendOnce = (url) => new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url, true);
+            xhr.upload.onprogress = (e) => {
+                if (typeof onProgress !== 'function') return;
+                if (e.lengthComputable && e.total > 0) onProgress((e.loaded / e.total) * 100);
+                else onProgress(null);
+            };
+            xhr.onerror = () => reject(new Error('Network error during upload'));
+            xhr.onload = () => {
+                let payload = null;
+                try { payload = JSON.parse(xhr.responseText || 'null'); }
+                catch (_e) { payload = null; }
+                resolve({
+                    status: xhr.status,
+                    ok: xhr.status >= 200 && xhr.status < 300,
+                    payload
+                });
+            };
+            xhr.send(formData);
+        });
+
+        let out = await sendOnce(buildApiUrl(path));
+        if ((out.status === 404 || out.status === 405 || out.status === 501) && !trpApiBase) {
+            const alt = inferAltApiBase();
+            if (alt) {
+                trpApiBase = alt;
+                out = await sendOnce(buildApiUrl(path));
+            }
+        }
+        return out;
+    }
+
     function ensureTrpControls() {
         const actions = document.querySelector('.header-map-actions');
         if (!actions) return;
@@ -118,21 +400,13 @@ function inferAltApiBase() {
             importTrpBtn.addEventListener('click', (ev) => {
                 ev.preventDefault();
                 ev.stopPropagation();
-                if (!trpApiBase) trpApiBase = readConfiguredApiBase();
-                if (isLikelyVercelHost() && !trpApiBase) {
-                    const entered = prompt(
-                        'TRP import needs a backend API URL on Vercel.\nEnter backend base URL (example: https://your-backend.example.com)',
-                        ''
-                    );
-                    if (window.setOptimApiBase && typeof window.setOptimApiBase === 'function') {
-                        window.setOptimApiBase(entered || '');
-                    }
-                    trpApiBase = readConfiguredApiBase();
-                    if (!trpApiBase) {
-                        setStatus('TRP import unavailable: set backend URL from the header API setting.');
-                        return;
-                    }
-                }
+
+                // Reset selection so choosing the same file again still triggers 'change'
+                try { input.value = ''; } catch (_e) {}
+
+                // Give user feedback (if status element exists in UI)
+                try { setStatus('Choose a .trp file…'); } catch (_e) {}
+
                 try {
                     if (typeof input.showPicker === 'function') input.showPicker();
                     else input.click();
@@ -151,11 +425,15 @@ function inferAltApiBase() {
         if (!input.dataset.bound) {
             input.addEventListener('change', async () => {
                 const file = input.files && input.files[0];
-                if (!file) return;
+                if (!file) {
+                    try { setStatus('No file selected.'); } catch (_e) {}
+                    return;
+                }
                 try {
                     await uploadTrp(file);
                 } finally {
-                    input.value = '';
+                    // allow re-selecting the same file
+                    try { input.value = ''; } catch (_e) {}
                 }
             });
             input.dataset.bound = '1';
@@ -168,29 +446,46 @@ function inferAltApiBase() {
     }
 
     async function uploadTrp(file) {
-        setStatus('TRP: uploading...');
+        resetUploadProgressState();
+        setStatus('Uploading TRP: 0%');
+        setUploadProgress(0, '0%');
+        startUploadProgressTicker();
         const form = new FormData();
         form.append('file', file, file.name);
 
         let response;
         let payload;
         try {
-            const out = await fetchJsonWithApiFallback('/api/trp/import', { method: 'POST', body: form });
-            response = out.res;
+            const out = await postFormWithProgress('/api/trp/import', form, (p) => {
+                if (Number.isFinite(Number(p))) {
+                    uploadProgressState.hasComputableProgress = true;
+                    stopUploadProgressTicker();
+                    const pct = Math.round(Number(p));
+                    setUploadProgress(p, pct + '%');
+                    setStatus('Uploading TRP: ' + pct + '%');
+                } else {
+                    setUploadProgress(null, 'Uploading...');
+                    setStatus('Uploading TRP...');
+                }
+            });
+            response = { ok: out.ok, status: out.status };
             payload = out.payload;
         } catch (err) {
+            hideUploadProgress();
             setStatus('TRP: upload failed');
             alert('Upload failed: ' + (err && err.message ? err.message : err));
             return;
         }
 
         if (!payload) {
+            hideUploadProgress();
             setStatus('TRP: invalid server response');
             alert('Invalid response from server.');
             return;
         }
 
         if (!response.ok || payload.status !== 'success') {
+            hideUploadProgress();
             setStatus('TRP: import failed');
             const report = payload && payload.importReport ? payload.importReport : null;
             let msg = (payload && payload.message) || ('HTTP ' + response.status);
@@ -202,17 +497,24 @@ function inferAltApiBase() {
                 if (Array.isArray(report.warnings) && report.warnings.length) parts.push('warnings=' + report.warnings.slice(0, 3).join(' | '));
                 if (parts.length) msg += '\n\nImport report: ' + parts.join(' ; ');
             }
-            if (response && response.status === 404 && isLikelyVercelHost() && !trpApiBase) {
-                msg = 'Backend API not configured for Vercel. Set backend URL from the header API setting first.\n\n' + msg;
-            }
             alert(msg);
             return;
         }
 
-        const stages = Array.isArray(payload.stages) ? payload.stages : [];
-        if (stages.length) setStatus('TRP: ' + stages.join(' -> '));
-        setStatus(`TRP imported: ${payload.metricsCount || 0} metrics, ${payload.eventTypesCount || 0} event types`);
+        stopUploadProgressTicker();
+        if (uploadProgressState.percent < 95) {
+            setUploadProgress(95, '95%');
+        }
+        setStatus('Importing KPIs...');
+        startFinalizingProgressTicker();
         await injectRunIntoLoadedLogs(payload.runId, file.name);
+        stopUploadProgressTicker();
+        setUploadProgress(100, '100%');
+        setStatus('TRP loaded: 100%');
+        setTimeout(() => {
+            hideUploadProgress();
+            setStatus('');
+        }, 3000);
     }
 
     function escapeHtml(v) {
@@ -247,6 +549,22 @@ function inferAltApiBase() {
             '  <div id="trpRunBody" style="display:grid;grid-template-columns:380px 1fr;gap:10px;flex:1;min-height:0;padding:10px;">',
             '    <div style="display:flex;flex-direction:column;gap:10px;min-height:0;overflow:hidden;">',
             '      <div id="trpRunSummary" style="background:#111c2f;border:1px solid #2b3f63;border-radius:10px;padding:10px;color:#dbeafe"></div>',
+            '      <div id="trpNeighborCfgCard" style="background:#111c2f;border:1px solid #2b3f63;border-radius:10px;padding:10px;color:#dbeafe;">',
+            '        <div style="font-size:12px;font-weight:700;color:#dbeafe;margin-bottom:8px;">LTE Neighbor Window Settings</div>',
+            '        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">',
+            '          <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#93c5fd;">Window (ms, +/- around point)',
+            '            <input id="trpNeighborWindowMs" type="number" min="100" max="10000" step="50" style="background:#0a1424;color:#dbeafe;border:1px solid #35507a;border-radius:6px;padding:4px 6px;"/>',
+            '          </label>',
+            '          <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#93c5fd;">Align tolerance (ms)',
+            '            <input id="trpNeighborAlignMs" type="number" min="20" max="2000" step="10" style="background:#0a1424;color:#dbeafe;border:1px solid #35507a;border-radius:6px;padding:4px 6px;"/>',
+            '          </label>',
+            '        </div>',
+            '        <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">',
+            '          <button id="trpNeighborCfgApply" class="btn header-btn" style="padding:4px 8px;">Apply</button>',
+            '          <button id="trpNeighborCfgReset" class="btn header-btn" style="padding:4px 8px;">Reset</button>',
+            '          <span id="trpNeighborCfgStatus" style="font-size:11px;color:#93c5fd;"></span>',
+            '        </div>',
+            '      </div>',
             '      <div style="background:#111c2f;border:1px solid #2b3f63;border-radius:10px;padding:10px;display:flex;flex-direction:column;min-height:0;flex:1;">',
             '        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">',
             '          <button id="trpTabKpis" class="btn header-btn" style="padding:4px 8px;">KPIs</button>',
@@ -300,6 +618,9 @@ function inferAltApiBase() {
             const name = e.target.value;
             if (name) await selectKpiMetric(name);
         });
+
+        bindNeighborConfigControls();
+        syncNeighborConfigUi();
 
         return overlay;
     }
@@ -422,6 +743,7 @@ function inferAltApiBase() {
     async function openRunDetail(runId) {
         const overlay = ensureRunModal();
         overlay.style.display = 'block';
+        syncNeighborConfigUi();
 
         const body = qs('trpRunBody');
         if (body) body.style.opacity = '0.55';
@@ -481,8 +803,8 @@ function inferAltApiBase() {
             else if (nl.includes('sinr') || nl.includes('rs-sinr') || nl.includes('rssinr')) labels[n] = 'SINR';
             else if (nl.includes('data.http') && nl.includes('throughput') && (nl.includes('download') || nl.includes('downlink'))) labels[n] = 'Application throughput DL';
             else if (nl.includes('data.http') && nl.includes('throughput') && (nl.includes('upload') || nl.includes('uplink'))) labels[n] = 'Application throughput UL';
-            else if (nl.includes('radio.lte.servingcell') && nl.includes('pdsch') && nl.includes('throughput')) labels[n] = 'Radio Throughput DL';
-            else if (nl.includes('radio.lte.servingcelltotal.pusch.throughput') || (nl.includes('radio.lte.servingcell') && nl.includes('pusch') && nl.includes('throughput'))) labels[n] = 'Radio Throughput UL';
+            else if (nl.includes('radio.lte.servingcell') && nl.includes('pdsch') && nl.includes('throughput')) labels[n] = 'DL throughput';
+            else if (nl.includes('radio.lte.servingcelltotal.pusch.throughput') || (nl.includes('radio.lte.servingcell') && nl.includes('pusch') && nl.includes('throughput'))) labels[n] = 'UL throughput';
             else if ((nl.includes('downlink') || nl.includes('dl')) && nl.includes('throughput')) labels[n] = 'DL throughput';
             else if ((nl.includes('uplink') || nl.includes('ul')) && nl.includes('throughput')) labels[n] = 'UL throughput';
             else if (nl.includes('throughput') && nl.includes('down')) labels[n] = 'DL throughput';
@@ -703,12 +1025,28 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         return scored.map(x => x.name);
     }
 
-    function pickFirstByKeywords(names, keywords) {
+    function pickFirstByKeywords(names, keywords, options) {
+        const opts = options || {};
+        const prefer = (opts.prefer || []).map(x => String(x).toLowerCase());
+        const avoid = (opts.avoid || []).map(x => String(x).toLowerCase());
+        let best = null;
+        let bestScore = -1;
         for (const n of names) {
             const low = String(n || '').toLowerCase();
-            if (keywords.some(k => low.includes(k))) return n;
+            let hits = 0;
+            keywords.forEach(k => { if (low.includes(String(k).toLowerCase())) hits += 1; });
+            if (!hits) continue;
+            let score = hits * 10;
+            prefer.forEach(k => { if (low.includes(k)) score += 8; });
+            avoid.forEach(k => { if (low.includes(k)) score -= 12; });
+            if (low.includes('servingcell')) score += 6;
+            if (low.includes('neighbor')) score -= 10;
+            if (score > bestScore) {
+                bestScore = score;
+                best = n;
+            }
         }
-        return null;
+        return best;
     }
 
     function pickCoreSidebarMetrics(orderedNames, tech) {
@@ -717,21 +1055,29 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         const add = (v) => { if (v && !out.includes(v)) out.push(v); };
 
         if (tech === '5G NR') {
-            add(pickFirstByKeywords(names, ['ss-rsrp', 'ssrsrp', 'rsrp']));
-            add(pickFirstByKeywords(names, ['ss-rsrq', 'ssrsrq', 'rsrq']));
+            add(pickFirstByKeywords(names, ['ss-rsrp', 'ssrsrp', 'rsrp'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
+            add(pickFirstByKeywords(names, ['ss-rsrq', 'ssrsrq', 'rsrq'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
             add(pickFirstByKeywords(names, ['ss-sinr', 'sinr']));
         } else if (tech === 'UMTS 3G') {
             add(pickFirstByKeywords(names, ['rscp', 'rsrp']));
             add(pickFirstByKeywords(names, ['ecno', 'rsrq']));
             add(pickFirstByKeywords(names, ['sinr']));
         } else {
-            add(pickFirstByKeywords(names, ['rsrp']));
-            add(pickFirstByKeywords(names, ['rsrq']));
-            add(pickFirstByKeywords(names, ['rs-sinr', 'sinr']));
+            add(pickFirstByKeywords(names, ['rsrp'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
+            add(pickFirstByKeywords(names, ['rsrq'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
+            add(pickFirstByKeywords(names, ['rs-sinr', 'sinr'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
         }
 
-        add(pickFirstByKeywords(names, ['dl throughput', 'downlink throughput', 'throughput dl', 'throughput_dl', 'dl rate']));
-        add(pickFirstByKeywords(names, ['ul throughput', 'uplink throughput', 'throughput ul', 'throughput_ul', 'ul rate']));
+        add(pickFirstByKeywords(
+            names,
+            ['dl throughput', 'downlink throughput', 'throughput dl', 'throughput_dl', 'dl rate', 'pdsch.throughput'],
+            { prefer: ['servingcell', 'pdsch'], avoid: ['neighbor', 'http download'] }
+        ));
+        add(pickFirstByKeywords(
+            names,
+            ['ul throughput', 'uplink throughput', 'throughput ul', 'throughput_ul', 'ul rate', 'pusch.throughput'],
+            { prefer: ['servingcell', 'pusch'], avoid: ['neighbor', 'http upload'] }
+        ));
 
         // Ensure exactly practical core set if available.
         return out.slice(0, 5);
@@ -801,6 +1147,196 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         }
     }
 
+    function normalizeNeighborFieldName(rawField) {
+        const s = String(rawField || '').toLowerCase();
+        if (s === 'pci') return 'pci';
+        if (s === 'rsrp') return 'rsrp';
+        if (s === 'rsrq') return 'rsrq';
+        if (s === 'earfcn' || s === 'frequency') return 'earfcn';
+        return null;
+    }
+
+    function parseLteNeighborMetricName(metricName) {
+        const m = String(metricName || '').match(/^Radio\.Lte\.Neighbor\[(\d+)\]\.(Pci|Rsrp|Rsrq|Earfcn|Frequency)$/i);
+        if (!m) return null;
+        const field = normalizeNeighborFieldName(m[2]);
+        if (!field) return null;
+        return { index: Number(m[1]), field };
+    }
+
+    function lowerBoundByTime(samples, targetMs) {
+        let lo = 0;
+        let hi = Array.isArray(samples) ? samples.length : 0;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (samples[mid].t < targetMs) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    function nearestValueWithin(samples, targetMs, maxDeltaMs) {
+        if (!Array.isArray(samples) || !samples.length) return null;
+        const idx = lowerBoundByTime(samples, targetMs);
+        let best = null;
+        if (idx < samples.length) best = samples[idx];
+        if (idx > 0) {
+            const prev = samples[idx - 1];
+            if (!best || Math.abs(prev.t - targetMs) <= Math.abs(best.t - targetMs)) best = prev;
+        }
+        if (!best) return null;
+        if (Math.abs(best.t - targetMs) > maxDeltaMs) return null;
+        return Number.isFinite(Number(best.v)) ? Number(best.v) : null;
+    }
+
+    async function hydrateLteNeighborWindowContext(points, runId, sidebarNeighbors, options = {}) {
+        if (!Array.isArray(points) || !points.length || !runId) return;
+
+        const windowMs = Number.isFinite(Number(options.windowMs)) ? Number(options.windowMs) : 1000;
+        const alignMs = Number.isFinite(Number(options.alignMs)) ? Number(options.alignMs) : 300;
+        const servingEarfcnSet = new Set(
+            (Array.isArray(options.servingEarfcnSet) ? options.servingEarfcnSet : [])
+                .map(v => Number(v))
+                .filter(v => Number.isFinite(v))
+                .map(v => Math.round(v))
+        );
+
+        const metricNames = Array.from(new Set(
+            (sidebarNeighbors || [])
+                .map(row => row && row.name)
+                .filter(name => parseLteNeighborMetricName(name))
+        ));
+        if (!metricNames.length) return;
+
+        const loaded = await Promise.all(metricNames.map(async (name) => {
+            try {
+                const rows = await fetchSeries(runId, name);
+                return { name, rows: Array.isArray(rows) ? rows : [] };
+            } catch (_e) {
+                return { name, rows: [] };
+            }
+        }));
+
+        const samplesByIndex = {};
+        const ensureIndexBucket = (idx) => {
+            const key = String(idx);
+            if (!samplesByIndex[key]) {
+                samplesByIndex[key] = { pci: [], rsrp: [], rsrq: [], earfcn: [] };
+            }
+            return samplesByIndex[key];
+        };
+
+        loaded.forEach(({ name, rows }) => {
+            const meta = parseLteNeighborMetricName(name);
+            if (!meta) return;
+            const bucket = ensureIndexBucket(meta.index);
+            if (!bucket[meta.field]) return;
+            rows.forEach((r) => {
+                const t = toEpochMs(r && r.time);
+                const v = Number(r && r.value_num);
+                if (!Number.isFinite(t) || !Number.isFinite(v)) return;
+                bucket[meta.field].push({ t, v });
+            });
+        });
+
+        const indexKeys = Object.keys(samplesByIndex);
+        if (!indexKeys.length) return;
+        indexKeys.forEach((idxKey) => {
+            const b = samplesByIndex[idxKey];
+            Object.values(b).forEach(arr => arr.sort((a, b2) => a.t - b2.t));
+        });
+
+        for (const p of points) {
+            const t = Number(p && (p.timestamp || toEpochMs(p.time)));
+            if (!Number.isFinite(t)) continue;
+
+            const byPci = new Map();
+
+            for (const idxKey of indexKeys) {
+                const idxBucket = samplesByIndex[idxKey];
+                const pciSamples = idxBucket.pci;
+                if (!Array.isArray(pciSamples) || !pciSamples.length) continue;
+
+                const start = lowerBoundByTime(pciSamples, t - windowMs);
+                const end = lowerBoundByTime(pciSamples, t + windowMs + 1);
+
+                for (let i = start; i < end; i++) {
+                    const pciRaw = Number(pciSamples[i].v);
+                    const pci = Number.isFinite(pciRaw) ? Math.round(pciRaw) : null;
+                    if (!Number.isFinite(pci)) continue;
+
+                    const row = byPci.get(pci) || {
+                        pci,
+                        rsrpSum: 0,
+                        rsrpCount: 0,
+                        rsrqSum: 0,
+                        rsrqCount: 0,
+                        earfcnVotes: {},
+                        sampleCount: 0
+                    };
+                    row.sampleCount += 1;
+
+                    const sampleTime = pciSamples[i].t;
+                    const rsrp = nearestValueWithin(idxBucket.rsrp, sampleTime, alignMs);
+                    if (Number.isFinite(rsrp)) {
+                        row.rsrpSum += rsrp;
+                        row.rsrpCount += 1;
+                    }
+                    const rsrq = nearestValueWithin(idxBucket.rsrq, sampleTime, alignMs);
+                    if (Number.isFinite(rsrq)) {
+                        row.rsrqSum += rsrq;
+                        row.rsrqCount += 1;
+                    }
+                    const earfcn = nearestValueWithin(idxBucket.earfcn, sampleTime, alignMs);
+                    if (Number.isFinite(earfcn)) {
+                        // TRP neighbor EARFCN in this source is encoded on a x2 scale (e.g., 12600 -> 6300).
+                        const e = Math.round(earfcn / 2);
+                        row.earfcnVotes[e] = (row.earfcnVotes[e] || 0) + 1;
+                    }
+
+                    byPci.set(pci, row);
+                }
+            }
+
+            const neighbors = Array.from(byPci.values())
+                .map((row) => ({
+                    pci: row.pci,
+                    rsrp: row.rsrpCount ? Number((row.rsrpSum / row.rsrpCount).toFixed(1)) : null,
+                    rsrq: row.rsrqCount ? Number((row.rsrqSum / row.rsrqCount).toFixed(1)) : null,
+                    earfcn: (() => {
+                        const entries = Object.entries(row.earfcnVotes || {});
+                        if (!entries.length) return null;
+                        entries.sort((a, b) => {
+                            const ca = Number(a[1] || 0);
+                            const cb = Number(b[1] || 0);
+                            if (cb !== ca) return cb - ca;
+                            return Number(a[0]) - Number(b[0]);
+                        });
+                        const raw = Number(entries[0][0]);
+                        if (!Number.isFinite(raw)) return null;
+                        if (servingEarfcnSet.size > 0 && !servingEarfcnSet.has(raw)) {
+                            const half = raw / 2;
+                            if (Number.isInteger(half) && servingEarfcnSet.has(half)) return half;
+                        }
+                        return raw;
+                    })(),
+                    sample_count: row.sampleCount
+                }))
+                .sort((a, b) => {
+                    const ra = Number.isFinite(a.rsrp) ? a.rsrp : -999;
+                    const rb = Number.isFinite(b.rsrp) ? b.rsrp : -999;
+                    if (rb !== ra) return rb - ra;
+                    if ((b.sample_count || 0) !== (a.sample_count || 0)) return (b.sample_count || 0) - (a.sample_count || 0);
+                    return (a.pci || 0) - (b.pci || 0);
+                });
+
+            p.__lteTrpNeighborWindow = {
+                window_ms: windowMs,
+                neighbors
+            };
+        }
+    }
+
 function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const points = (track || []).map((p, idx) => {
             const ts = toEpochMs(p.time);
@@ -857,6 +1393,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const sidebarKpis = (sidebar && Array.isArray(sidebar.kpis)) ? sidebar.kpis : [];
         const sidebarMetricNames = sidebarKpis.map(k => k && k.name).filter(Boolean);
         const trpInfo = (sidebar && sidebar.info) ? sidebar.info : {};
+        const sidebarNeighbors = (sidebar && Array.isArray(sidebar.neighbors)) ? sidebar.neighbors : [];
 
         const metricsForSelection = sampledMetrics.length ? sampledMetrics : allMetrics;
         let detectedTech = detectTrpTechnology(metricsForSelection, catalog.events || []);
@@ -871,19 +1408,37 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const defaultMetricName = defaultCandidates.find(n => orderedMetricNames.includes(n)) || orderedMetricNames[0] || null;
         const defaultSeries = defaultMetricName ? await fetchSeries(runId, defaultMetricName) : [];
         const points = buildTrpPointsFromTrack(detail.track_points || [], defaultMetricName, defaultSeries);
+        const servingEarfcnSet = await fetchServingEarfcnSet(runId, orderedMetricNames);
 
-        const desiredOrder = ['RSRP', 'RSRQ', 'SINR', 'DL throughput', 'UL throughput'];
-        const tmpLabels = buildFriendlyTrpLabels(sidebarMetricNames.slice(0, 20));
-        const orderedKpis = (sidebarMetricNames || []).slice().sort((a, b) => {
-            const la = tmpLabels[a] || a;
-            const lb = tmpLabels[b] || b;
-            const ia = desiredOrder.indexOf(la);
-            const ib = desiredOrder.indexOf(lb);
-            const sa = ia === -1 ? 999 : ia;
-            const sb = ib === -1 ? 999 : ib;
-            if (sa !== sb) return sa - sb;
-            return String(la).localeCompare(String(lb));
-        }).slice(0, 5);
+        if (String(detectedTech || '').toUpperCase().includes('LTE')) {
+            try {
+                const neighborCfg = getNeighborWindowConfig();
+                await hydrateLteNeighborWindowContext(points, runId, sidebarNeighbors, {
+                    ...neighborCfg,
+                    servingEarfcnSet
+                });
+            } catch (e) {
+                console.warn('[TRP][Neighbors] failed to build window context:', e);
+            }
+        }
+
+        const coreFromFullList = pickCoreSidebarMetrics(orderedMetricNames, detectedTech);
+        const orderedKpis = coreFromFullList.length
+            ? coreFromFullList
+            : (() => {
+                const desiredOrder = ['RSRP', 'RSRQ', 'SINR', 'DL throughput', 'UL throughput'];
+                const tmpLabels = buildFriendlyTrpLabels(sidebarMetricNames);
+                return (sidebarMetricNames || []).slice().sort((a, b) => {
+                    const la = tmpLabels[a] || a;
+                    const lb = tmpLabels[b] || b;
+                    const ia = desiredOrder.indexOf(la);
+                    const ib = desiredOrder.indexOf(lb);
+                    const sa = ia === -1 ? 999 : ia;
+                    const sb = ib === -1 ? 999 : ib;
+                    if (sa !== sb) return sa - sb;
+                    return String(la).localeCompare(String(lb));
+                }).slice(0, 5);
+            })();
 
         const identifierMetrics = pickIdentifierMetrics(metricsForSelection);
         const appTpMetrics = pickApplicationThroughputMetrics(metricsForSelection);
@@ -991,6 +1546,9 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             trpEventTypes,
             trpMetricLabels,
             trpInfo,
+            trpNeighborMetrics: sidebarNeighbors,
+            trpAllMetricNames: orderedMetricNames.slice(),
+            trpServingEarfcnSet: servingEarfcnSet.slice(),
             trpInfoMetricKeys: (identifierKeys || []).slice(),
             trpDerivedMap: derivedMap || {},
             trpInfoValues: { ...trpInfoMetricValues }
@@ -1008,9 +1566,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             } catch (_e) {}
         }
 
-        if (customMetrics.length) {
-            setStatus(`Loaded TRP in sidebar: ${logObj.name} (${customMetrics.length} sample-backed metrics, ${(detail.events || []).length} events)`);
-        } else {
+        if (!customMetrics.length) {
             setStatus(`No samples decoded (decode failed or TRP contains no data).`);
         }
     }
@@ -1028,7 +1584,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
 
     window.prepareTrpMetric = async (logId, metricName) => {
         const log = (window.loadedLogs || []).find(l => String(l.id) === String(logId));
-        if (!log || !log.trpRunId || !metricName) return;
+        if (!log || !log.trpRunId || !metricName) return false;
 
         let series = null;
 
@@ -1036,9 +1592,9 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         if (log.trpDerivedMap && log.trpDerivedMap[metricName]) {
             const cfg = log.trpDerivedMap[metricName];
             const baseMetric = cfg && cfg.baseMetric;
-            if (!baseMetric) return;
+            if (!baseMetric) return false;
             const baseSeries = await fetchSeries(log.trpRunId, baseMetric);
-            if (!baseSeries || !baseSeries.length) return;
+            if (!baseSeries || !baseSeries.length) return false;
 
             series = baseSeries.map(s => {
                 const v = Number(s.value_num);
@@ -1056,19 +1612,63 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             series = [];
         } else {
             series = await fetchSeries(log.trpRunId, metricName);
-            if (!series || !series.length) return;
+            if (!series || !series.length) return false;
         }
 
         if (series && series.length > 0) {
             const unique = new Set(series.map(s => (s.value !== undefined ? s.value : s.value_num)));
             if (unique.size === 1 && Number([...unique][0]) === 0) {
                 console.warn('Ignoring zero-only metric:', metricName);
-                return;
+                return false;
             }
         }
 
         if (series && series.length) {
             mapSeriesToPoints(log.points || [], metricName, series);
+        }
+
+        // For LTE TRP points-details, preload serving/neighbor context metrics so clicking a map point
+        // can immediately render Serving + Neighbors (PCI/RSRP/RSRQ/EARFCN) at the same timestamp.
+        if (String(log.tech || '').toUpperCase().includes('LTE') && Array.isArray(log.customMetrics)) {
+            const pointsRef = log.points || [];
+            const hasMapped = (name) => pointsRef.some(p => p && p[name] !== undefined && p[name] !== null);
+            const rank = (name) => {
+                const n = String(name || '').toLowerCase();
+                let s = 0;
+                if (n.includes('radio.lte.servingcell')) s += 20;
+                if (n.includes('radio.lte.neighbor')) s += 15;
+                if (n.endsWith('.pci')) s += 8;
+                if (n.endsWith('.rsrp')) s += 7;
+                if (n.endsWith('.rsrq')) s += 6;
+                if (n.includes('earfcn')) s += 5;
+                return s;
+            };
+            const related = log.customMetrics
+                .filter(m => {
+                    const n = String(m || '').toLowerCase();
+                    if (n === String(metricName || '').toLowerCase()) return false;
+                    if (hasMapped(m)) return false;
+                    const isServing = n.includes('radio.lte.servingcell');
+                    const isNeighbor = n.includes('radio.lte.neighbor');
+                    const isWanted = n.endsWith('.pci') || n.endsWith('.rsrp') || n.endsWith('.rsrq') || n.includes('earfcn') || n.includes('cellidentity');
+                    return (isServing || isNeighbor) && isWanted;
+                })
+                .sort((a, b) => rank(b) - rank(a))
+                .slice(0, 18);
+
+            if (related.length) {
+                const loaded = await Promise.all(related.map(async (m) => {
+                    try {
+                        const s = await fetchSeries(log.trpRunId, m);
+                        return { m, s: Array.isArray(s) ? s : [] };
+                    } catch (_e) {
+                        return { m, s: [] };
+                    }
+                }));
+                loaded.forEach(({ m, s }) => {
+                    if (s && s.length) mapSeriesToPoints(pointsRef, m, s);
+                });
+            }
         }
 
         // For non-RSRP metrics, some renderers still use `level` as the active field.
@@ -1080,6 +1680,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             });
         }
         log.currentParam = metricName;
+        return true;
     };
 
     window.showTrpEventTimeline = async (logId, eventName) => {
@@ -1272,9 +1873,20 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     }
 
     async function fetchSeries(runId, name) {
+        const isNeighborMetric = /^Radio\.Lte\.Neighbor\[\d+\]\./i.test(String(name || ''));
+        // Verification trace:
+        // click a Neighbors button (e.g., N1 RSRP) and confirm this request is logged
+        // with /api/runs/<runId>/kpi?name=Radio.Lte.Neighbor[1].Rsrp
+        if (isNeighborMetric) {
+            console.log('[Neighbors] requesting KPI series:', '/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(name));
+        }
         const { res, payload: data } = await fetchJsonWithApiFallback('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(name));
         if (!res.ok || data.status !== 'success') throw new Error(data.message || ('HTTP ' + res.status));
-        return data.series || [];
+        const series = data.series || [];
+        if (isNeighborMetric) {
+            console.log('[Neighbors] received samples:', series.length, 'for', name);
+        }
+        return series;
     }
 
     async function fetchEvents(runId, eventName) {
@@ -1310,14 +1922,6 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     window.trpFetchSignals = fetchSignals;
     window.trpFetchTimeseries = fetchTimeseries;
     window.trpFetchTrack = fetchTrack;
-    window.trpBuildApiUrl = buildApiUrl;
-    window.trpGetApiBase = () => (trpApiBase || readConfiguredApiBase() || '');
-    window.setOptimApiBase = (url) => {
-        const v = String(url || '').trim().replace(/\/+$/, '');
-        trpApiBase = v;
-        try { localStorage.setItem(API_BASE_STORAGE_KEY, v); } catch (_e) {}
-        return trpApiBase;
-    };
 
     async function selectKpiMetric(name) {
         trpState.selectedMetric = name;
