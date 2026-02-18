@@ -1,6 +1,57 @@
 (function () {
     function qs(id) { return document.getElementById(id); }
     let trpApiBase = '';
+    const TRP_API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
+
+    function normalizeApiBase(raw) {
+        const s = String(raw || '').trim();
+        if (!s) return '';
+        return s.replace(/\/+$/, '');
+    }
+
+    function readStoredApiBase() {
+        try {
+            return normalizeApiBase(localStorage.getItem(TRP_API_BASE_STORAGE_KEY) || '');
+        } catch (_e) {
+            return '';
+        }
+    }
+
+    function setApiBase(raw) {
+        const base = normalizeApiBase(raw);
+        trpApiBase = base;
+        try {
+            if (base) localStorage.setItem(TRP_API_BASE_STORAGE_KEY, base);
+            else localStorage.removeItem(TRP_API_BASE_STORAGE_KEY);
+        } catch (_e) {}
+        return trpApiBase;
+    }
+
+    function inferAltApiBases() {
+        const out = [];
+        try {
+            const u = new URL(window.location.href);
+            const proto = u.protocol || 'http:';
+            const host = u.hostname || '';
+            const port = u.port || '';
+            const localHost = host === 'localhost' || host === '127.0.0.1';
+
+            if (port === '8001') out.push(`${proto}//${host}:8000`);
+            if (localHost) {
+                out.push(`${proto}//${host}:8000`);
+                if (host !== 'localhost') out.push(`${proto}//localhost:8000`);
+                if (host !== '127.0.0.1') out.push(`${proto}//127.0.0.1:8000`);
+            }
+        } catch (_e) {}
+
+        return Array.from(new Set(out.map(normalizeApiBase).filter(Boolean)));
+    }
+
+    function initApiBase() {
+        const fromWindow = normalizeApiBase(window.OPTIM_API_BASE_URL || window.API_BASE_URL || '');
+        const fromStorage = readStoredApiBase();
+        trpApiBase = fromWindow || fromStorage || '';
+    }
 
     const trpState = {
         runId: null,
@@ -223,22 +274,55 @@
         return { points: scaled, yLabel: 'Mbps' };
     }
 
-function inferAltApiBase() {
+    function inferAltApiBase() {
+        return inferAltApiBases()[0] || '';
+    }
+
+    async function tryAlternateApiBases(sendFn) {
+        const original = trpApiBase;
+        const alternatives = inferAltApiBases().filter((b) => b && b !== original);
+        for (const alt of alternatives) {
+            trpApiBase = alt;
+            try {
+                const out = await sendFn();
+                const status = Number(out && out.status);
+                if (status && status !== 404 && status !== 405 && status !== 501) {
+                    setApiBase(alt);
+                    return out;
+                }
+            } catch (_e) {}
+        }
+        trpApiBase = original;
+        return null;
+    }
+
+    async function promptApiBaseAndRetry(sendFn) {
+        const suggested = inferAltApiBase() || 'http://localhost:8000';
+        const entered = window.prompt(
+            'Backend API URL is required for TRP import. Example: http://localhost:8000',
+            suggested
+        );
+        if (!entered) return null;
+        const previous = trpApiBase;
+        setApiBase(entered);
         try {
-            const u = new URL(window.location.href);
-            if (u.port === '8001') return `${u.protocol}//${u.hostname}:8000`;
+            const out = await sendFn();
+            const status = Number(out && out.status);
+            if (status && status !== 404 && status !== 405 && status !== 501) return out;
         } catch (_e) {}
-        return '';
+        trpApiBase = previous;
+        return null;
     }
 
     async function fetchJsonWithApiFallback(path, options) {
         const primaryUrl = buildApiUrl(path);
         let res = await fetch(primaryUrl, options);
         if ((res.status === 404 || res.status === 405 || res.status === 501) && !trpApiBase) {
-            const alt = inferAltApiBase();
-            if (alt) {
-                trpApiBase = alt;
-                res = await fetch(buildApiUrl(path), options);
+            const altRes = await tryAlternateApiBases(() => fetch(buildApiUrl(path), options));
+            if (altRes) res = altRes;
+            else {
+                const prompted = await promptApiBaseAndRetry(() => fetch(buildApiUrl(path), options));
+                if (prompted) res = prompted;
             }
         }
         let payload = null;
@@ -359,10 +443,11 @@ function inferAltApiBase() {
 
         let out = await sendOnce(buildApiUrl(path));
         if ((out.status === 404 || out.status === 405 || out.status === 501) && !trpApiBase) {
-            const alt = inferAltApiBase();
-            if (alt) {
-                trpApiBase = alt;
-                out = await sendOnce(buildApiUrl(path));
+            const altOut = await tryAlternateApiBases(() => sendOnce(buildApiUrl(path)));
+            if (altOut) out = altOut;
+            else {
+                const prompted = await promptApiBaseAndRetry(() => sendOnce(buildApiUrl(path)));
+                if (prompted) out = prompted;
             }
         }
         return out;
@@ -2031,6 +2116,13 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             }
         });
     }
+
+    window.trpBuildApiUrl = buildApiUrl;
+    window.trpGetApiBase = () => trpApiBase;
+    window.trpSetApiBase = (url) => setApiBase(url);
+    window.setOptimApiBase = (url) => setApiBase(url);
+
+    initApiBase();
 
     document.addEventListener('DOMContentLoaded', async () => {
         ensureTrpControls();
