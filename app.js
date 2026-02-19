@@ -5065,6 +5065,29 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     };
 
     // Helper: Generate HTML and Connections for a SINGLE point
+    function buildPointAnalysisStash(point, extras) {
+        const out = {};
+        const isFlatValue = (v) => (
+            typeof v === 'string' ||
+            typeof v === 'number' ||
+            typeof v === 'boolean'
+        );
+        const copyFlat = (src, skipKeys) => {
+            if (!src || typeof src !== 'object') return;
+            Object.entries(src).forEach(([k, v]) => {
+                if (Array.isArray(skipKeys) && skipKeys.includes(k)) return;
+                if (!isFlatValue(v)) return;
+                if (typeof v === 'number' && !Number.isFinite(v)) return;
+                out[k] = v;
+            });
+        };
+        copyFlat(point, ['layer', 'properties', 'parsed', '_neighborsHelper', 'details']);
+        copyFlat(point && point.properties);
+        copyFlat(point && point.parsed && point.parsed.serving);
+        copyFlat(extras || {});
+        return out;
+    }
+
     function generatePointInfoHTML(p, logColor) {
         // ... (existing code) ...
         let connectionTargets = [];
@@ -5139,6 +5162,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 '                <span style="color:#fff; font-weight:bold; word-break: break-all; text-align: right;">' + (displayVal) + '</span>\n' +
                 '            </div>';
         });
+        const stashCellName = (servingRes && servingRes.name)
+            ? servingRes.name
+            : (sourceObj['Cell Name'] || sourceObj.CellName || sourceObj['Site Name'] || 'Unknown');
+        const stashCellId = sourceObj['Cell ID'] || sourceObj.CellID || sourceObj.CI || '';
+        const stashDataSimple = buildPointAnalysisStash(p, {
+            lat: p.lat,
+            lng: p.lng,
+            'Cell Identifier': (servingRes && servingRes.name) ? servingRes.name : (stashCellName || servingRes?.id || stashCellId || 'Unknown'),
+            'Cell Name': (servingRes && servingRes.name) ? servingRes.name : (stashCellName || 'Unknown'),
+            'Tech': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? 'LTE' : 'UMTS')
+        });
 
         let html = '\n' +
             '            <div style="padding: 10px;">\n' +
@@ -5168,30 +5202,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>\n' +
             '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>\n' +
             '                    <button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>\n' +
+            '                    <button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>\n' +
             '                </div>\n' +
             '                    <!-- Hidden data stash for the analyzer -->\n' +
             '                    <script type="application/json" id="point-data-stash">\n' +
-            '                    ${(() => {\n' +
-            '                // Robust Key Finder for Stash\n' +
-            '                const findKey = (obj, target) => {\n' +
-            '                    const t = target.toLowerCase().replace(/\s/g, \'\');\n' +
-            '                    for (let k of Object.keys(obj)) {\n' +
-            '                        if (k.toLowerCase().replace(/\s/g, \'\') === t) return obj[k];\n' +
-            '                    }\n' +
-            '                    return undefined;\n' +
-            '                };\n' +
-            '                const cellName = findKey(sourceObj, \'Cell Name\') || findKey(sourceObj, \'CellName\') || findKey(sourceObj, \'Site Name\');\n' +
-            '                const cellId = findKey(sourceObj, \'Cell ID\') || findKey(sourceObj, \'CellID\') || findKey(sourceObj, \'CI\');\n' +
-            '\n' +
-            '                return JSON.stringify({\n' +
-            '                    ...sourceObj,\n' +
-            '                    lat: p.lat,\n' +
-            '                    lng: p.lng,\n' +
-            '                    \'Cell Identifier\': servingRes && servingRes.name ? servingRes.name : (cellName || servingRes.id || cellId || \'Unknown\'),\n' +
-            '                    \'Cell Name\': servingRes && servingRes.name ? servingRes.name : (cellName || \'Unknown\'),\n' +
-            '                    \'Tech\': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? \'LTE\' : \'UMTS\')\n' +
-            '                });\n' +
-            '            })()}\n' +
+            JSON.stringify(stashDataSimple) +
             '                    </script>\n' +
             '</div>' +
             '</div>';
@@ -7798,6 +7813,317 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
 
     
+    window.dtLteAnalyzePoint = (btn) => {
+        try {
+            let script = document.getElementById('point-data-stash');
+            if (!script && btn) {
+                const container = btn.closest('.panel, .card, .modal') || btn.parentNode;
+                script = container?.querySelector('#point-data-stash');
+            }
+            if (!script) {
+                alert('DT LTE analysis data missing.');
+                return;
+            }
+
+            const d = JSON.parse(script.textContent || '{}');
+            const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const keys = Object.keys(d || {});
+            const findExact = (alias) => {
+                const a = norm(alias);
+                const k = keys.find((key) => norm(key) === a);
+                return k ? d[k] : undefined;
+            };
+            const findContains = (...tokens) => {
+                const t = (tokens || []).map(norm).filter(Boolean);
+                if (!t.length) return undefined;
+                for (const k of keys) {
+                    const nk = norm(k);
+                    if (t.every((x) => nk.includes(x))) return d[k];
+                }
+                return undefined;
+            };
+            const hasVal = (v) => {
+                if (v === undefined || v === null) return false;
+                if (typeof v === 'string') {
+                    const s = v.trim().toLowerCase();
+                    if (!s || s === 'n/a' || s === '-' || s === 'nan' || s === 'unknown') return false;
+                }
+                return true;
+            };
+            const getVal = (...aliases) => {
+                for (const a of aliases) {
+                    const v = findExact(a);
+                    if (hasVal(v)) return v;
+                }
+                return undefined;
+            };
+            const getNum = (...aliases) => {
+                const v = getVal(...aliases);
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const esc = (v) => String(v ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+            const fmt = (v, unit = '') => {
+                if (typeof v === 'number' && Number.isFinite(v)) return `${Number.isInteger(v) ? v : v.toFixed(1)}${unit}`;
+                if (hasVal(v)) return `${v}${unit}`;
+                return 'N/A';
+            };
+
+            const cellName = getVal('Serving cell name', 'Cell Name', 'Cell Identifier') || 'Unknown';
+            const enbCell = getVal('eNodeB ID-Cell ID', 'Cellid', 'Cell ID') || 'N/A';
+            const timeStr = getVal('time', 'Time', 'timestamp') || '';
+
+            const dlTp = getNum('DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput', 'Radio.Lte.ServingCellTotal.Pdsch.Throughput');
+            const appDlTp = getNum('Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput');
+            const ulTp = getNum('UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput', 'Radio.Lte.ServingCellTotal.Pusch.Throughput');
+            const usedTp = Number.isFinite(dlTp) ? dlTp : appDlTp;
+            const usedTpSource = Number.isFinite(dlTp) ? 'DL throughput' : (Number.isFinite(appDlTp) ? 'Application throughput DL' : 'N/A');
+
+            const rsrp = getNum('RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'level');
+            const rsrq = getNum('RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'qual');
+            const sinr = getNum('SINR', 'RS-SINR', 'RSSINR', 'Radio.Lte.ServingCell[8].Sinr', 'Radio.Lte.ServingCellTotal.Sinr')
+                ?? (() => {
+                    const v = findContains('sinr');
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n : null;
+                })();
+            const cqi = getNum('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi');
+            const dlMcs = getNum('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs');
+            const rank = getNum('Rank/Layers (feedback proxy)', 'Rank', 'Layers', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank');
+            const blerDl = getNum('BLER DL', 'DL IBLER (%)', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl');
+            const modulation = getVal('Modulation (DL/UL)', 'DL Modulation', 'UL Modulation') || '';
+            const mimoCa = getVal('MIMO/CA', 'MIMO', 'CA') || '';
+
+            const rrcState = getVal('RRC State');
+            const hoEvent = getVal('HO Start/Complete');
+            const pciChange = getVal('Cell/PCI Change (inferred)');
+            const earfcnChange = getVal('EARFCN/Band Change (inferred)');
+            const rrcTransition = getVal('RRC State Transition');
+            const bearer = getVal('Bearer / EPS Bearer');
+            const taJumps = getVal('TA Jumps');
+
+            const tpCfg = { degraded: 3000, severe: 1500, critical: 700 };
+            let tpStatus = 'No throughput sample';
+            let tpColor = '#94a3b8';
+            let degraded = false;
+            if (Number.isFinite(usedTp)) {
+                degraded = usedTp < tpCfg.degraded;
+                if (usedTp < tpCfg.critical) {
+                    tpStatus = 'Critical degradation';
+                    tpColor = '#dc2626';
+                } else if (usedTp < tpCfg.severe) {
+                    tpStatus = 'Severe degradation';
+                    tpColor = '#ef4444';
+                } else if (usedTp < tpCfg.degraded) {
+                    tpStatus = 'Degraded';
+                    tpColor = '#f97316';
+                } else {
+                    tpStatus = 'Normal';
+                    tpColor = '#22c55e';
+                }
+            }
+
+            const causes = [];
+            const addCause = (id, title, score, evidence, actions) => {
+                causes.push({ id, title, score, evidence: evidence || [], actions: actions || [] });
+            };
+            const hasSignalEvent = (v) => hasVal(v) && !/^no$/i.test(String(v).trim());
+
+            if (degraded && ((rsrp !== null && rsrp <= -105) || (sinr !== null && sinr <= 3))) {
+                addCause(
+                    'coverage',
+                    'Coverage limited throughput',
+                    0.9,
+                    [`RSRP=${fmt(rsrp, ' dBm')}`, `SINR=${fmt(sinr, ' dB')}`],
+                    ['Optimize coverage (tilt/azimuth/power), especially around this segment.', 'Validate serving cell dominance versus top neighbors.']
+                );
+            }
+            if (degraded && (rsrp !== null && rsrp > -100) && ((rsrq !== null && rsrq <= -12) || (sinr !== null && sinr < 5))) {
+                addCause(
+                    'interference',
+                    'Interference/quality limitation',
+                    0.88,
+                    [`RSRP=${fmt(rsrp, ' dBm')} with RSRQ=${fmt(rsrq, ' dB')}`, `SINR=${fmt(sinr, ' dB')}`],
+                    ['Run PCI/neighbor interference audit for co/adjacent channel collisions.', 'Tune neighbor priorities and handover thresholds to avoid unstable serving.']
+                );
+            }
+            if (degraded && blerDl !== null && blerDl >= 8) {
+                addCause(
+                    'bler',
+                    'High retransmission loss',
+                    0.86,
+                    [`BLER DL=${fmt(blerDl, ' %')}`],
+                    ['Investigate BLER spikes versus SINR/RSRQ around this point.', 'Tune link adaptation targets (CQI to MCS aggressiveness).']
+                );
+            }
+            if (degraded && ((cqi !== null && cqi < 7) || (dlMcs !== null && dlMcs < 10) || /qpsk/i.test(String(modulation)))) {
+                addCause(
+                    'link_adaptation',
+                    'Conservative link adaptation',
+                    0.78,
+                    [`CQI=${fmt(cqi)}`, `DL MCS=${fmt(dlMcs)}`, `Modulation=${fmt(modulation)}`],
+                    ['Check CQI distribution and MCS floor at this location.', 'Review scheduler and link adaptation parameters to reduce over-conservatism.']
+                );
+            }
+            if (degraded && ((rank !== null && rank <= 1) || /rank1|single|noca|off|disabled/i.test(norm(mimoCa)))) {
+                addCause(
+                    'mimo_ca',
+                    'MIMO/CA utilization limitation',
+                    0.72,
+                    [`Rank/Layers=${fmt(rank)}`, `MIMO/CA=${fmt(mimoCa)}`],
+                    ['Verify MIMO rank usage and CA activation conditions on the route.', 'Audit RF quality on secondary layers/carriers for CA eligibility.']
+                );
+            }
+            if (degraded && [hoEvent, pciChange, earfcnChange, rrcTransition, taJumps].some(hasSignalEvent)) {
+                addCause(
+                    'mobility',
+                    'Mobility instability around degraded sample',
+                    0.69,
+                    [`HO=${fmt(hoEvent)}`, `PCI change=${fmt(pciChange)}`, `EARFCN/Band change=${fmt(earfcnChange)}`, `RRC transition=${fmt(rrcTransition)}`, `TA jumps=${fmt(taJumps)}`],
+                    ['Review handover triggering/completion near this segment.', 'Correlate throughput dips with serving changes and TA jumps.']
+                );
+            }
+            if (
+                degraded &&
+                (rsrp !== null && rsrp > -95) &&
+                (rsrq !== null && rsrq > -10) &&
+                (sinr !== null && sinr > 10) &&
+                (blerDl === null || blerDl < 5) &&
+                (cqi === null || cqi >= 10)
+            ) {
+                addCause(
+                    'non_radio',
+                    'Non-radio bottleneck likely (scheduler/backhaul/app)',
+                    0.65,
+                    [`Radio looks good: RSRP=${fmt(rsrp, ' dBm')}, RSRQ=${fmt(rsrq, ' dB')}, SINR=${fmt(sinr, ' dB')}, BLER=${fmt(blerDl, ' %')}`],
+                    ['Validate transport/backhaul congestion and packet loss at this time.', 'Cross-check app-layer throughput and server-side limits.']
+                );
+            }
+            if (degraded && !causes.length) {
+                addCause(
+                    'generic',
+                    'Mixed KPI degradation (no single dominant signature)',
+                    0.55,
+                    ['Partial KPI evidence available; no dominant cause exceeded threshold.'],
+                    ['Capture a short window (±30s) around this point and compare trends by KPI.', 'Correlate with nearby event timeline and serving/neighbor transitions.']
+                );
+            }
+            causes.sort((a, b) => b.score - a.score);
+
+            const recommendations = [];
+            const seenActions = new Set();
+            causes.slice(0, 3).forEach((c, i) => {
+                const pri = i === 0 ? 'P1' : (i === 1 ? 'P2' : 'P3');
+                c.actions.forEach((text) => {
+                    const key = String(text || '').trim();
+                    if (!key || seenActions.has(key)) return;
+                    seenActions.add(key);
+                    recommendations.push({ pri, text });
+                });
+            });
+
+            const snapshotRows = [
+                ['DL throughput', fmt(dlTp)],
+                ['Application throughput DL', fmt(appDlTp)],
+                ['UL throughput', fmt(ulTp)],
+                ['RSRP', fmt(rsrp, ' dBm')],
+                ['RSRQ', fmt(rsrq, ' dB')],
+                ['SINR', fmt(sinr, ' dB')],
+                ['BLER DL', fmt(blerDl, ' %')],
+                ['CQI (DL)', fmt(cqi)],
+                ['DL MCS', fmt(dlMcs)],
+                ['Rank/Layers', fmt(rank)],
+                ['Modulation (DL/UL)', fmt(modulation)],
+                ['MIMO/CA', fmt(mimoCa)],
+                ['RRC State', fmt(rrcState)],
+                ['HO Start/Complete', fmt(hoEvent)],
+                ['Cell/PCI Change', fmt(pciChange)],
+                ['EARFCN/Band Change', fmt(earfcnChange)],
+                ['RRC State Transition', fmt(rrcTransition)],
+                ['Bearer / EPS Bearer', fmt(bearer)],
+                ['TA Jumps', fmt(taJumps)]
+            ];
+            const snapshotHtml = snapshotRows.map(([k, v]) => (
+                `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1f2937;padding:3px 0;font-size:12px;"><span style="color:#94a3b8;">${esc(k)}</span><span style="color:#e5e7eb;font-weight:600;">${esc(v)}</span></div>`
+            )).join('');
+
+            const causesHtml = causes.length
+                ? causes.map((c) => (
+                    `<div style="border:1px solid #1f2937;border-radius:8px;padding:10px;margin-bottom:8px;background:#0f172a;">` +
+                    `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px;">` +
+                    `<div style="color:#e5e7eb;font-weight:700;font-size:13px;">${esc(c.title)}</div>` +
+                    `<div style="font-size:11px;color:#93c5fd;">confidence ${(c.score * 100).toFixed(0)}%</div>` +
+                    `</div>` +
+                    `<div style="font-size:12px;color:#cbd5e1;">${c.evidence.map((e) => '• ' + esc(e)).join('<br>')}</div>` +
+                    `</div>`
+                )).join('')
+                : '<div style="font-size:12px;color:#94a3b8;">No root-cause signal detected from available KPIs.</div>';
+
+            const recHtml = recommendations.length
+                ? recommendations.map((r) => (
+                    `<div style="margin-bottom:6px;font-size:12px;color:#e5e7eb;">• <span style="color:${r.pri === 'P1' ? '#ef4444' : (r.pri === 'P2' ? '#f97316' : '#eab308')};font-weight:700;">[${r.pri}]</span> ${esc(r.text)}</div>`
+                )).join('')
+                : '<div style="font-size:12px;color:#94a3b8;">No specific actions generated.</div>';
+
+            const fullJson = esc(JSON.stringify(d, null, 2));
+            const existingModal = document.querySelector('.dt-lte-analysis-modal-overlay');
+            if (existingModal) existingModal.remove();
+
+            const modalHtml = `
+                <div class="analysis-modal-overlay dt-lte-analysis-modal-overlay" style="z-index:10003;" onclick="if(event.target===this && this.dataset.dragging!=='true') this.remove()">
+                    <div class="analysis-modal" style="width: 760px; max-width: 95vw; position:fixed; z-index:10004;">
+                        <div class="analysis-header" style="background:#1d4ed8; cursor:grab;">
+                            <h3>DT LTE Analysis - ${esc(cellName)}</h3>
+                            <button class="analysis-close-btn" onclick="this.closest('.analysis-modal-overlay').remove()">×</button>
+                        </div>
+                        <div class="analysis-content" style="padding:18px; background:#0b1220; color:#e5e7eb; max-height:78vh; overflow-y:auto;">
+                            <div style="font-size:12px;color:#93c5fd; margin-bottom:8px;">${esc(timeStr)} | Cell ${esc(enbCell)}</div>
+                            <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center; margin-bottom:10px;">
+                                <div style="font-size:13px;color:#cbd5e1;">Throughput source: <b style="color:#e5e7eb;">${esc(usedTpSource)}</b></div>
+                                <div style="font-size:13px;color:#cbd5e1;">Used DL throughput: <b style="color:#e5e7eb;">${esc(fmt(usedTp))}</b></div>
+                                <div style="font-size:14px;font-weight:700;color:${tpColor};">${esc(tpStatus)}</div>
+                            </div>
+
+                            <div style="margin-top:8px;">
+                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">KPI Snapshot Used</div>
+                                ${snapshotHtml}
+                            </div>
+
+                            <div style="margin-top:12px;">
+                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Root Causes</div>
+                                ${causesHtml}
+                            </div>
+
+                            <div style="margin-top:12px;">
+                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Suggested Actions</div>
+                                ${recHtml}
+                            </div>
+
+                            <details style="margin-top:12px;">
+                                <summary style="cursor:pointer;color:#93c5fd;font-size:12px;">Full point data used (${keys.length} fields)</summary>
+                                <pre style="margin-top:6px; background:#08101d; border:1px solid #1f3559; border-radius:6px; padding:8px; color:#cbd5e1; font-size:11px; overflow:auto;">${fullJson}</pre>
+                            </details>
+                        </div>
+                    </div>
+                </div>`;
+
+            const div = document.createElement('div');
+            div.innerHTML = modalHtml;
+            document.body.appendChild(div.firstElementChild);
+            const overlay = document.querySelector('.dt-lte-analysis-modal-overlay');
+            if (overlay) setTimeout(() => window.attachAnalysisDrag && window.attachAnalysisDrag(overlay), 0);
+        } catch (e) {
+            console.error('DT LTE Analysis error:', e);
+            alert('DT LTE Analysis error: ' + e.message);
+        }
+    };
+
+
     function pointDetailsHasUsableValue(v) {
         if (v === undefined || v === null) return false;
         if (typeof v === 'number') return Number.isFinite(v);
@@ -8969,6 +9295,45 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred);
         pushMetric('Bearer / EPS Bearer', getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']) ?? bearerFromEvents);
         pushMetric('TA Jumps', getAny('TA Jumps') ?? findByTokens(['ta', 'jump']) ?? taJumpInferred);
+        const pointDetailsMetricsSnapshot = {
+            'Serving cell name': sName,
+            'Application throughput DL': appThroughputDl,
+            'Cell ID': cellIdValue,
+            'Cellid': cellidValue,
+            'DL throughput': dlThroughput,
+            'Downlink EARFCN': sFreq,
+            'eNodeB ID': enbOnly,
+            'Physical cell ID': sSC,
+            'RSRP': sRSCP,
+            'RSRQ': sEcNo,
+            'SINR': (getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr'])),
+            'Tracking area code': tacValue,
+            'UL throughput': ulThroughput,
+            'CQI (DL)': cqiDlValue,
+            'DL MCS': dlMcsValue,
+            'UL MCS': ulMcsValue,
+            'Modulation (DL/UL)': ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'),
+            'Timing Advance': timingAdvanceValue,
+            'MIMO/CA': (getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation'])),
+            'PMI': pmiValue,
+            'Rank/Layers (feedback proxy)': rankLayersValue,
+            'BLER DL': blerDlValue,
+            'RRC State': (currRrc ?? rrcFromEvents),
+            'HO Start/Complete': (getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents),
+            'Cell/PCI Change (inferred)': (getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']) ?? cellPciChangeInferred),
+            'EARFCN/Band Change (inferred)': (getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']) ?? earfcnBandChangeInferred),
+            'RRC State Transition': (getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred),
+            'Bearer / EPS Bearer': (getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']) ?? bearerFromEvents),
+            'TA Jumps': (getAny('TA Jumps') ?? findByTokens(['ta', 'jump']) ?? taJumpInferred)
+        };
+        const stashDataLog = buildPointAnalysisStash(p, {
+            ...pointDetailsMetricsSnapshot,
+            lat: p.lat,
+            lng: p.lng,
+            'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
+            'Cell Name': sName,
+            'Tech': isLTE ? 'LTE' : 'UMTS'
+        });
 
         pushHeader('Neighbors');
         for (let i = 1; i <= 4; i++) {
@@ -9053,18 +9418,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
             '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>' +
             '<button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>' +
+            '<button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>' +
             '</div>' +
 
             '<!-- Hidden data stash for the analyzer -->' +
             '<script type="application/json" id="point-data-stash">' +
-            JSON.stringify({
-                ...(p.properties || p),
-                lat: p.lat,
-                lng: p.lng,
-                'Cell Identifier': sName !== 'Unknown' ? sName : identityLabel,
-                'Cell Name': sName,
-                'Tech': isLTE ? 'LTE' : 'UMTS'
-            }) +
+            JSON.stringify(stashDataLog) +
             '</script>' +
             '</div>' +
             '</div>';
