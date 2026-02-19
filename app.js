@@ -8083,6 +8083,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (Number.isFinite(sv.rsrq)) sEcNo = sv.rsrq;
             if (Number.isFinite(sv.earfcn)) sFreq = sv.earfcn;
             isLTE = true;
+            // Avoid stale serving cache from an earlier resolve pass before LTE serving extraction.
+            delete p._cachedServing;
         }
 
         const isLteTrp = Boolean(isTrpPoint && isLTE);
@@ -8152,17 +8154,23 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         const decodedLteId = (pointLteEci !== null)
             ? { eci: pointLteEci, enb: Math.floor(pointLteEci / 256), cid: pointLteEci % 256 }
             : null;
-        if ((!servingRes || !servingRes.name || servingRes.name === 'Unknown' || !Number.isFinite(Number(servingRes.lat)) || !Number.isFinite(Number(servingRes.lng))) && window.resolveSmartSite) {
+        const forceResolveFromServingRf = Boolean(
+            isLTE &&
+            Number.isFinite(Number(sSC)) &&
+            Number.isFinite(Number(sFreq))
+        );
+        if ((forceResolveFromServingRf || !servingRes || !servingRes.name || servingRes.name === 'Unknown' || !Number.isFinite(Number(servingRes.lat)) || !Number.isFinite(Number(servingRes.lng))) && window.resolveSmartSite) {
             const probe = {
-                ...p,
                 sc: sSC,
                 pci: sSC,
                 freq: sFreq,
                 lac: sLac,
                 lat: p.lat,
-                lng: p.lng
+                lng: p.lng,
+                properties: p.properties
             };
-            if (decodedLteId) {
+            // Only use decoded ECI fallback when we don't have a reliable serving RF pair.
+            if (decodedLteId && !forceResolveFromServingRf) {
                 probe.cellId = decodedLteId.eci;
                 probe.rawEnodebCellId = `${decodedLteId.enb}-${decodedLteId.cid}`;
                 probe.enodebCellId = probe.rawEnodebCellId;
@@ -8175,12 +8183,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 if ((sCid === null || sCid === undefined) && Number.isFinite(Number(resolvedServing.cid))) sCid = resolvedServing.cid;
             }
         }
-        if ((sRnc === null || sRnc === undefined) && decodedLteId) sRnc = decodedLteId.enb;
-        if ((sCid === null || sCid === undefined) && decodedLteId) sCid = decodedLteId.cid;
+        if ((sRnc === null || sRnc === undefined) && decodedLteId && !forceResolveFromServingRf) sRnc = decodedLteId.enb;
+        if ((sCid === null || sCid === undefined) && decodedLteId && !forceResolveFromServingRf) sCid = decodedLteId.cid;
         const servingEnodebCellId = (() => {
             const fromResolver = toCleanIdString(servingRes && (servingRes.rawEnodebCellId || servingRes.id));
             if (fromResolver && /^\d+\s*[-/]\s*\d+$/.test(fromResolver)) return fromResolver.replace(/\s+/g, '');
-            if (decodedLteId) return `${decodedLteId.enb}-${decodedLteId.cid}`;
+            if (decodedLteId && !forceResolveFromServingRf) return `${decodedLteId.enb}-${decodedLteId.cid}`;
             const candidates = [
                 'eNodeB ID-Cell ID',
                 'eNodeB ID - Cell ID',
