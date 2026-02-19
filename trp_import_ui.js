@@ -2,11 +2,16 @@
     function qs(id) { return document.getElementById(id); }
     let trpApiBase = '';
     const TRP_API_BASE_STORAGE_KEY = 'OPTIM_API_BASE_URL';
+    const trpSeriesCache = new Map(); // key: "<runId>::<metricName>" => Promise<series[]>
 
     function normalizeApiBase(raw) {
         const s = String(raw || '').trim();
         if (!s) return '';
-        return s.replace(/\/+$/, '');
+        let cleaned = s.replace(/\/+$/, '');
+        // Guard against common misconfiguration (base accidentally set to endpoint path).
+        cleaned = cleaned.replace(/\/api\/runs$/i, '');
+        cleaned = cleaned.replace(/\/api$/i, '');
+        return cleaned.replace(/\/+$/, '');
     }
 
     function readStoredApiBase() {
@@ -314,6 +319,14 @@
         return null;
     }
 
+    async function ensureApiReadyForUpload() {
+        if (trpApiBase) return;
+        try {
+            const { res, payload } = await fetchJsonWithApiFallback('/api/runs');
+            if (res.ok && payload && payload.status === 'success') return;
+        } catch (_e) {}
+    }
+
     async function fetchJsonWithApiFallback(path, options) {
         const primaryUrl = buildApiUrl(path);
         let res = await fetch(primaryUrl, options);
@@ -531,6 +544,7 @@
     }
 
     async function uploadTrp(file) {
+        await ensureApiReadyForUpload();
         resetUploadProgressState();
         setStatus('Uploading TRP: 0%');
         setUploadProgress(0, '0%');
@@ -1958,6 +1972,11 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     }
 
     async function fetchSeries(runId, name) {
+        const cacheKey = String(runId) + '::' + String(name || '');
+        if (trpSeriesCache.has(cacheKey)) {
+            return trpSeriesCache.get(cacheKey);
+        }
+        const request = (async () => {
         const isNeighborMetric = /^Radio\.Lte\.Neighbor\[\d+\]\./i.test(String(name || ''));
         // Verification trace:
         // click a Neighbors button (e.g., N1 RSRP) and confirm this request is logged
@@ -1972,6 +1991,9 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             console.log('[Neighbors] received samples:', series.length, 'for', name);
         }
         return series;
+        })();
+        trpSeriesCache.set(cacheKey, request);
+        return request;
     }
 
     async function fetchEvents(runId, eventName) {
