@@ -7894,7 +7894,13 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 })();
             const cqi = getNum('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi');
             const dlMcs = getNum('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs');
-            const rank = getNum('Rank/Layers (feedback proxy)', 'Rank', 'Layers', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank');
+            const sanitizeRankForLte = (v) => {
+                const n = Number(v);
+                if (!Number.isFinite(n)) return null;
+                if (n >= 1 && n <= 8) return Number.isInteger(n) ? n : Number(n.toFixed(1));
+                return null;
+            };
+            const rank = sanitizeRankForLte(getNum('Rank/Layers (feedback proxy)', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCell[8].Layers'));
             const blerDl = getNum('BLER DL', 'DL IBLER (%)', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl');
             const modulation = getVal('Modulation (DL/UL)', 'DL Modulation', 'UL Modulation') || '';
             const mimoCa = getVal('MIMO/CA', 'MIMO', 'CA') || '';
@@ -7905,7 +7911,18 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const earfcnChange = getVal('EARFCN/Band Change (inferred)');
             const rrcTransition = getVal('RRC State Transition');
             const bearer = getVal('Bearer / EPS Bearer');
-            const taJumps = getVal('TA Jumps');
+            const normalizeTaJumpText = (v) => {
+                if (!hasVal(v)) return 'N/A';
+                const s = String(v).trim();
+                const m = s.match(/(-?\d+(?:\.\d+)?)\s*->\s*(-?\d+(?:\.\d+)?)/);
+                if (!m) return s;
+                const a = Number(m[1]);
+                const b = Number(m[2]);
+                if (!Number.isFinite(a) || !Number.isFinite(b)) return 'N/A';
+                if (a < 0 || a > 2000 || b < 0 || b > 2000) return 'N/A';
+                return `${a} -> ${b}`;
+            };
+            const taJumps = normalizeTaJumpText(getVal('TA Jumps'));
 
             const tpCfg = { degraded: 3000, severe: 1500, critical: 700 };
             let tpStatus = 'No throughput sample';
@@ -9153,14 +9170,45 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         const ulMcsValue = getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs', 'Radio.Lte.ServingCellTotal.UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']);
         const dlMod = getByTrpLabel('Modulation (DL/UL)') ?? getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation', 'Radio.Lte.ServingCellTotal.DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
         const ulMod = getAny('UL Modulation', 'Radio.Lte.ServingCell[8].UlModulation', 'Radio.Lte.ServingCellTotal.UlModulation') ?? findByTokens(['ul', 'modulation']) ?? findByTokens(['pusch', 'modulation']);
-        const timingAdvanceValue = getAny('Timing Advance', 'TA', 'Radio.Lte.ServingCell[8].TimingAdvance', 'Radio.Lte.ServingCellTotal.TimingAdvance') ?? findByTokens(['timing', 'advance']) ?? findByTokens(['timingadvance']) ?? findByTokens(['ta']);
+        const normalizeTa = (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            if (n < 0 || n > 2000) return null;
+            return Number.isInteger(n) ? n : Number(n.toFixed(1));
+        };
+        const timingAdvanceRaw = getAny('Timing Advance', 'Radio.Lte.ServingCell[8].TimingAdvance', 'Radio.Lte.ServingCellTotal.TimingAdvance', 'TA') ??
+            findByTokens(['timing', 'advance']) ??
+            findByTokens(['timingadvance']);
+        const timingAdvanceValue = normalizeTa(timingAdvanceRaw);
         const pmiValue = getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi', 'Radio.Lte.ServingCellTotal.Pmi') ?? findByTokens(['pmi']);
-        const rankLayersValue = getByTrpLabel('Rank/Layers (feedback proxy)') ??
-            getAny('Rank/Layers (feedback proxy)', 'Rank', 'Layers', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCell[8].Layers') ??
+        const rankLayersRaw = getByTrpLabel('Rank/Layers (feedback proxy)') ??
+            getAny(
+                'Rank/Layers (feedback proxy)',
+                'Rank Indicator',
+                'RI',
+                'Radio.Lte.ServingCell[8].Rank',
+                'Radio.Lte.ServingCell[8].RankIndicator',
+                'Radio.Lte.ServingCell[8].Layers',
+                'Radio.Lte.ServingCellTotal.Rank',
+                'Radio.Lte.ServingCellTotal.RankIndicator',
+                'Radio.Lte.ServingCellTotal.Layers'
+            ) ??
             findByTokens(['rank', 'indicator']) ??
-            findByTokens(['rank']) ??
-            findByTokens(['layer']) ??
-            findByTokens(['ri']);
+            findByTokens(['rankindicator']);
+        const normalizeRankLayers = (v) => {
+            if (v === undefined || v === null) return null;
+            const n = Number(v);
+            if (Number.isFinite(n)) {
+                if (n >= 1 && n <= 8) return Number.isInteger(n) ? n : Number(n.toFixed(1));
+                return null;
+            }
+            const txt = String(v).trim();
+            if (!txt) return null;
+            const m = txt.match(/(?:rank|ri|layer)\s*[:=]?\s*([1-8])/i) || txt.match(/^([1-8])(?:x[1-8])?$/i);
+            if (m) return Number(m[1]);
+            return null;
+        };
+        const rankLayersValue = normalizeRankLayers(rankLayersRaw);
         const blerDlValue = getByTrpLabel('BLER DL') ??
             getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl', 'DL IBLER (%)') ??
             findByTokens(['bler', 'dl']) ??
@@ -9201,6 +9249,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             return undefined;
         };
+        const getPointTimingAdvance = (pt) => {
+            if (!pt) return null;
+            const direct = getPointValCI(pt, 'Timing Advance') ??
+                getPointValCI(pt, 'Radio.Lte.ServingCell[8].TimingAdvance') ??
+                getPointValCI(pt, 'Radio.Lte.ServingCellTotal.TimingAdvance') ??
+                getPointValCI(pt, 'TA');
+            const directTa = normalizeTa(direct);
+            if (directTa !== null) return directTa;
+            const fuzzy = getPointByTokens(pt, ['timing', 'advance']) ?? getPointByTokens(pt, ['timingadvance']);
+            return normalizeTa(fuzzy);
+        };
         const pointIndexInLog = (() => {
             if (!activeLog || !Array.isArray(activeLog.points) || !activeLog.points.length) return -1;
             const direct = activeLog.points.indexOf(p);
@@ -9214,8 +9273,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         const currEarfcn = parseNum(sFreq);
         const prevRrc = getPointValCI(prevPoint, 'RRC State') ?? getPointByTokens(prevPoint, ['rrc', 'state']);
         const currRrc = getAny('RRC State', 'rrcState', 'Radio.Lte.ServingCell[8].RrcState') ?? findByTokens(['rrc', 'state']);
-        const prevTa = parseNum(getPointValCI(prevPoint, 'Timing Advance') ?? getPointValCI(prevPoint, 'TA') ?? getPointByTokens(prevPoint, ['timing', 'advance']) ?? getPointByTokens(prevPoint, ['ta']));
-        const currTa = parseNum(timingAdvanceValue);
+        const prevTa = getPointTimingAdvance(prevPoint);
+        const currTa = normalizeTa(timingAdvanceValue);
         const nearEventNames = (() => {
             if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return [];
             const target = pointDetailsTsMs(p.time);
@@ -9256,7 +9315,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             : (rrcTransitionFromEvents || (hasValue(currRrc) ? 'No' : undefined));
         const taJumpInferred = (() => {
             if (Number.isFinite(prevTa) && Number.isFinite(currTa)) {
-                if (Math.abs(currTa - prevTa) >= 2) return `${prevTa} -> ${currTa}`;
+                if (Math.abs(currTa - prevTa) >= 1) return `${prevTa} -> ${currTa}`;
                 return 'No';
             }
             return pickNearEventSummary(/\bta\b|timing\s*advance/i, 1);
