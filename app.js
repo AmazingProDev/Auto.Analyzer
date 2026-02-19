@@ -8178,7 +8178,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const resolvedServing = window.resolveSmartSite(probe);
             if (resolvedServing && (resolvedServing.id || resolvedServing.name || (resolvedServing.lat && resolvedServing.lng))) {
                 servingRes = resolvedServing;
-                if (sName === 'Unknown' && resolvedServing.name) sName = resolvedServing.name;
+                if (resolvedServing.name) sName = resolvedServing.name;
                 if ((sRnc === null || sRnc === undefined) && Number.isFinite(Number(resolvedServing.rnc))) sRnc = resolvedServing.rnc;
                 if ((sCid === null || sCid === undefined) && Number.isFinite(Number(resolvedServing.cid))) sCid = resolvedServing.cid;
             }
