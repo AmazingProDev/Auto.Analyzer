@@ -8445,139 +8445,125 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         });
 
         // ----------------------------------------------------
-        // EXTRACT OTHER METRICS
+        // OTHER METRICS (fixed ordered list requested by user)
         // ----------------------------------------------------
+        const normalizeMissing = (v) => {
+            if (v === undefined || v === null) return 'N/A';
+            if (typeof v === 'string') {
+                const s = v.trim();
+                if (!s || s === '-' || s.toLowerCase() === 'nan' || s.toLowerCase() === 'unknown') return 'N/A';
+                return s;
+            }
+            if (typeof v === 'number') {
+                if (!Number.isFinite(v)) return 'N/A';
+                return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(1)));
+            }
+            return String(v);
+        };
+        const getFromObjCI = (obj, key) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const wanted = String(key || '').toLowerCase();
+            const match = Object.keys(obj).find(k => String(k || '').toLowerCase() === wanted);
+            return match ? obj[match] : undefined;
+        };
+        const getAny = (...keys) => {
+            for (const k of keys) {
+                const v1 = getValCI(k);
+                if (v1 !== undefined && v1 !== null && String(v1).trim() !== '') return v1;
+                const v2 = getFromObjCI(p?.parsed?.serving, k);
+                if (v2 !== undefined && v2 !== null && String(v2).trim() !== '') return v2;
+            }
+            return undefined;
+        };
+        const findByTokens = (tokens) => {
+            const t = (tokens || []).map(x => String(x || '').toLowerCase());
+            const sources = [p, p?.properties, p?.parsed?.serving];
+            for (const src of sources) {
+                if (!src || typeof src !== 'object') continue;
+                for (const [k, v] of Object.entries(src)) {
+                    if (v === undefined || v === null || typeof v === 'object') continue;
+                    const lk = String(k || '').toLowerCase();
+                    const ok = t.every(tok => lk.includes(tok));
+                    if (ok) return v;
+                }
+            }
+            return undefined;
+        };
+        const enbOnly = (() => {
+            const txt = String(servingEnodebCellId || '').trim();
+            if (!txt) return undefined;
+            const m = txt.match(/^(\d+)\s*[-/]\s*(\d+)$/);
+            return m ? m[1] : undefined;
+        })();
+        const metricRows = [];
+        const pushMetric = (label, value) => metricRows.push({ label, value: normalizeMissing(value), header: false });
+        const pushHeader = (label) => metricRows.push({ label, value: '', header: true });
+
+        pushMetric('Serving cell name', sName);
+        pushMetric('Application throughput DL', getAny('Application throughput DL', 'Application Throughput DL', 'App Throughput DL') ?? findByTokens(['application', 'throughput', 'dl']));
+        pushMetric('Cell ID', getAny('Cell ID', 'cell id') ?? p.cellId);
+        pushMetric('Cellid', getAny('Cellid', 'cellid') ?? p.cellId);
+        pushMetric('DL throughput', getAny('DL throughput', 'PDSCH Throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput') ?? findByTokens(['throughput', 'dl']));
+        pushMetric('Downlink EARFCN', sFreq);
+        pushMetric('eNodeB ID', enbOnly);
+        pushMetric('Physical cell ID', sSC);
+        pushMetric('RSRP', sRSCP);
+        pushMetric('RSRQ', sEcNo);
+        pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
+        pushMetric('Tracking area code', getAny('Tracking area code', 'TAC') ?? findByTokens(['tracking', 'area', 'code']));
+        pushMetric('UL throughput', getAny('UL throughput', 'PUSCH Throughput') ?? findByTokens(['throughput', 'ul']));
+        pushMetric('CQI (DL)', getAny('CQI (DL)', 'CQI', 'Downlink CQI') ?? findByTokens(['cqi']));
+        pushMetric('DL MCS', getAny('DL MCS') ?? findByTokens(['dl', 'mcs']));
+        pushMetric('UL MCS', getAny('UL MCS') ?? findByTokens(['ul', 'mcs']));
+        const dlMod = getAny('DL Modulation') ?? findByTokens(['dl', 'modulation']);
+        const ulMod = getAny('UL Modulation') ?? findByTokens(['ul', 'modulation']);
+        pushMetric('Modulation (DL/UL)', ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'));
+        pushMetric('Timing Advance', getAny('Timing Advance', 'TA') ?? findByTokens(['timing', 'advance']));
+        pushMetric('MIMO/CA', getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation']));
+        pushMetric('PMI', getAny('PMI') ?? findByTokens(['pmi']));
+        pushMetric('Rank/Layers (feedback proxy)', getAny('Rank', 'Layers', 'Rank Indicator') ?? findByTokens(['rank']) ?? findByTokens(['layer']));
+
+        pushHeader('RELIABILITY');
+        pushMetric('BLER DL', getAny('BLER DL', 'blerDl', 'DL BLER') ?? findByTokens(['bler', 'dl']));
+
+        pushHeader('EVENTS');
+        pushMetric('RRC State', getAny('RRC State', 'rrcState') ?? findByTokens(['rrc', 'state']));
+        pushMetric('HO Start/Complete', getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']));
+        pushMetric('Cell/PCI Change (inferred)', getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']));
+        pushMetric('EARFCN/Band Change (inferred)', getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']));
+        pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']));
+        pushMetric('Bearer / EPS Bearer', getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']));
+        pushMetric('TA Jumps', getAny('TA Jumps') ?? findByTokens(['ta', 'jump']));
+
+        pushHeader('Neighbors');
+        for (let i = 1; i <= 4; i++) {
+            const n = neighbors[i - 1] || {};
+            pushMetric(`N${i} cell name`, n.name || 'N/A');
+            pushMetric(`N${i} RSRP`, n.rscp);
+            pushMetric(`N${i} RSRQ`, n.ecno);
+            pushMetric(`N${i} SINR`, n.sinr ?? 'N/A');
+            pushMetric(`N${i} Freq`, n.freq);
+        }
 
         let extraMetricsHtml = '';
-        const normalizeMetricKey = (k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        const excludedKeys = [
-            'lat', 'lng', 'time', 'id', 'geometry', 'properties', 'parsed',
-            'type', 'event', 'message',
-            // Main table serving columns
-            'sc', 'pci', 'rscp', 'rsrp', 'level', 'ecno', 'rsrq', 'qual', 'freq',
-            'servingrscp', 'servingsc', 'servingecno', 'servingfreq',
-            // Identity already shown in header/row
-            'sitename', 'cellname', 'name'
-        ];
-        const excludedKeySet = new Set(excludedKeys.map(normalizeMetricKey));
-        const isNeighborKey = (k) => {
-            const nk = normalizeMetricKey(k);
-            return /^([namd]\d+)(sc|rscp|ecno|freq|rsrp|rsrq)$/.test(nk) ||
-                /^n[123](sc|rscp|ecno|freq|rsrp|rsrq)$/.test(nk);
-        };
-        const isSkippableValue = (v) => {
-            if (v === undefined || v === null || v === '') return true;
-            if (typeof v === 'number' && Number.isNaN(v)) return true;
-            if (typeof v === 'string' && v.trim().toLowerCase() === 'nan') return true;
-            return false;
-        };
-        const prettyLabel = (key) => String(key || '')
-            .replace(/_/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .replace(/\b\w/g, c => c.toUpperCase());
-        const metricsMap = new Map();
-        const addMetric = (label, value) => {
-            if (!label || isSkippableValue(value)) return;
-            const nk = normalizeMetricKey(label);
-            if (!nk || excludedKeySet.has(nk) || isNeighborKey(nk)) return;
-            // Keep first non-empty value to preserve properties naming/preference.
-            if (metricsMap.has(nk)) return;
-            metricsMap.set(nk, { label, value });
-        };
-        const collectFlat = (obj, labelTransform) => {
-            if (!obj || typeof obj !== 'object') return;
-            Object.entries(obj).forEach(([k, v]) => {
-                if (typeof v === 'object') return;
-                const label = typeof labelTransform === 'function' ? labelTransform(k) : k;
-                addMetric(label, v);
-            });
-        };
-
-        // Priority order: explicit properties first, then top-level fields.
-        collectFlat(p.properties || null, (k) => k);
-        collectFlat(p, (k) => prettyLabel(k));
-
-        // Include parsed serving metrics and UMTS radio KPI metrics when present.
-        if (p?.parsed?.serving && typeof p.parsed.serving === 'object') {
-            Object.entries(p.parsed.serving).forEach(([k, v]) => {
-                if (typeof v === 'object') return;
-                addMetric('Serving ' + prettyLabel(k), v);
-            });
-        }
-        const kpiCandidates = ['bler', 'blerDl', 'blerUl', 'fer', 'ferDl', 'ferUl', 'tpc', 'tx', 'txPower', 'ueTxPower', 'nodebTxPower', 'rssi', 'activeSetSize', 'rrcState', 'rnc', 'cid', 'lac', 'rncCid'];
-        kpiCandidates.forEach((k) => {
-            const vTop = p?.[k];
-            const vProp = p?.properties?.[k] ?? p?.properties?.[prettyLabel(k)];
-            const v = isSkippableValue(vProp) ? vTop : vProp;
-            if (!isSkippableValue(v)) addMetric(prettyLabel(k), v);
-        });
-
-        // Sort to prioritize BLER/FER/TX/RRC fields then alphabetical.
-        const priority = (label) => {
-            const s = normalizeMetricKey(label);
-            if (s.includes('bler')) return 0;
-            if (s.includes('fer')) return 1;
-            if (s.includes('tx') || s.includes('tpc') || s.includes('rssi')) return 2;
-            if (s.includes('rrc') || s.includes('activeset')) return 3;
-            return 10;
-        };
-        const metrics = Array.from(metricsMap.values())
-            .sort((a, b) => {
-                const pa = priority(a.label);
-                const pb = priority(b.label);
-                if (pa !== pb) return pa - pb;
-                return a.label.localeCompare(b.label);
-            });
-
-        metrics.forEach(({ label, value }) => {
-            let val = value;
-            if (typeof value === 'number' && !Number.isInteger(value)) val = value.toFixed(3);
+        metricRows.forEach((row) => {
+            if (row.header) {
+                extraMetricsHtml += '<div style="border-bottom:1px solid #334155; padding:6px 0 4px 0; margin-top:4px; color:#93c5fd; font-size:11px; font-weight:700;">' +
+                    row.label +
+                    '</div>';
+                return;
+            }
             extraMetricsHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">' +
-                '<span style="color:#aaa; margin-right: 10px;">' + label + '</span>' +
-                '<span style="color:#fff; font-weight:bold; text-align: right;">' + val + '</span>' +
+                '<span style="color:#aaa; margin-right: 10px;">' + row.label + '</span>' +
+                '<span style="color:#fff; font-weight:bold; text-align: right;">' + row.value + '</span>' +
                 '</div>';
         });
-
-        let extraMetricsSection = '';
-        if (extraMetricsHtml) {
-            extraMetricsSection = '<div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">' +
-                '<div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>' +
-                '<div style="max-height: 200px; overflow-y: auto;">' +
-                extraMetricsHtml +
-                '</div>' +
-                '</div>';
-        }
-
-        let availableCatalogSection = '';
-        if (activeLog && activeLog.trpRunId) {
-            const metricLabels = Array.from(new Set((Array.isArray(activeLog.customMetrics) ? activeLog.customMetrics : [])
-                .map(m => (activeLog.trpMetricLabels && activeLog.trpMetricLabels[m]) ? activeLog.trpMetricLabels[m] : String(m || ''))
-                .filter(Boolean)))
-                .sort((a, b) => String(a).localeCompare(String(b)));
-
-            const eventLabels = (() => {
-                const fromCatalog = Array.isArray(activeLog.trpEventTypes)
-                    ? activeLog.trpEventTypes.map(e => e && e.event_name).filter(Boolean)
-                    : [];
-                const fromEvents = Array.isArray(activeLog.events)
-                    ? activeLog.events.map(e => e && e.event_name).filter(Boolean)
-                    : [];
-                return Array.from(new Set(fromCatalog.concat(fromEvents))).sort((a, b) => String(a).localeCompare(String(b)));
-            })();
-
-            const listHtml = (arr) => arr.length
-                ? arr.map(x => '<div style="padding:2px 0;border-bottom:1px dashed #374151;color:#cbd5e1;">' + x + '</div>').join('')
-                : '<div style="color:#9ca3af;">None</div>';
-
-            availableCatalogSection = '<div style="margin-top:10px; border-top:1px solid #374151; padding-top:10px;">' +
-                '<div style="font-size:12px; font-weight:bold; color:#93c5fd; margin-bottom:6px;">Available in This TRP</div>' +
-                '<div style="font-size:11px; color:#cbd5e1; margin-bottom:4px;"><b>KPIs / Metrics (' + metricLabels.length + ')</b></div>' +
-                '<div style="max-height:120px; overflow-y:auto; margin-bottom:8px;">' + listHtml(metricLabels) + '</div>' +
-                '<div style="font-size:11px; color:#cbd5e1; margin-bottom:4px;"><b>Events (' + eventLabels.length + ')</b></div>' +
-                '<div style="max-height:120px; overflow-y:auto;">' + listHtml(eventLabels) + '</div>' +
-                '</div>';
-        }
+        const extraMetricsSection = '<div style="margin-top:15px; border-top:1px solid #555; padding-top:10px;">' +
+            '<div style="font-size:12px; font-weight:bold; color:#ccc; margin-bottom:5px;">Other Metrics</div>' +
+            '<div style="max-height: 260px; overflow-y: auto;">' +
+            extraMetricsHtml +
+            '</div>' +
+            '</div>';
 
         // --- NEW: Extract eNodeB Specific Fields ---
         let enbNameDisplay = '';
@@ -8627,7 +8613,6 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '</table>' +
 
             extraMetricsSection +
-            availableCatalogSection +
 
             '<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
             '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
