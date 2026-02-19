@@ -7798,6 +7798,179 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
 
     
+    function pointDetailsHasUsableValue(v) {
+        if (v === undefined || v === null) return false;
+        if (typeof v === 'number') return Number.isFinite(v);
+        if (typeof v === 'string') {
+            const s = v.trim().toLowerCase();
+            if (!s || s === '-' || s === 'n/a' || s === 'nan' || s === 'unknown') return false;
+        }
+        return true;
+    }
+
+    function pointDetailsTsMs(v) {
+        const t = new Date(v || '').getTime();
+        return Number.isFinite(t) ? t : null;
+    }
+
+    function pointDetailsNearestSeriesValue(series, targetMs, toleranceMs = 2200) {
+        if (!Array.isArray(series) || !series.length || !Number.isFinite(targetMs)) return undefined;
+
+        if (!Array.isArray(series.__pointDetailsIndex)) {
+            const idx = [];
+            series.forEach((row) => {
+                const t = pointDetailsTsMs(row && row.time);
+                if (!Number.isFinite(t)) return;
+                const num = Number(row && row.value_num);
+                const hasNum = Number.isFinite(num);
+                const text = row && (row.value_text ?? row.value_str ?? row.value);
+                const val = hasNum ? num : (text !== undefined ? text : undefined);
+                if (!pointDetailsHasUsableValue(val)) return;
+                idx.push({ t, v: val });
+            });
+            idx.sort((a, b) => a.t - b.t);
+            series.__pointDetailsIndex = idx;
+        }
+
+        const idx = series.__pointDetailsIndex;
+        if (!Array.isArray(idx) || !idx.length) return undefined;
+
+        let lo = 0;
+        let hi = idx.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (idx[mid].t < targetMs) lo = mid + 1;
+            else hi = mid;
+        }
+        let best = null;
+        if (lo < idx.length) best = idx[lo];
+        if (lo > 0) {
+            const prev = idx[lo - 1];
+            if (!best || Math.abs(prev.t - targetMs) <= Math.abs(best.t - targetMs)) best = prev;
+        }
+        if (!best || Math.abs(best.t - targetMs) > toleranceMs) return undefined;
+        if (typeof best.v === 'number' && Number.isFinite(best.v) && Math.abs(best.v - Math.round(best.v)) < 1e-6) {
+            return Math.round(best.v);
+        }
+        return best.v;
+    }
+
+    function getPointDetailsHydrationMetrics(log) {
+        if (!log || !Array.isArray(log.trpAllMetricNames)) return [];
+        if (Array.isArray(log.__pointDetailsHydrationMetrics)) return log.__pointDetailsHydrationMetrics;
+
+        const out = new Set();
+        const all = (log.trpAllMetricNames || []).map(n => String(n || '')).filter(Boolean);
+        const labels = (log.trpMetricLabels && typeof log.trpMetricLabels === 'object') ? log.trpMetricLabels : {};
+        const wantedLabels = new Set([
+            'Application throughput DL',
+            'DL throughput',
+            'UL throughput',
+            'Cell ID',
+            'Cellid',
+            'Tracking area code',
+            'CQI (DL)',
+            'DL MCS',
+            'UL MCS',
+            'PMI',
+            'BLER DL',
+            'RRC State',
+            'Timing Advance',
+            'SINR',
+            'RSRP',
+            'RSRQ',
+            'Physical cell ID',
+            'Downlink EARFCN'
+        ]);
+
+        Object.entries(labels).forEach(([raw, friendly]) => {
+            if (!wantedLabels.has(String(friendly || ''))) return;
+            if (String(raw || '').startsWith('__')) return;
+            out.add(String(raw));
+        });
+
+        const scoreMetricName = (name) => {
+            const low = String(name || '').toLowerCase();
+            let s = 0;
+            if (low.includes('radio.lte.servingcell')) s += 70;
+            if (low.includes('servingcelltotal')) s += 60;
+            if (low.includes('data.http')) s += 40;
+            if (low.includes('neighbor')) s -= 120;
+            if (low.includes('lock') || low.includes('override') || low.includes('controlfunction')) s -= 60;
+            return s;
+        };
+        const addBest = (matcher) => {
+            const rows = all.filter((n) => matcher(String(n || '').toLowerCase()));
+            if (!rows.length) return;
+            rows.sort((a, b) => scoreMetricName(b) - scoreMetricName(a));
+            out.add(rows[0]);
+        };
+
+        addBest((n) => /data\.http\..*(download|downlink).*(throughput)/.test(n) || /(download|downlink).*(throughput)/.test(n));
+        addBest((n) => /radio\.lte\.servingcell.*pdsch.*throughput/.test(n) || /(pdsch.*throughput|throughput.*(dl|downlink))/.test(n));
+        addBest((n) => /radio\.lte\.servingcell.*pusch.*throughput/.test(n) || /(pusch.*throughput|throughput.*(ul|uplink|upload))/.test(n));
+        addBest((n) => /(cellidentity.*complete|cellidentity|ecgi)/.test(n));
+        addBest((n) => /(\.cell\.id| cell id|\.cellid$)/.test(n) && !n.includes('cellidentity'));
+        addBest((n) => /(tracking.*area.*code|\.tac$|\btac\b)/.test(n));
+        addBest((n) => /\bcqi\b/.test(n));
+        addBest((n) => /(dl.*mcs|pdsch.*mcs)/.test(n));
+        addBest((n) => /(ul.*mcs|pusch.*mcs)/.test(n));
+        addBest((n) => /\bpmi\b/.test(n));
+        addBest((n) => /(bler.*dl|dl.*bler|ibler.*dl)/.test(n));
+        addBest((n) => /(rrc.*state)/.test(n));
+        addBest((n) => /(timing.*advance|timingadvance)/.test(n));
+        addBest((n) => /(rs-?sinr|rssinr|\bsinr\b)/.test(n));
+        addBest((n) => /\brsrp\b/.test(n));
+        addBest((n) => /\brsrq\b/.test(n));
+        addBest((n) => /(physical.*cell.*id|\.pci$|\bpci\b)/.test(n));
+        addBest((n) => /\bearfcn\b/.test(n));
+
+        log.__pointDetailsHydrationMetrics = Array.from(out);
+        return log.__pointDetailsHydrationMetrics;
+    }
+
+    async function hydratePointDetailsTrpKpis(point, log) {
+        try {
+            if (!point || !log || !log.trpRunId || typeof window.trpFetchSeries !== 'function') return false;
+            const t = Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : pointDetailsTsMs(point.time);
+            if (!Number.isFinite(t)) return false;
+
+            const metrics = getPointDetailsHydrationMetrics(log);
+            if (!metrics.length) return false;
+
+            const labels = (log.trpMetricLabels && typeof log.trpMetricLabels === 'object') ? log.trpMetricLabels : {};
+            const missing = metrics.filter((m) => !pointDetailsHasUsableValue(point[m]));
+            if (!missing.length) return false;
+
+            const pairs = await Promise.all(missing.map(async (m) => {
+                try {
+                    const series = await window.trpFetchSeries(log.trpRunId, m);
+                    const val = pointDetailsNearestSeriesValue(series, t, 2200);
+                    return { metric: m, value: val };
+                } catch (_e) {
+                    return { metric: m, value: undefined };
+                }
+            }));
+
+            let changed = false;
+            pairs.forEach(({ metric, value }) => {
+                if (!pointDetailsHasUsableValue(value)) return;
+                if (!pointDetailsHasUsableValue(point[metric]) || String(point[metric]) !== String(value)) {
+                    point[metric] = value;
+                    changed = true;
+                }
+                const friendly = labels[metric];
+                if (friendly && !pointDetailsHasUsableValue(point[friendly])) {
+                    point[friendly] = value;
+                    changed = true;
+                }
+            });
+            return changed;
+        } catch (_e) {
+            return false;
+        }
+    }
+
     // Global function to update the Floating Info Panel (Single Point)
     window.updateFloatingInfoPanel = (p, logColor, contextLog) => {
         try {
@@ -7837,17 +8010,37 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const mode = window.pointDetailsMode || 'log'; // Default to log if undefined
             const generator = mode === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
 
-            // 4. Generate
-            // Note: generatePointInfoHTMLLog takes (p, logColor)
-            // Note: generatePointInfoHTML takes (p, logColor) - now updated to use it
-            const { html, connectionTargets } = generator(p, logColor);
+            const renderNow = () => {
+                // Note: generatePointInfoHTMLLog takes (p, logColor)
+                // Note: generatePointInfoHTML takes (p, logColor)
+                const { html, connectionTargets } = generator(p, logColor);
+                content.innerHTML = html;
+                if (window.mapRenderer) {
+                    const startPt = { lat: p.lat, lng: p.lng };
+                    window.mapRenderer.drawConnections(startPt, connectionTargets);
+                }
+            };
 
-            content.innerHTML = html;
+            // 4. Immediate render from currently available values
+            renderNow();
 
-            // Update Connections (always for point details, independent from spider mode)
-            if (window.mapRenderer) {
-                let startPt = { lat: p.lat, lng: p.lng };
-                window.mapRenderer.drawConnections(startPt, connectionTargets);
+            // 5. TRP on-demand KPI hydration (fixes N/A until KPI layer is opened)
+            const renderToken = String(Date.now()) + '_' + Math.random().toString(36).slice(2);
+            panel.dataset.pointDetailsRenderToken = renderToken;
+            const activeLog = window.__activePointLog;
+            if (activeLog && activeLog.trpRunId) {
+                hydratePointDetailsTrpKpis(p, activeLog).then((changed) => {
+                    if (!changed) return;
+                    if (panel.dataset.pointDetailsRenderToken !== renderToken) return;
+                    const modeAfter = window.pointDetailsMode || 'log';
+                    const generatorAfter = modeAfter === 'log' ? generatePointInfoHTMLLog : generatePointInfoHTML;
+                    const { html, connectionTargets } = generatorAfter(p, logColor);
+                    content.innerHTML = html;
+                    if (window.mapRenderer) {
+                        const startPt = { lat: p.lat, lng: p.lng };
+                        window.mapRenderer.drawConnections(startPt, connectionTargets);
+                    }
+                }).catch((e) => console.warn('[PointDetails] KPI hydration failed:', e));
             }
         } catch (e) {
             console.error("Error updating Info Panel:", e);
