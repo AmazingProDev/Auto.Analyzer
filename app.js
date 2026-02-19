@@ -8466,12 +8466,56 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const match = Object.keys(obj).find(k => String(k || '').toLowerCase() === wanted);
             return match ? obj[match] : undefined;
         };
+        const hasValue = (v) => {
+            if (v === undefined || v === null) return false;
+            if (typeof v === 'string' && v.trim() === '') return false;
+            return true;
+        };
+        const metricSources = [p, p?.properties, p?.parsed, p?.parsed?.serving];
+        const normalizedKey = (k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const findByKeyContains = (...patterns) => {
+            const wanted = (patterns || []).map(normalizedKey).filter(Boolean);
+            if (!wanted.length) return undefined;
+            for (const src of metricSources) {
+                if (!src || typeof src !== 'object') continue;
+                for (const [k, v] of Object.entries(src)) {
+                    if (v === undefined || v === null || typeof v === 'object') continue;
+                    const nk = normalizedKey(k);
+                    if (wanted.every(w => nk.includes(w))) return v;
+                }
+            }
+            return undefined;
+        };
+        const getFromRunInfo = (...keys) => {
+            const info = (activeLog && activeLog.trpInfo && typeof activeLog.trpInfo === 'object') ? activeLog.trpInfo : null;
+            if (!info) return undefined;
+            for (const k of keys) {
+                const val = getFromObjCI(info, k);
+                if (hasValue(val)) return val;
+            }
+            return undefined;
+        };
+        const getByTrpLabel = (...labels) => {
+            const labelMap = (activeLog && activeLog.trpMetricLabels && typeof activeLog.trpMetricLabels === 'object') ? activeLog.trpMetricLabels : null;
+            if (!labelMap) return undefined;
+            const wanted = (labels || []).map(normalizedKey).filter(Boolean);
+            if (!wanted.length) return undefined;
+            for (const [rawName, friendly] of Object.entries(labelMap)) {
+                const fr = normalizedKey(friendly);
+                if (!wanted.includes(fr)) continue;
+                const rawVal = getAny(rawName);
+                if (hasValue(rawVal)) return rawVal;
+            }
+            return undefined;
+        };
         const getAny = (...keys) => {
             for (const k of keys) {
                 const v1 = getValCI(k);
                 if (v1 !== undefined && v1 !== null && String(v1).trim() !== '') return v1;
                 const v2 = getFromObjCI(p?.parsed?.serving, k);
                 if (v2 !== undefined && v2 !== null && String(v2).trim() !== '') return v2;
+                const v3 = getFromObjCI(p?.parsed, k);
+                if (v3 !== undefined && v3 !== null && String(v3).trim() !== '') return v3;
             }
             return undefined;
         };
@@ -8495,36 +8539,112 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const m = txt.match(/^(\d+)\s*[-/]\s*(\d+)$/);
             return m ? m[1] : undefined;
         })();
+        const cellOnly = (() => {
+            const txt = String(servingEnodebCellId || '').trim();
+            if (!txt) return undefined;
+            const m = txt.match(/^(\d+)\s*[-/]\s*(\d+)$/);
+            return m ? m[2] : undefined;
+        })();
         const metricRows = [];
         const pushMetric = (label, value) => metricRows.push({ label, value: normalizeMissing(value), header: false });
         const pushHeader = (label) => metricRows.push({ label, value: '', header: true });
 
+        const appThroughputDl = getByTrpLabel('Application throughput DL') ??
+            getAny(
+                'Application throughput DL',
+                'Application Throughput DL',
+                'App Throughput DL',
+                'Data.Http.Download.Throughput',
+                'Data.Http.Downlink.Throughput'
+            ) ??
+            findByTokens(['application', 'throughput', 'dl']) ??
+            findByTokens(['http', 'download', 'throughput']) ??
+            findByTokens(['http', 'downlink', 'throughput']);
+        const cellIdValue = getByTrpLabel('Cell ID') ??
+            getAny(
+                'Cell ID',
+                'cell id',
+                '__derived_cell_id',
+                '__info_cell_id',
+                'Radio.Lte.ServingCell[8].CellId'
+            ) ??
+            findByKeyContains('cell', 'id') ??
+            getFromRunInfo('cell_id') ??
+            cellOnly ??
+            p.cellId;
+        const cellidValue = getByTrpLabel('Cellid') ??
+            getAny(
+                'Cellid',
+                'cellid',
+                '__info_cellid',
+                'Radio.Lte.ServingCell[8].CellIdentity.Complete',
+                'Radio.Lte.ServingCell[8].CellIdentity',
+                'Radio.Lte.ServingCell[8].Ecgi'
+            ) ??
+            findByKeyContains('cellidentity', 'complete') ??
+            findByKeyContains('cellid') ??
+            getFromRunInfo('cellid') ??
+            p.cellId;
+        const dlThroughput = getByTrpLabel('DL throughput') ??
+            getAny(
+                'DL throughput',
+                'PDSCH Throughput',
+                'Radio.Lte.ServingCell[8].Pdsch.Throughput',
+                'Radio.Lte.ServingCellTotal.Pdsch.Throughput'
+            ) ??
+            findByTokens(['pdsch', 'throughput']) ??
+            findByTokens(['throughput', 'dl']);
+        const tacValue = getByTrpLabel('Tracking area code') ??
+            getAny(
+                'Tracking area code',
+                'TAC',
+                '__info_tac',
+                'Radio.Lte.ServingCell[8].TrackingAreaCode',
+                'Radio.Lte.ServingCell[8].Tac'
+            ) ??
+            findByTokens(['tracking', 'area', 'code']) ??
+            findByTokens(['tac']) ??
+            getFromRunInfo('tac');
+        const ulThroughput = getByTrpLabel('UL throughput') ??
+            getAny(
+                'UL throughput',
+                'PUSCH Throughput',
+                'Radio.Lte.ServingCell[8].Pusch.Throughput',
+                'Radio.Lte.ServingCellTotal.Pusch.Throughput',
+                'Data.Http.Upload.Throughput',
+                'Data.Http.Uplink.Throughput'
+            ) ??
+            findByTokens(['pusch', 'throughput']) ??
+            findByTokens(['http', 'upload', 'throughput']) ??
+            findByTokens(['http', 'uplink', 'throughput']) ??
+            findByTokens(['throughput', 'ul']);
+
         pushMetric('Serving cell name', sName);
-        pushMetric('Application throughput DL', getAny('Application throughput DL', 'Application Throughput DL', 'App Throughput DL') ?? findByTokens(['application', 'throughput', 'dl']));
-        pushMetric('Cell ID', getAny('Cell ID', 'cell id') ?? p.cellId);
-        pushMetric('Cellid', getAny('Cellid', 'cellid') ?? p.cellId);
-        pushMetric('DL throughput', getAny('DL throughput', 'PDSCH Throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput') ?? findByTokens(['throughput', 'dl']));
+        pushMetric('Application throughput DL', appThroughputDl);
+        pushMetric('Cell ID', cellIdValue);
+        pushMetric('Cellid', cellidValue);
+        pushMetric('DL throughput', dlThroughput);
         pushMetric('Downlink EARFCN', sFreq);
         pushMetric('eNodeB ID', enbOnly);
         pushMetric('Physical cell ID', sSC);
         pushMetric('RSRP', sRSCP);
         pushMetric('RSRQ', sEcNo);
         pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
-        pushMetric('Tracking area code', getAny('Tracking area code', 'TAC') ?? findByTokens(['tracking', 'area', 'code']));
-        pushMetric('UL throughput', getAny('UL throughput', 'PUSCH Throughput') ?? findByTokens(['throughput', 'ul']));
-        pushMetric('CQI (DL)', getAny('CQI (DL)', 'CQI', 'Downlink CQI') ?? findByTokens(['cqi']));
-        pushMetric('DL MCS', getAny('DL MCS') ?? findByTokens(['dl', 'mcs']));
-        pushMetric('UL MCS', getAny('UL MCS') ?? findByTokens(['ul', 'mcs']));
-        const dlMod = getAny('DL Modulation') ?? findByTokens(['dl', 'modulation']);
-        const ulMod = getAny('UL Modulation') ?? findByTokens(['ul', 'modulation']);
+        pushMetric('Tracking area code', tacValue);
+        pushMetric('UL throughput', ulThroughput);
+        pushMetric('CQI (DL)', getAny('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi') ?? findByTokens(['cqi']));
+        pushMetric('DL MCS', getAny('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs') ?? findByTokens(['dl', 'mcs']) ?? findByTokens(['pdsch', 'mcs']));
+        pushMetric('UL MCS', getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']));
+        const dlMod = getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
+        const ulMod = getAny('UL Modulation', 'Radio.Lte.ServingCell[8].UlModulation') ?? findByTokens(['ul', 'modulation']) ?? findByTokens(['pusch', 'modulation']);
         pushMetric('Modulation (DL/UL)', ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'));
-        pushMetric('Timing Advance', getAny('Timing Advance', 'TA') ?? findByTokens(['timing', 'advance']));
+        pushMetric('Timing Advance', getAny('Timing Advance', 'TA', 'Radio.Lte.ServingCell[8].TimingAdvance') ?? findByTokens(['timing', 'advance']) ?? findByTokens(['timingadvance']) ?? findByTokens(['ta']));
         pushMetric('MIMO/CA', getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation']));
-        pushMetric('PMI', getAny('PMI') ?? findByTokens(['pmi']));
+        pushMetric('PMI', getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi') ?? findByTokens(['pmi']));
         pushMetric('Rank/Layers (feedback proxy)', getAny('Rank', 'Layers', 'Rank Indicator') ?? findByTokens(['rank']) ?? findByTokens(['layer']));
 
         pushHeader('RELIABILITY');
-        pushMetric('BLER DL', getAny('BLER DL', 'blerDl', 'DL BLER') ?? findByTokens(['bler', 'dl']));
+        pushMetric('BLER DL', getByTrpLabel('BLER DL') ?? getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl') ?? findByTokens(['bler', 'dl']) ?? findByTokens(['dl', 'ibler']));
 
         pushHeader('EVENTS');
         pushMetric('RRC State', getAny('RRC State', 'rrcState') ?? findByTokens(['rrc', 'state']));
