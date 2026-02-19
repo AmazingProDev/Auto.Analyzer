@@ -7856,11 +7856,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     function getPointDetailsHydrationMetrics(log) {
-        if (!log || !Array.isArray(log.trpAllMetricNames)) return [];
+        if (!log) return [];
         if (Array.isArray(log.__pointDetailsHydrationMetrics)) return log.__pointDetailsHydrationMetrics;
 
         const out = new Set();
-        const all = (log.trpAllMetricNames || []).map(n => String(n || '')).filter(Boolean);
+        const fromCatalog = (log.trpCatalog && Array.isArray(log.trpCatalog.metricsFlat))
+            ? log.trpCatalog.metricsFlat.map(m => String(m && m.name || '')).filter(Boolean)
+            : [];
+        const fromSidebar = (log.trpAllMetricNames || []).map(n => String(n || '')).filter(Boolean);
+        const all = fromCatalog.length ? fromCatalog : fromSidebar;
+        if (!all.length) return [];
         const labels = (log.trpMetricLabels && typeof log.trpMetricLabels === 'object') ? log.trpMetricLabels : {};
         const wantedLabels = new Set([
             'Application throughput DL',
@@ -7874,6 +7879,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'UL MCS',
             'PMI',
             'BLER DL',
+            'Modulation (DL/UL)',
+            'Rank/Layers (feedback proxy)',
             'RRC State',
             'Timing Advance',
             'SINR',
@@ -7917,6 +7924,10 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         addBest((n) => /(ul.*mcs|pusch.*mcs)/.test(n));
         addBest((n) => /\bpmi\b/.test(n));
         addBest((n) => /(bler.*dl|dl.*bler|ibler.*dl)/.test(n));
+        addBest((n) => /(ibler|bler)/.test(n));
+        addBest((n) => /(dl.*modulation|pdsch.*modulation|modulation.*dl)/.test(n));
+        addBest((n) => /(ul.*modulation|pusch.*modulation|modulation.*ul)/.test(n));
+        addBest((n) => /(rank.*indicator|\bri\b|layers?|rank\d|rank\.|mimo.*rank)/.test(n));
         addBest((n) => /(rrc.*state)/.test(n));
         addBest((n) => /(timing.*advance|timingadvance)/.test(n));
         addBest((n) => /(rs-?sinr|rssinr|\bsinr\b)/.test(n));
@@ -8811,6 +8822,119 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             findByTokens(['http', 'upload', 'throughput']) ??
             findByTokens(['http', 'uplink', 'throughput']) ??
             findByTokens(['throughput', 'ul']);
+        const cqiDlValue = getAny('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi') ?? findByTokens(['cqi']);
+        const dlMcsValue = getAny('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs') ?? findByTokens(['dl', 'mcs']) ?? findByTokens(['pdsch', 'mcs']);
+        const ulMcsValue = getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs', 'Radio.Lte.ServingCellTotal.UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']);
+        const dlMod = getByTrpLabel('Modulation (DL/UL)') ?? getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation', 'Radio.Lte.ServingCellTotal.DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
+        const ulMod = getAny('UL Modulation', 'Radio.Lte.ServingCell[8].UlModulation', 'Radio.Lte.ServingCellTotal.UlModulation') ?? findByTokens(['ul', 'modulation']) ?? findByTokens(['pusch', 'modulation']);
+        const timingAdvanceValue = getAny('Timing Advance', 'TA', 'Radio.Lte.ServingCell[8].TimingAdvance', 'Radio.Lte.ServingCellTotal.TimingAdvance') ?? findByTokens(['timing', 'advance']) ?? findByTokens(['timingadvance']) ?? findByTokens(['ta']);
+        const pmiValue = getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi', 'Radio.Lte.ServingCellTotal.Pmi') ?? findByTokens(['pmi']);
+        const rankLayersValue = getByTrpLabel('Rank/Layers (feedback proxy)') ??
+            getAny('Rank/Layers (feedback proxy)', 'Rank', 'Layers', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCell[8].Layers') ??
+            findByTokens(['rank', 'indicator']) ??
+            findByTokens(['rank']) ??
+            findByTokens(['layer']) ??
+            findByTokens(['ri']);
+        const blerDlValue = getByTrpLabel('BLER DL') ??
+            getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl', 'DL IBLER (%)') ??
+            findByTokens(['bler', 'dl']) ??
+            findByTokens(['dl', 'ibler']) ??
+            findByTokens(['bler']);
+
+        const parseNum = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const getPointValCI = (pt, key) => {
+            if (!pt || typeof pt !== 'object') return undefined;
+            if (pt[key] !== undefined) return pt[key];
+            if (pt.properties && typeof pt.properties === 'object') {
+                const m = Object.keys(pt.properties).find(k => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+                if (m) return pt.properties[m];
+            }
+            if (pt.parsed && typeof pt.parsed === 'object') {
+                const m = Object.keys(pt.parsed).find(k => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+                if (m) return pt.parsed[m];
+            }
+            if (pt.parsed?.serving && typeof pt.parsed.serving === 'object') {
+                const m = Object.keys(pt.parsed.serving).find(k => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+                if (m) return pt.parsed.serving[m];
+            }
+            return undefined;
+        };
+        const getPointByTokens = (pt, tokens) => {
+            const t = (tokens || []).map(x => String(x || '').toLowerCase());
+            const sources = [pt, pt?.properties, pt?.parsed, pt?.parsed?.serving];
+            for (const src of sources) {
+                if (!src || typeof src !== 'object') continue;
+                for (const [k, v] of Object.entries(src)) {
+                    if (v === undefined || v === null || typeof v === 'object') continue;
+                    const lk = String(k || '').toLowerCase();
+                    if (t.every(tok => lk.includes(tok))) return v;
+                }
+            }
+            return undefined;
+        };
+        const pointIndexInLog = (() => {
+            if (!activeLog || !Array.isArray(activeLog.points) || !activeLog.points.length) return -1;
+            const direct = activeLog.points.indexOf(p);
+            if (direct >= 0) return direct;
+            return activeLog.points.findIndex((lp) => lp && lp.time === p.time && Number(lp.lat) === Number(p.lat) && Number(lp.lng) === Number(p.lng));
+        })();
+        const prevPoint = (pointIndexInLog > 0 && activeLog && Array.isArray(activeLog.points)) ? activeLog.points[pointIndexInLog - 1] : null;
+        const prevPci = parseNum(getPointValCI(prevPoint, 'Radio.Lte.ServingCell[8].Pci') ?? getPointValCI(prevPoint, 'pci') ?? getPointValCI(prevPoint, 'sc') ?? getPointByTokens(prevPoint, ['physical', 'cell', 'id']));
+        const currPci = parseNum(sSC);
+        const prevEarfcn = parseNum(getPointValCI(prevPoint, 'Radio.Lte.ServingCell[8].Downlink.Earfcn') ?? getPointValCI(prevPoint, 'freq') ?? getPointByTokens(prevPoint, ['earfcn']));
+        const currEarfcn = parseNum(sFreq);
+        const prevRrc = getPointValCI(prevPoint, 'RRC State') ?? getPointByTokens(prevPoint, ['rrc', 'state']);
+        const currRrc = getAny('RRC State', 'rrcState', 'Radio.Lte.ServingCell[8].RrcState') ?? findByTokens(['rrc', 'state']);
+        const prevTa = parseNum(getPointValCI(prevPoint, 'Timing Advance') ?? getPointValCI(prevPoint, 'TA') ?? getPointByTokens(prevPoint, ['timing', 'advance']) ?? getPointByTokens(prevPoint, ['ta']));
+        const currTa = parseNum(timingAdvanceValue);
+        const nearEventNames = (() => {
+            if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return [];
+            const target = pointDetailsTsMs(p.time);
+            if (!Number.isFinite(target)) return [];
+            const windowMs = 10000;
+            const names = activeLog.events
+                .filter((ev) => {
+                    const te = pointDetailsTsMs(ev && ev.time);
+                    return Number.isFinite(te) && Math.abs(te - target) <= windowMs;
+                })
+                .map(ev => String(ev && ev.event_name || '').trim())
+                .filter(Boolean);
+            return Array.from(new Set(names));
+        })();
+        const pickNearEventSummary = (regex, limit = 2) => {
+            const rows = nearEventNames.filter(n => regex.test(String(n || '')));
+            if (!rows.length) return undefined;
+            return rows.slice(0, limit).join(' | ');
+        };
+        const rrcFromEvents = (() => {
+            const s = pickNearEventSummary(/rrc/i, 1);
+            if (!s) return undefined;
+            const stateMatch = String(s).match(/\b(IDLE|CONNECTED|INACTIVE|CELL_DCH|CELL_FACH|CELL_PCH|URA_PCH)\b/i);
+            return stateMatch ? stateMatch[1].toUpperCase() : s;
+        })();
+        const hoFromEvents = pickNearEventSummary(/handover|\bho\b|x2|s1/i, 2);
+        const bearerFromEvents = pickNearEventSummary(/bearer|eps|erab|drb|srb/i, 2);
+        const rrcTransitionFromEvents = pickNearEventSummary(/rrc.*(state|transition|setup|release|reconfig|connection)/i, 2);
+        const noOrChange = (prev, curr) => {
+            if (!Number.isFinite(prev) || !Number.isFinite(curr)) return undefined;
+            if (prev === curr) return 'No';
+            return `${prev} -> ${curr}`;
+        };
+        const cellPciChangeInferred = noOrChange(prevPci, currPci) ?? pickNearEventSummary(/pci|serving\s*cell|cell\s*id|cell\s*identity/i, 1);
+        const earfcnBandChangeInferred = noOrChange(prevEarfcn, currEarfcn) ?? pickNearEventSummary(/earfcn|band/i, 1);
+        const rrcTransitionInferred = (hasValue(prevRrc) && hasValue(currRrc) && String(prevRrc) !== String(currRrc))
+            ? `${prevRrc} -> ${currRrc}`
+            : (rrcTransitionFromEvents || (hasValue(currRrc) ? 'No' : undefined));
+        const taJumpInferred = (() => {
+            if (Number.isFinite(prevTa) && Number.isFinite(currTa)) {
+                if (Math.abs(currTa - prevTa) >= 2) return `${prevTa} -> ${currTa}`;
+                return 'No';
+            }
+            return pickNearEventSummary(/\bta\b|timing\s*advance/i, 1);
+        })();
 
         pushMetric('Serving cell name', sName);
         pushMetric('Application throughput DL', appThroughputDl);
@@ -8825,28 +8949,26 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
         pushMetric('Tracking area code', tacValue);
         pushMetric('UL throughput', ulThroughput);
-        pushMetric('CQI (DL)', getAny('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi') ?? findByTokens(['cqi']));
-        pushMetric('DL MCS', getAny('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs') ?? findByTokens(['dl', 'mcs']) ?? findByTokens(['pdsch', 'mcs']));
-        pushMetric('UL MCS', getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']));
-        const dlMod = getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
-        const ulMod = getAny('UL Modulation', 'Radio.Lte.ServingCell[8].UlModulation') ?? findByTokens(['ul', 'modulation']) ?? findByTokens(['pusch', 'modulation']);
+        pushMetric('CQI (DL)', cqiDlValue);
+        pushMetric('DL MCS', dlMcsValue);
+        pushMetric('UL MCS', ulMcsValue);
         pushMetric('Modulation (DL/UL)', ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'));
-        pushMetric('Timing Advance', getAny('Timing Advance', 'TA', 'Radio.Lte.ServingCell[8].TimingAdvance') ?? findByTokens(['timing', 'advance']) ?? findByTokens(['timingadvance']) ?? findByTokens(['ta']));
+        pushMetric('Timing Advance', timingAdvanceValue);
         pushMetric('MIMO/CA', getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation']));
-        pushMetric('PMI', getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi') ?? findByTokens(['pmi']));
-        pushMetric('Rank/Layers (feedback proxy)', getAny('Rank', 'Layers', 'Rank Indicator') ?? findByTokens(['rank']) ?? findByTokens(['layer']));
+        pushMetric('PMI', pmiValue);
+        pushMetric('Rank/Layers (feedback proxy)', rankLayersValue);
 
         pushHeader('RELIABILITY');
-        pushMetric('BLER DL', getByTrpLabel('BLER DL') ?? getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl') ?? findByTokens(['bler', 'dl']) ?? findByTokens(['dl', 'ibler']));
+        pushMetric('BLER DL', blerDlValue);
 
         pushHeader('EVENTS');
-        pushMetric('RRC State', getAny('RRC State', 'rrcState') ?? findByTokens(['rrc', 'state']));
-        pushMetric('HO Start/Complete', getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']));
-        pushMetric('Cell/PCI Change (inferred)', getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']));
-        pushMetric('EARFCN/Band Change (inferred)', getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']));
-        pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']));
-        pushMetric('Bearer / EPS Bearer', getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']));
-        pushMetric('TA Jumps', getAny('TA Jumps') ?? findByTokens(['ta', 'jump']));
+        pushMetric('RRC State', currRrc ?? rrcFromEvents);
+        pushMetric('HO Start/Complete', getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents);
+        pushMetric('Cell/PCI Change (inferred)', getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']) ?? cellPciChangeInferred);
+        pushMetric('EARFCN/Band Change (inferred)', getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']) ?? earfcnBandChangeInferred);
+        pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred);
+        pushMetric('Bearer / EPS Bearer', getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']) ?? bearerFromEvents);
+        pushMetric('TA Jumps', getAny('TA Jumps') ?? findByTokens(['ta', 'jump']) ?? taJumpInferred);
 
         pushHeader('Neighbors');
         for (let i = 1; i <= 4; i++) {
