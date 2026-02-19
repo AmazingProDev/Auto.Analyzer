@@ -520,6 +520,84 @@ class MapRenderer {
             if (!Number.isFinite(n)) return null;
             return Math.round(n);
         };
+        const parseFiniteNumber = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
+        const measuredPci = (() => {
+            const direct = [
+                p.sc,
+                p.pci,
+                p['Radio.Lte.ServingCell[8].Pci'],
+                p['radio.lte.servingcell[8].pci'],
+                p.parsed && p.parsed.serving ? p.parsed.serving.sc : null,
+                p.parsed && p.parsed.serving ? p.parsed.serving.pci : null
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null) return v;
+            }
+            if (props) {
+                const fromProps = getValCI(props, 'Radio.Lte.ServingCell[8].Pci')
+                    || getValCI(props, 'radio.lte.servingcell[8].pci')
+                    || getValCI(props, 'serving pci')
+                    || findByKeyPattern(props, (k) => k.includes('servingcell') && k.endsWith('.pci'));
+                const v = parseFiniteInt(fromProps);
+                if (v !== null) return v;
+            }
+            return null;
+        })();
+        const measuredFreq = (() => {
+            const direct = [
+                p.freq,
+                p.earfcn,
+                p['Radio.Lte.ServingCell[8].Downlink.Earfcn'],
+                p['radio.lte.servingcell[8].downlink.earfcn'],
+                p.parsed && p.parsed.serving ? p.parsed.serving.freq : null
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null) return v;
+            }
+            if (props) {
+                const fromProps = getValCI(props, 'Radio.Lte.ServingCell[8].Downlink.Earfcn')
+                    || getValCI(props, 'radio.lte.servingcell[8].downlink.earfcn')
+                    || getValCI(props, 'downlink earfcn')
+                    || getValCI(props, 'earfcn')
+                    || findByKeyPattern(props, (k) => k.includes('servingcell') && k.includes('earfcn'));
+                const v = parseFiniteInt(fromProps);
+                if (v !== null) return v;
+            }
+            return null;
+        })();
+        const measuredLac = (() => {
+            const direct = [
+                p.lac,
+                p.parsed && p.parsed.serving ? p.parsed.serving.lac : null
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null) return v;
+            }
+            if (props) {
+                const fromProps = getValCI(props, 'lac') || getValCI(props, 'location area code');
+                const v = parseFiniteInt(fromProps);
+                if (v !== null) return v;
+            }
+            return null;
+        })();
+        const hasMeasuredRf = measuredPci !== null || measuredFreq !== null || measuredLac !== null;
+        const isRfCompatible = (site) => {
+            if (!site || typeof site !== 'object') return false;
+            const sitePci = parseFiniteInt(site.pci !== undefined ? site.pci : site.sc);
+            const siteFreq = parseFiniteNumber(site.currentFreq !== undefined ? site.currentFreq : site.freq);
+            const siteLac = parseFiniteInt(site.lac);
+            if (measuredPci !== null && sitePci !== null && sitePci !== measuredPci) return false;
+            if (measuredFreq !== null && siteFreq !== null && Math.abs(siteFreq - measuredFreq) >= 1) return false;
+            if (measuredLac !== null && siteLac !== null && siteLac !== measuredLac) return false;
+            return true;
+        };
         const pointLteEci = (() => {
             const direct = [
                 p.lteEci,
@@ -539,7 +617,6 @@ class MapRenderer {
                 const v = parseFiniteInt(fuzzyTop);
                 if (v !== null && v > 255) return v;
             }
-            const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
             if (props) {
                 const fromProps = getValCI(props, 'Radio.Lte.ServingCell[8].CellIdentity.Complete')
                     || getValCI(props, 'radio.lte.servingcell[8].cellidentity.complete')
@@ -561,13 +638,17 @@ class MapRenderer {
             const eciKey = normalizeId(String(pointLteEci));
             if (this.siteIndex.byId.has(eciKey)) {
                 const hit = this.siteIndex.byId.get(eciKey);
-                p._cachedServing = hit;
-                return hit;
+                if (!hasMeasuredRf || isRfCompatible(hit)) {
+                    p._cachedServing = hit;
+                    return hit;
+                }
             }
             const eciHit = siteData.find(x => Number(x.calculatedEci) === pointLteEci);
             if (eciHit) {
-                p._cachedServing = eciHit;
-                return eciHit;
+                if (!hasMeasuredRf || isRfCompatible(eciHit)) {
+                    p._cachedServing = eciHit;
+                    return eciHit;
+                }
             }
         }
 
@@ -584,7 +665,6 @@ class MapRenderer {
             for (const c of directCandidates) {
                 if (c !== undefined && c !== null && String(c).trim()) return String(c).trim();
             }
-            const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
             if (props) {
                 const fromProps = getValCI(props, 'eNodeB ID-Cell ID')
                     || getValCI(props, 'eNodeB ID - Cell ID')
@@ -612,9 +692,9 @@ class MapRenderer {
             return null;
         })();
 
-        const pci = p.sc;
-        const lac = p.lac || (p.parsed && p.parsed.serving ? p.parsed.serving.lac : null);
-        const freq = p.freq || (p.parsed && p.parsed.serving ? p.parsed.serving.freq : null);
+        const pci = measuredPci;
+        const lac = measuredLac;
+        const freq = measuredFreq;
         const cellId = p.cellId;
 
         // 0. PRIORITY: Strict eNodeB ID-Cell ID Matching for LTE
@@ -628,8 +708,10 @@ class MapRenderer {
             for (const key of variants) {
                 if (this.siteIndex.byId.has(key)) {
                     const hit = this.siteIndex.byId.get(key);
-                    p._cachedServing = hit;
-                    return hit;
+                    if (!hasMeasuredRf || isRfCompatible(hit)) {
+                        p._cachedServing = hit;
+                        return hit;
+                    }
                 }
             }
             const fallback = siteData.find(x => {
@@ -639,48 +721,56 @@ class MapRenderer {
                 return canonical && siteCanonical === canonical;
             });
             if (fallback) {
-                p._cachedServing = fallback;
-                return fallback;
+                if (!hasMeasuredRf || isRfCompatible(fallback)) {
+                    p._cachedServing = fallback;
+                    return fallback;
+                }
             }
         }
 
         // NEW: Priority RNC/CID Lookup (3G)
         if (p.rnc != null && p.cid != null) {
             const key = `${p.rnc}/${p.cid}`.replace(/\s/g, '');
-            if (this.siteIndex.byId.has(key)) return this.siteIndex.byId.get(key);
+            if (this.siteIndex.byId.has(key)) {
+                const hit = this.siteIndex.byId.get(key);
+                if (!hasMeasuredRf || isRfCompatible(hit)) return hit;
+            }
 
             // Fallback: Try matching as Long Cell ID
             const longId = (Number(p.rnc) << 16) + Number(p.cid);
             let s = siteData.find(x => x.cellId == longId || x.calculatedEci == longId || x.rawEnodebCellId == longId);
-            if (s) return s;
+            if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
 
             // Fallback 2: CID Bitmask Discrepancy (Some logs set bit 12, value 4096, which site data ignores)
             const maskedCid = p.cid & 0xEFFF;
             const maskedLongId = (Number(p.rnc) << 16) + maskedCid;
             const maskedKey = `${p.rnc}/${maskedCid}`;
 
-            if (this.siteIndex.byId.has(maskedKey)) return this.siteIndex.byId.get(maskedKey);
+            if (this.siteIndex.byId.has(maskedKey)) {
+                const hit = this.siteIndex.byId.get(maskedKey);
+                if (!hasMeasuredRf || isRfCompatible(hit)) return hit;
+            }
             s = siteData.find(x => x.cellId == maskedLongId || x.cellId == maskedCid || x.rawEnodebCellId == maskedLongId);
-            if (s) return s;
+            if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
 
             // Fallback 3: Short ID Match (RNC + High 12 bits of CID) - Very common in 3G
             const shortId = p.cid >> 4;
             const shortKeyMatch = siteData.find(x => x.rnc == p.rnc && (x.cid >> 4) == shortId);
-            if (shortKeyMatch) return shortKeyMatch;
+            if (shortKeyMatch && (!hasMeasuredRf || isRfCompatible(shortKeyMatch))) return shortKeyMatch;
         }
 
         // 1. PRIORITY: Strict eNodeB ID-Cell ID / CellID Matching
         if (cellId) {
             if (typeof cellId === 'number' && cellId > 65535) {
                 const s = siteData.find(x => x.calculatedEci === cellId);
-                if (s) return s;
+                if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
             }
             const s = siteData.find(x => x.rawEnodebCellId == cellId);
-            if (s) return s;
+            if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
         }
 
         // 1. Strict RF
-        if (pci && lac && freq) {
+        if (pci !== null && lac !== null && freq !== null) {
             const s = siteData.find(x => {
                 const pciMatch = (x.pci == pci || x.sc == pci);
                 const lacMatch = (x.lac == lac);
@@ -693,7 +783,7 @@ class MapRenderer {
         // 2. CellID + LAC
         if (cellId && lac) {
             const s = siteData.find(x => x.cellId == cellId && x.lac == lac);
-            if (s) return s;
+            if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
         }
 
         // 3. Smart Fallback: RF + Proximity (If CellID is stale or missing)
@@ -714,10 +804,16 @@ class MapRenderer {
                     const distMatch = Math.abs(x.lat - p.lat) < 0.005 && Math.abs(x.lng - p.lng) < 0.005;
                     return pciMatch && distMatch;
                 });
-                if (looseCandidates.length > 0) return looseCandidates[0]; // Take first/closest
+                if (looseCandidates.length > 0) {
+                    const hit = looseCandidates[0];
+                    if (!hasMeasuredRf || isRfCompatible(hit)) return hit; // Take first/closest
+                }
             }
 
-            if (candidates.length === 1) return candidates[0];
+            if (candidates.length === 1) {
+                const hit = candidates[0];
+                if (!hasMeasuredRf || isRfCompatible(hit)) return hit;
+            }
             if (candidates.length > 1) {
                 // If multiple candidates, pick the closest one
                 const winner = candidates.sort((a, b) => {
@@ -725,8 +821,10 @@ class MapRenderer {
                     const distB = Math.pow(b.lat - p.lat, 2) + Math.pow(b.lng - p.lng, 2);
                     return distA - distB;
                 })[0];
-                p._cachedServing = winner;
-                return winner;
+                if (!hasMeasuredRf || isRfCompatible(winner)) {
+                    p._cachedServing = winner;
+                    return winner;
+                }
             }
         }
 
@@ -735,8 +833,10 @@ class MapRenderer {
             const norm = String(cellId).replace(/\s/g, '');
             if (this.siteIndex.byId.has(norm)) {
                 const s = this.siteIndex.byId.get(norm);
-                p._cachedServing = s; // Cache
-                return s;
+                if (!hasMeasuredRf || isRfCompatible(s)) {
+                    p._cachedServing = s; // Cache
+                    return s;
+                }
             }
 
             // Fix: Check for Long ID decomposition (RNC/CID)
@@ -749,8 +849,10 @@ class MapRenderer {
                 let key = `${rnc}/${cid}`;
                 if (this.siteIndex.byId.has(key)) {
                     const s = this.siteIndex.byId.get(key);
-                    p._cachedServing = s;
-                    return s;
+                    if (!hasMeasuredRf || isRfCompatible(s)) {
+                        p._cachedServing = s;
+                        return s;
+                    }
                 }
 
                 // 2. Masked Match (Bit 12 Issue)
@@ -758,15 +860,17 @@ class MapRenderer {
                 const maskedKey = `${rnc}/${maskedCid}`;
                 if (this.siteIndex.byId.has(maskedKey)) {
                     const s = this.siteIndex.byId.get(maskedKey);
-                    p._cachedServing = s;
-                    return s;
+                    if (!hasMeasuredRf || isRfCompatible(s)) {
+                        p._cachedServing = s;
+                        return s;
+                    }
                 }
 
                 // 3. Short ID Match (Shifted CID) - keys might not be in index, search siteData
                 // This matches RNC + (CID >> 4)
                 const shortCid = cid >> 4;
                 const shortMatch = siteData.find(x => x.rnc == rnc && (x.cid >> 4) == shortCid);
-                if (shortMatch) {
+                if (shortMatch && (!hasMeasuredRf || isRfCompatible(shortMatch))) {
                     p._cachedServing = shortMatch;
                     return shortMatch;
                 }
@@ -780,7 +884,7 @@ class MapRenderer {
                 return matchesName;
             });
 
-            if (s) {
+            if (s && (!hasMeasuredRf || isRfCompatible(s))) {
                 p._cachedServing = s; // Cache
                 return s;
             }
