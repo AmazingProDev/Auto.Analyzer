@@ -7813,7 +7813,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
 
     
-    window.dtLteAnalyzePoint = (btn) => {
+    window.dtLteAnalyzePoint = async (btn) => {
         try {
             let script = document.getElementById('point-data-stash');
             if (!script && btn) {
@@ -7827,21 +7827,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
             const d = JSON.parse(script.textContent || '{}');
             const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            const keys = Object.keys(d || {});
-            const findExact = (alias) => {
-                const a = norm(alias);
-                const k = keys.find((key) => norm(key) === a);
-                return k ? d[k] : undefined;
-            };
-            const findContains = (...tokens) => {
-                const t = (tokens || []).map(norm).filter(Boolean);
-                if (!t.length) return undefined;
-                for (const k of keys) {
-                    const nk = norm(k);
-                    if (t.every((x) => nk.includes(x))) return d[k];
-                }
-                return undefined;
-            };
+            const esc = (v) => String(v ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
             const hasVal = (v) => {
                 if (v === undefined || v === null) return false;
                 if (typeof v === 'string') {
@@ -7850,79 +7841,111 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 }
                 return true;
             };
-            const getVal = (...aliases) => {
-                for (const a of aliases) {
-                    const v = findExact(a);
-                    if (hasVal(v)) return v;
-                }
-                return undefined;
-            };
-            const getNum = (...aliases) => {
-                const v = getVal(...aliases);
-                const n = Number(v);
-                return Number.isFinite(n) ? n : null;
-            };
-            const esc = (v) => String(v ?? '')
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;')
-                .replaceAll('"', '&quot;')
-                .replaceAll("'", '&#39;');
             const fmt = (v, unit = '') => {
                 if (typeof v === 'number' && Number.isFinite(v)) return `${Number.isInteger(v) ? v : v.toFixed(1)}${unit}`;
                 if (hasVal(v)) return `${v}${unit}`;
                 return 'N/A';
             };
+            const toNum = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const parseTs = (v) => {
+                const t = new Date(v || '').getTime();
+                return Number.isFinite(t) ? t : null;
+            };
+            const getValFromObj = (obj, ...aliases) => {
+                if (!obj || typeof obj !== 'object') return undefined;
+                const keys = Object.keys(obj);
+                for (const a of aliases) {
+                    const wanted = norm(a);
+                    const k = keys.find((x) => norm(x) === wanted);
+                    if (k && hasVal(obj[k])) return obj[k];
+                }
+                return undefined;
+            };
+            const getContainsFromObj = (obj, ...tokens) => {
+                if (!obj || typeof obj !== 'object') return undefined;
+                const t = (tokens || []).map(norm).filter(Boolean);
+                if (!t.length) return undefined;
+                for (const [k, v] of Object.entries(obj)) {
+                    if (!hasVal(v) || typeof v === 'object') continue;
+                    const nk = norm(k);
+                    if (t.every((x) => nk.includes(x))) return v;
+                }
+                return undefined;
+            };
+            const pointVal = (pt, ...aliases) => {
+                return getValFromObj(pt, ...aliases)
+                    ?? getValFromObj(pt?.properties, ...aliases)
+                    ?? getValFromObj(pt?.parsed, ...aliases)
+                    ?? getValFromObj(pt?.parsed?.serving, ...aliases);
+            };
+            const pointNum = (pt, ...aliases) => toNum(pointVal(pt, ...aliases));
+            const pointContains = (pt, ...tokens) => {
+                return getContainsFromObj(pt, ...tokens)
+                    ?? getContainsFromObj(pt?.properties, ...tokens)
+                    ?? getContainsFromObj(pt?.parsed, ...tokens)
+                    ?? getContainsFromObj(pt?.parsed?.serving, ...tokens);
+            };
+            const pointContainsNum = (pt, ...tokens) => toNum(pointContains(pt, ...tokens));
+            const decodeEnbCell = (raw) => {
+                if (!hasVal(raw)) return 'N/A';
+                const txt = String(raw).trim();
+                if (/^\d+\s*[-/]\s*\d+$/.test(txt)) return txt.replace(/\s+/g, '');
+                const n = Number(txt);
+                if (Number.isFinite(n) && n > 255) {
+                    const e = Math.floor(n / 256);
+                    const c = n % 256;
+                    return `${e}-${c}`;
+                }
+                return txt;
+            };
+            const readThroughputs = (pt) => {
+                const dl = pointNum(pt, 'DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput', 'Radio.Lte.ServingCellTotal.Pdsch.Throughput')
+                    ?? pointContainsNum(pt, 'pdsch', 'throughput')
+                    ?? pointContainsNum(pt, 'throughput', 'dl');
+                const appDl = pointNum(pt, 'Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput')
+                    ?? pointContainsNum(pt, 'http', 'download', 'throughput')
+                    ?? pointContainsNum(pt, 'application', 'throughput', 'dl');
+                const ul = pointNum(pt, 'UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput', 'Radio.Lte.ServingCellTotal.Pusch.Throughput')
+                    ?? pointContainsNum(pt, 'pusch', 'throughput')
+                    ?? pointContainsNum(pt, 'throughput', 'ul');
+                return { dl, appDl, ul, primary: (Number.isFinite(dl) ? dl : appDl) };
+            };
 
-            const cellName = getVal('Serving cell name', 'Cell Name', 'Cell Identifier') || 'Unknown';
-            const enbCell = getVal('eNodeB ID-Cell ID', 'Cellid', 'Cell ID') || 'N/A';
-            const timeStr = getVal('time', 'Time', 'timestamp') || '';
-
-            const dlTp = getNum('DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput', 'Radio.Lte.ServingCellTotal.Pdsch.Throughput');
-            const appDlTp = getNum('Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput');
-            const ulTp = getNum('UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput', 'Radio.Lte.ServingCellTotal.Pusch.Throughput');
-            const usedTp = Number.isFinite(dlTp) ? dlTp : appDlTp;
+            const cellName = getValFromObj(d, 'Serving cell name', 'Cell Name', 'Cell Identifier') || 'Unknown';
+            const enbCell = decodeEnbCell(getValFromObj(d, 'eNodeB ID-Cell ID', 'Cellid', 'Cell ID'));
+            const timeStr = getValFromObj(d, 'time', 'Time', 'timestamp') || '';
+            const selectedTp = readThroughputs(d);
+            const dlTp = selectedTp.dl;
+            const appDlTp = selectedTp.appDl;
+            const ulTp = selectedTp.ul;
+            const usedTp = selectedTp.primary;
             const usedTpSource = Number.isFinite(dlTp) ? 'DL throughput' : (Number.isFinite(appDlTp) ? 'Application throughput DL' : 'N/A');
 
-            const rsrp = getNum('RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'level');
-            const rsrq = getNum('RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'qual');
-            const sinr = getNum('SINR', 'RS-SINR', 'RSSINR', 'Radio.Lte.ServingCell[8].Sinr', 'Radio.Lte.ServingCellTotal.Sinr')
-                ?? (() => {
-                    const v = findContains('sinr');
-                    const n = Number(v);
-                    return Number.isFinite(n) ? n : null;
-                })();
-            const cqi = getNum('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi');
-            const dlMcs = getNum('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs');
+            const rsrp = toNum(getValFromObj(d, 'RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'level'));
+            const rsrq = toNum(getValFromObj(d, 'RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'qual'));
+            const sinr = toNum(getValFromObj(d, 'SINR', 'RS-SINR', 'RSSINR', 'Radio.Lte.ServingCell[8].Sinr', 'Radio.Lte.ServingCellTotal.Sinr')) ?? toNum(getContainsFromObj(d, 'sinr'));
+            const cqi = toNum(getValFromObj(d, 'CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi'));
+            const dlMcs = toNum(getValFromObj(d, 'DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs'));
             const sanitizeRankForLte = (v) => {
-                const n = Number(v);
-                if (!Number.isFinite(n)) return null;
+                const n = toNum(v);
+                if (n === null) return null;
                 if (n >= 1 && n <= 8) return Number.isInteger(n) ? n : Number(n.toFixed(1));
                 return null;
             };
-            const rank = sanitizeRankForLte(getNum('Rank/Layers (feedback proxy)', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCell[8].Layers'));
-            const blerDl = getNum('BLER DL', 'DL IBLER (%)', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl');
-            const modulation = getVal('Modulation (DL/UL)', 'DL Modulation', 'UL Modulation') || '';
-            const mimoCa = getVal('MIMO/CA', 'MIMO', 'CA') || '';
-
-            const rrcState = getVal('RRC State');
-            const hoEvent = getVal('HO Start/Complete');
-            const pciChange = getVal('Cell/PCI Change (inferred)');
-            const earfcnChange = getVal('EARFCN/Band Change (inferred)');
-            const rrcTransition = getVal('RRC State Transition');
-            const bearer = getVal('Bearer / EPS Bearer');
-            const normalizeTaJumpText = (v) => {
-                if (!hasVal(v)) return 'N/A';
-                const s = String(v).trim();
-                const m = s.match(/(-?\d+(?:\.\d+)?)\s*->\s*(-?\d+(?:\.\d+)?)/);
-                if (!m) return s;
-                const a = Number(m[1]);
-                const b = Number(m[2]);
-                if (!Number.isFinite(a) || !Number.isFinite(b)) return 'N/A';
-                if (a < 0 || a > 2000 || b < 0 || b > 2000) return 'N/A';
-                return `${a} -> ${b}`;
-            };
-            const taJumps = normalizeTaJumpText(getVal('TA Jumps'));
+            const rank = sanitizeRankForLte(getValFromObj(d, 'Rank/Layers (feedback proxy)', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCell[8].Layers'));
+            const blerDl = toNum(getValFromObj(d, 'BLER DL', 'DL IBLER (%)', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl'));
+            const modulation = getValFromObj(d, 'Modulation (DL/UL)', 'DL Modulation', 'UL Modulation') || '';
+            const mimoCa = getValFromObj(d, 'MIMO/CA', 'MIMO', 'CA') || '';
+            const rrcState = getValFromObj(d, 'RRC State');
+            const hoEvent = getValFromObj(d, 'HO Start/Complete');
+            const pciChange = getValFromObj(d, 'Cell/PCI Change (inferred)');
+            const earfcnChange = getValFromObj(d, 'EARFCN/Band Change (inferred)');
+            const rrcTransition = getValFromObj(d, 'RRC State Transition');
+            const bearer = getValFromObj(d, 'Bearer / EPS Bearer');
+            const taJumps = getValFromObj(d, 'TA Jumps');
 
             const tpCfg = { degraded: 3000, severe: 1500, critical: 700 };
             let tpStatus = 'No throughput sample';
@@ -7930,106 +7953,46 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             let degraded = false;
             if (Number.isFinite(usedTp)) {
                 degraded = usedTp < tpCfg.degraded;
-                if (usedTp < tpCfg.critical) {
-                    tpStatus = 'Critical degradation';
-                    tpColor = '#dc2626';
-                } else if (usedTp < tpCfg.severe) {
-                    tpStatus = 'Severe degradation';
-                    tpColor = '#ef4444';
-                } else if (usedTp < tpCfg.degraded) {
-                    tpStatus = 'Degraded';
-                    tpColor = '#f97316';
-                } else {
-                    tpStatus = 'Normal';
-                    tpColor = '#22c55e';
-                }
+                if (usedTp < tpCfg.critical) { tpStatus = 'Critical degradation'; tpColor = '#dc2626'; }
+                else if (usedTp < tpCfg.severe) { tpStatus = 'Severe degradation'; tpColor = '#ef4444'; }
+                else if (usedTp < tpCfg.degraded) { tpStatus = 'Degraded'; tpColor = '#f97316'; }
+                else { tpStatus = 'Normal'; tpColor = '#22c55e'; }
+            }
+
+            const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+            const selectedLat = toNum(d.lat ?? d.latitude);
+            const selectedLng = toNum(d.lng ?? d.longitude ?? d.lon);
+            const selectedTime = String(timeStr || '').trim();
+            const samePoint = (pt) => {
+                if (!pt) return false;
+                const lat = toNum(pt.lat ?? pt.latitude);
+                const lng = toNum(pt.lng ?? pt.longitude ?? pt.lon);
+                const t = String(pt.time || '').trim();
+                const latOk = Number.isFinite(selectedLat) && Number.isFinite(lat) ? Math.abs(lat - selectedLat) < 1e-7 : true;
+                const lngOk = Number.isFinite(selectedLng) && Number.isFinite(lng) ? Math.abs(lng - selectedLng) < 1e-7 : true;
+                const timeOk = selectedTime ? t === selectedTime : true;
+                return latOk && lngOk && timeOk;
+            };
+            let activeLog = window.__activePointLog;
+            if (!activeLog || !Array.isArray(activeLog.points) || !activeLog.points.length || !activeLog.points.some(samePoint)) {
+                activeLog = logs.find((log) => log && Array.isArray(log.points) && log.points.some(samePoint)) || activeLog;
+            }
+            let selectedIndex = -1;
+            if (activeLog && Array.isArray(activeLog.points)) {
+                selectedIndex = activeLog.points.findIndex(samePoint);
             }
 
             const causes = [];
-            const addCause = (id, title, score, evidence, actions) => {
-                causes.push({ id, title, score, evidence: evidence || [], actions: actions || [] });
-            };
+            const addCause = (id, title, score, evidence, actions) => { causes.push({ id, title, score, evidence: evidence || [], actions: actions || [] }); };
             const hasSignalEvent = (v) => hasVal(v) && !/^no$/i.test(String(v).trim());
-
-            if (degraded && ((rsrp !== null && rsrp <= -105) || (sinr !== null && sinr <= 3))) {
-                addCause(
-                    'coverage',
-                    'Coverage limited throughput',
-                    0.9,
-                    [`RSRP=${fmt(rsrp, ' dBm')}`, `SINR=${fmt(sinr, ' dB')}`],
-                    ['Optimize coverage (tilt/azimuth/power), especially around this segment.', 'Validate serving cell dominance versus top neighbors.']
-                );
-            }
-            if (degraded && (rsrp !== null && rsrp > -100) && ((rsrq !== null && rsrq <= -12) || (sinr !== null && sinr < 5))) {
-                addCause(
-                    'interference',
-                    'Interference/quality limitation',
-                    0.88,
-                    [`RSRP=${fmt(rsrp, ' dBm')} with RSRQ=${fmt(rsrq, ' dB')}`, `SINR=${fmt(sinr, ' dB')}`],
-                    ['Run PCI/neighbor interference audit for co/adjacent channel collisions.', 'Tune neighbor priorities and handover thresholds to avoid unstable serving.']
-                );
-            }
-            if (degraded && blerDl !== null && blerDl >= 8) {
-                addCause(
-                    'bler',
-                    'High retransmission loss',
-                    0.86,
-                    [`BLER DL=${fmt(blerDl, ' %')}`],
-                    ['Investigate BLER spikes versus SINR/RSRQ around this point.', 'Tune link adaptation targets (CQI to MCS aggressiveness).']
-                );
-            }
-            if (degraded && ((cqi !== null && cqi < 7) || (dlMcs !== null && dlMcs < 10) || /qpsk/i.test(String(modulation)))) {
-                addCause(
-                    'link_adaptation',
-                    'Conservative link adaptation',
-                    0.78,
-                    [`CQI=${fmt(cqi)}`, `DL MCS=${fmt(dlMcs)}`, `Modulation=${fmt(modulation)}`],
-                    ['Check CQI distribution and MCS floor at this location.', 'Review scheduler and link adaptation parameters to reduce over-conservatism.']
-                );
-            }
-            if (degraded && ((rank !== null && rank <= 1) || /rank1|single|noca|off|disabled/i.test(norm(mimoCa)))) {
-                addCause(
-                    'mimo_ca',
-                    'MIMO/CA utilization limitation',
-                    0.72,
-                    [`Rank/Layers=${fmt(rank)}`, `MIMO/CA=${fmt(mimoCa)}`],
-                    ['Verify MIMO rank usage and CA activation conditions on the route.', 'Audit RF quality on secondary layers/carriers for CA eligibility.']
-                );
-            }
-            if (degraded && [hoEvent, pciChange, earfcnChange, rrcTransition, taJumps].some(hasSignalEvent)) {
-                addCause(
-                    'mobility',
-                    'Mobility instability around degraded sample',
-                    0.69,
-                    [`HO=${fmt(hoEvent)}`, `PCI change=${fmt(pciChange)}`, `EARFCN/Band change=${fmt(earfcnChange)}`, `RRC transition=${fmt(rrcTransition)}`, `TA jumps=${fmt(taJumps)}`],
-                    ['Review handover triggering/completion near this segment.', 'Correlate throughput dips with serving changes and TA jumps.']
-                );
-            }
-            if (
-                degraded &&
-                (rsrp !== null && rsrp > -95) &&
-                (rsrq !== null && rsrq > -10) &&
-                (sinr !== null && sinr > 10) &&
-                (blerDl === null || blerDl < 5) &&
-                (cqi === null || cqi >= 10)
-            ) {
-                addCause(
-                    'non_radio',
-                    'Non-radio bottleneck likely (scheduler/backhaul/app)',
-                    0.65,
-                    [`Radio looks good: RSRP=${fmt(rsrp, ' dBm')}, RSRQ=${fmt(rsrq, ' dB')}, SINR=${fmt(sinr, ' dB')}, BLER=${fmt(blerDl, ' %')}`],
-                    ['Validate transport/backhaul congestion and packet loss at this time.', 'Cross-check app-layer throughput and server-side limits.']
-                );
-            }
-            if (degraded && !causes.length) {
-                addCause(
-                    'generic',
-                    'Mixed KPI degradation (no single dominant signature)',
-                    0.55,
-                    ['Partial KPI evidence available; no dominant cause exceeded threshold.'],
-                    ['Capture a short window (±30s) around this point and compare trends by KPI.', 'Correlate with nearby event timeline and serving/neighbor transitions.']
-                );
-            }
+            if (degraded && ((rsrp !== null && rsrp <= -105) || (sinr !== null && sinr <= 3))) addCause('coverage', 'Coverage limited throughput', 0.9, [`RSRP=${fmt(rsrp, ' dBm')}`, `SINR=${fmt(sinr, ' dB')}`], ['Optimize coverage (tilt/azimuth/power), especially around this segment.', 'Validate serving cell dominance versus top neighbors.']);
+            if (degraded && (rsrp !== null && rsrp > -100) && ((rsrq !== null && rsrq <= -12) || (sinr !== null && sinr < 5))) addCause('interference', 'Interference/quality limitation', 0.88, [`RSRP=${fmt(rsrp, ' dBm')} with RSRQ=${fmt(rsrq, ' dB')}`, `SINR=${fmt(sinr, ' dB')}`], ['Run PCI/neighbor interference audit for co/adjacent channel collisions.', 'Tune neighbor priorities and handover thresholds to avoid unstable serving.']);
+            if (degraded && blerDl !== null && blerDl >= 8) addCause('bler', 'High retransmission loss', 0.86, [`BLER DL=${fmt(blerDl, ' %')}`], ['Investigate BLER spikes versus SINR/RSRQ around this point.', 'Tune link adaptation targets (CQI to MCS aggressiveness).']);
+            if (degraded && ((cqi !== null && cqi < 7) || (dlMcs !== null && dlMcs < 10) || /qpsk/i.test(String(modulation)))) addCause('link_adaptation', 'Conservative link adaptation', 0.78, [`CQI=${fmt(cqi)}`, `DL MCS=${fmt(dlMcs)}`, `Modulation=${fmt(modulation)}`], ['Check CQI distribution and MCS floor at this location.', 'Review scheduler and link adaptation parameters to reduce over-conservatism.']);
+            if (degraded && ((rank !== null && rank <= 1) || /rank1|single|noca|off|disabled/i.test(norm(mimoCa)))) addCause('mimo_ca', 'MIMO/CA utilization limitation', 0.72, [`Rank/Layers=${fmt(rank)}`, `MIMO/CA=${fmt(mimoCa)}`], ['Verify MIMO rank usage and CA activation conditions on the route.', 'Audit RF quality on secondary layers/carriers for CA eligibility.']);
+            if (degraded && [hoEvent, pciChange, earfcnChange, rrcTransition, taJumps].some(hasSignalEvent)) addCause('mobility', 'Mobility instability around degraded sample', 0.69, [`HO=${fmt(hoEvent)}`, `PCI change=${fmt(pciChange)}`, `EARFCN/Band change=${fmt(earfcnChange)}`, `RRC transition=${fmt(rrcTransition)}`, `TA jumps=${fmt(taJumps)}`], ['Review handover triggering/completion near this segment.', 'Correlate throughput dips with serving changes and TA jumps.']);
+            if (degraded && (rsrp !== null && rsrp > -95) && (rsrq !== null && rsrq > -10) && (sinr !== null && sinr > 10) && (blerDl === null || blerDl < 5) && (cqi === null || cqi >= 10)) addCause('non_radio', 'Non-radio bottleneck likely (scheduler/backhaul/app)', 0.65, [`Radio looks good: RSRP=${fmt(rsrp, ' dBm')}, RSRQ=${fmt(rsrq, ' dB')}, SINR=${fmt(sinr, ' dB')}, BLER=${fmt(blerDl, ' %')}`], ['Validate transport/backhaul congestion and packet loss at this time.', 'Cross-check app-layer throughput and server-side limits.']);
+            if (degraded && !causes.length) addCause('generic', 'Mixed KPI degradation (no single dominant signature)', 0.55, ['Partial KPI evidence available; no dominant cause exceeded threshold.'], ['Capture a short window (±30s) around this point and compare trends by KPI.', 'Correlate with nearby event timeline and serving/neighbor transitions.']);
             causes.sort((a, b) => b.score - a.score);
 
             const recommendations = [];
@@ -8044,91 +8007,156 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 });
             });
 
-            const snapshotRows = [
-                ['DL throughput', fmt(dlTp)],
-                ['Application throughput DL', fmt(appDlTp)],
-                ['UL throughput', fmt(ulTp)],
-                ['RSRP', fmt(rsrp, ' dBm')],
-                ['RSRQ', fmt(rsrq, ' dB')],
-                ['SINR', fmt(sinr, ' dB')],
-                ['BLER DL', fmt(blerDl, ' %')],
-                ['CQI (DL)', fmt(cqi)],
-                ['DL MCS', fmt(dlMcs)],
-                ['Rank/Layers', fmt(rank)],
-                ['Modulation (DL/UL)', fmt(modulation)],
-                ['MIMO/CA', fmt(mimoCa)],
-                ['RRC State', fmt(rrcState)],
-                ['HO Start/Complete', fmt(hoEvent)],
-                ['Cell/PCI Change', fmt(pciChange)],
-                ['EARFCN/Band Change', fmt(earfcnChange)],
-                ['RRC State Transition', fmt(rrcTransition)],
-                ['Bearer / EPS Bearer', fmt(bearer)],
-                ['TA Jumps', fmt(taJumps)]
-            ];
-            const snapshotHtml = snapshotRows.map(([k, v]) => (
-                `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1f2937;padding:3px 0;font-size:12px;"><span style="color:#94a3b8;">${esc(k)}</span><span style="color:#e5e7eb;font-weight:600;">${esc(v)}</span></div>`
-            )).join('');
+            const windowData = (() => {
+                if (!activeLog || !Array.isArray(activeLog.points) || selectedIndex < 0) return null;
+                let idx = selectedIndex;
+                const points = activeLog.points;
+                const isDegradedAt = (i) => {
+                    if (i < 0 || i >= points.length) return false;
+                    const tp = readThroughputs(points[i]).primary;
+                    return Number.isFinite(tp) && tp < tpCfg.degraded;
+                };
+                if (!isDegradedAt(idx)) {
+                    let best = null;
+                    for (let dScan = 1; dScan <= 60; dScan++) {
+                        const l = idx - dScan;
+                        const r = idx + dScan;
+                        if (l >= 0 && isDegradedAt(l)) { best = l; break; }
+                        if (r < points.length && isDegradedAt(r)) { best = r; break; }
+                    }
+                    if (best !== null) idx = best;
+                }
+                if (!isDegradedAt(idx)) return null;
+                let start = idx;
+                let end = idx;
+                while (start > 0 && isDegradedAt(start - 1)) start--;
+                while (end + 1 < points.length && isDegradedAt(end + 1)) end++;
+                return { start, end, points: points.slice(start, end + 1), idx };
+            })();
 
-            const causesHtml = causes.length
-                ? causes.map((c) => (
-                    `<div style="border:1px solid #1f2937;border-radius:8px;padding:10px;margin-bottom:8px;background:#0f172a;">` +
-                    `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px;">` +
-                    `<div style="color:#e5e7eb;font-weight:700;font-size:13px;">${esc(c.title)}</div>` +
-                    `<div style="font-size:11px;color:#93c5fd;">confidence ${(c.score * 100).toFixed(0)}%</div>` +
+            if (windowData && activeLog && activeLog.trpRunId && typeof window.trpFetchSeries === 'function') {
+                const labelTargets = new Set(['Serving cell name', 'DL throughput', 'UL throughput', 'Application throughput DL', 'Physical cell ID', 'Downlink EARFCN', 'RSRP', 'RSRQ', 'SINR', 'Cellid', 'Cell ID']);
+                const labelMap = (activeLog.trpMetricLabels && typeof activeLog.trpMetricLabels === 'object') ? activeLog.trpMetricLabels : {};
+                const wantedMetrics = Array.from(new Set(Object.entries(labelMap)
+                    .filter(([, friendly]) => labelTargets.has(String(friendly || '')))
+                    .map(([raw]) => String(raw || ''))
+                    .filter(Boolean)));
+                await Promise.all(wantedMetrics.map(async (metricName) => {
+                    try {
+                        const series = await window.trpFetchSeries(activeLog.trpRunId, metricName);
+                        if (!Array.isArray(series) || !series.length) return;
+                        const friendly = labelMap[metricName];
+                        windowData.points.forEach((pt) => {
+                            const t = toNum(pt.timestamp) ?? parseTs(pt.time);
+                            if (!Number.isFinite(t)) return;
+                            const v = pointDetailsNearestSeriesValue(series, t, 2200);
+                            if (v === undefined || v === null) return;
+                            if (!hasVal(pt[metricName])) pt[metricName] = v;
+                            if (friendly && !hasVal(pt[friendly])) pt[friendly] = v;
+                        });
+                    } catch (_e) {}
+                }));
+            }
+
+            let windowBlockHtml = '<div style="font-size:12px;color:#94a3b8;">No degradation window detected around selected point.</div>';
+            if (windowData && windowData.points.length) {
+                const first = windowData.points[0];
+                const last = windowData.points[windowData.points.length - 1];
+                const tsStart = parseTs(first.time);
+                const tsEnd = parseTs(last.time);
+                const durSec = (Number.isFinite(tsStart) && Number.isFinite(tsEnd)) ? Math.max(0, ((tsEnd - tsStart) / 1000)) : null;
+                const rowsMax = 220;
+                const rows = windowData.points.slice(0, rowsMax).map((pt) => {
+                    const t = String(pt.time || '');
+                    const tp = readThroughputs(pt);
+                    const pci = pointNum(pt, 'Physical cell ID', 'Radio.Lte.ServingCell[8].Pci', 'pci', 'sc') ?? pointContainsNum(pt, 'physical', 'cell', 'id') ?? pointContainsNum(pt, 'pci');
+                    const freq = pointNum(pt, 'Downlink EARFCN', 'Radio.Lte.ServingCell[8].Downlink.Earfcn', 'freq') ?? pointContainsNum(pt, 'earfcn');
+                    const rsrpP = pointNum(pt, 'RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'level') ?? pointContainsNum(pt, 'rsrp');
+                    const rsrqP = pointNum(pt, 'RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'qual') ?? pointContainsNum(pt, 'rsrq');
+                    const sinrP = pointNum(pt, 'SINR', 'RS-SINR', 'RSSINR', 'Radio.Lte.ServingCell[8].Sinr') ?? pointContainsNum(pt, 'sinr');
+                    let servingName = pointVal(pt, 'Serving cell name', 'Cell Name', 'Cell Identifier') || 'Unknown';
+                    let enb = decodeEnbCell(pointVal(pt, 'eNodeB ID-Cell ID', 'Cellid', 'Cell ID'));
+                    if ((servingName === 'Unknown' || enb === 'N/A') && window.resolveSmartSite) {
+                        const resolved = window.resolveSmartSite({ pci, sc: pci, freq, lat: pt.lat, lng: pt.lng, properties: pt.properties });
+                        if (resolved && resolved.name && servingName === 'Unknown') servingName = resolved.name;
+                        if (resolved && (resolved.rawEnodebCellId || resolved.id) && enb === 'N/A') enb = decodeEnbCell(resolved.rawEnodebCellId || resolved.id);
+                    }
+                    const pciFreq = `${Number.isFinite(pci) ? pci : 'N/A'} / ${Number.isFinite(freq) ? freq : 'N/A'}`;
+                    return `<tr>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(t)}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#e5e7eb;">${esc(servingName)}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#e5e7eb;">${esc(enb)}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(pciFreq)}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(rsrpP))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(rsrqP))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(sinrP))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(freq))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.appDl))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.dl))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.ul))}</td>` +
+                        `</tr>`;
+                }).join('');
+                const truncNote = windowData.points.length > rowsMax
+                    ? `<div style="font-size:11px;color:#94a3b8;margin-top:4px;">Showing first ${rowsMax} rows of ${windowData.points.length} samples.</div>`
+                    : '';
+                windowBlockHtml =
+                    `<div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">` +
+                    `Start: <b style="color:#e5e7eb;">${esc(String(first.time || 'N/A'))}</b> | ` +
+                    `End: <b style="color:#e5e7eb;">${esc(String(last.time || 'N/A'))}</b> | ` +
+                    `Duration: <b style="color:#e5e7eb;">${durSec === null ? 'N/A' : `${durSec.toFixed(1)} s`}</b> | ` +
+                    `Threshold: <b style="color:#e5e7eb;">${tpCfg.degraded}</b>` +
                     `</div>` +
-                    `<div style="font-size:12px;color:#cbd5e1;">${c.evidence.map((e) => '• ' + esc(e)).join('<br>')}</div>` +
-                    `</div>`
-                )).join('')
-                : '<div style="font-size:12px;color:#94a3b8;">No root-cause signal detected from available KPIs.</div>';
+                    `<div style="max-height:260px; overflow:auto; border:1px solid #1f2937; border-radius:8px;">` +
+                    `<table style="width:100%; border-collapse:collapse; font-size:11px;">` +
+                    `<thead style="position:sticky; top:0; background:#0f172a;">` +
+                    `<tr style="color:#93c5fd; text-align:left;">` +
+                    `<th style="padding:6px;">Time</th><th style="padding:6px;">Serving Cell</th><th style="padding:6px;">eNodeB-Cell</th><th style="padding:6px;">PCI/Freq</th>` +
+                    `<th style="padding:6px;">RSRP</th><th style="padding:6px;">RSRQ</th><th style="padding:6px;">SINR</th><th style="padding:6px;">Freq</th>` +
+                    `<th style="padding:6px;">App DL TP</th><th style="padding:6px;">DL TP</th><th style="padding:6px;">UL TP</th>` +
+                    `</tr></thead><tbody>${rows}</tbody></table></div>${truncNote}`;
+            }
 
+            const snapshotRows = [
+                ['DL throughput', fmt(dlTp)], ['Application throughput DL', fmt(appDlTp)], ['UL throughput', fmt(ulTp)],
+                ['RSRP', fmt(rsrp, ' dBm')], ['RSRQ', fmt(rsrq, ' dB')], ['SINR', fmt(sinr, ' dB')],
+                ['BLER DL', fmt(blerDl, ' %')], ['CQI (DL)', fmt(cqi)], ['DL MCS', fmt(dlMcs)], ['Rank/Layers', fmt(rank)],
+                ['Modulation (DL/UL)', fmt(modulation)], ['MIMO/CA', fmt(mimoCa)], ['RRC State', fmt(rrcState)],
+                ['HO Start/Complete', fmt(hoEvent)], ['Cell/PCI Change', fmt(pciChange)], ['EARFCN/Band Change', fmt(earfcnChange)],
+                ['RRC State Transition', fmt(rrcTransition)], ['Bearer / EPS Bearer', fmt(bearer)], ['TA Jumps', fmt(taJumps)]
+            ];
+            const snapshotHtml = snapshotRows.map(([k, v]) => `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1f2937;padding:3px 0;font-size:12px;"><span style="color:#94a3b8;">${esc(k)}</span><span style="color:#e5e7eb;font-weight:600;">${esc(v)}</span></div>`).join('');
+            const causesHtml = causes.length
+                ? causes.map((c) => `<div style="border:1px solid #1f2937;border-radius:8px;padding:10px;margin-bottom:8px;background:#0f172a;"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px;"><div style="color:#e5e7eb;font-weight:700;font-size:13px;">${esc(c.title)}</div><div style="font-size:11px;color:#93c5fd;">confidence ${(c.score * 100).toFixed(0)}%</div></div><div style="font-size:12px;color:#cbd5e1;">${c.evidence.map((e) => '• ' + esc(e)).join('<br>')}</div></div>`).join('')
+                : '<div style="font-size:12px;color:#94a3b8;">No root-cause signal detected from available KPIs.</div>';
             const recHtml = recommendations.length
-                ? recommendations.map((r) => (
-                    `<div style="margin-bottom:6px;font-size:12px;color:#e5e7eb;">• <span style="color:${r.pri === 'P1' ? '#ef4444' : (r.pri === 'P2' ? '#f97316' : '#eab308')};font-weight:700;">[${r.pri}]</span> ${esc(r.text)}</div>`
-                )).join('')
+                ? recommendations.map((r) => `<div style="margin-bottom:6px;font-size:12px;color:#e5e7eb;">• <span style="color:${r.pri === 'P1' ? '#ef4444' : (r.pri === 'P2' ? '#f97316' : '#eab308')};font-weight:700;">[${r.pri}]</span> ${esc(r.text)}</div>`).join('')
                 : '<div style="font-size:12px;color:#94a3b8;">No specific actions generated.</div>';
 
             const fullJson = esc(JSON.stringify(d, null, 2));
             const existingModal = document.querySelector('.dt-lte-analysis-modal-overlay');
             if (existingModal) existingModal.remove();
-
             const modalHtml = `
                 <div class="analysis-modal-overlay dt-lte-analysis-modal-overlay" style="z-index:10003;" onclick="if(event.target===this && this.dataset.dragging!=='true') this.remove()">
-                    <div class="analysis-modal" style="width: 760px; max-width: 95vw; position:fixed; z-index:10004;">
+                    <div class="analysis-modal" style="width: 980px; max-width: 97vw; position:fixed; z-index:10004;">
                         <div class="analysis-header" style="background:#1d4ed8; cursor:grab;">
                             <h3>DT LTE Analysis - ${esc(cellName)}</h3>
                             <button class="analysis-close-btn" onclick="this.closest('.analysis-modal-overlay').remove()">×</button>
                         </div>
-                        <div class="analysis-content" style="padding:18px; background:#0b1220; color:#e5e7eb; max-height:78vh; overflow-y:auto;">
+                        <div class="analysis-content" style="padding:18px; background:#0b1220; color:#e5e7eb; max-height:82vh; overflow-y:auto;">
                             <div style="font-size:12px;color:#93c5fd; margin-bottom:8px;">${esc(timeStr)} | Cell ${esc(enbCell)}</div>
                             <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center; margin-bottom:10px;">
                                 <div style="font-size:13px;color:#cbd5e1;">Throughput source: <b style="color:#e5e7eb;">${esc(usedTpSource)}</b></div>
                                 <div style="font-size:13px;color:#cbd5e1;">Used DL throughput: <b style="color:#e5e7eb;">${esc(fmt(usedTp))}</b></div>
                                 <div style="font-size:14px;font-weight:700;color:${tpColor};">${esc(tpStatus)}</div>
                             </div>
-
-                            <div style="margin-top:8px;">
-                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">KPI Snapshot Used</div>
-                                ${snapshotHtml}
-                            </div>
-
-                            <div style="margin-top:12px;">
-                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Root Causes</div>
-                                ${causesHtml}
-                            </div>
-
-                            <div style="margin-top:12px;">
-                                <div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Suggested Actions</div>
-                                ${recHtml}
-                            </div>
-
-                            <details style="margin-top:12px;">
-                                <summary style="cursor:pointer;color:#93c5fd;font-size:12px;">Full point data used (${keys.length} fields)</summary>
-                                <pre style="margin-top:6px; background:#08101d; border:1px solid #1f3559; border-radius:6px; padding:8px; color:#cbd5e1; font-size:11px; overflow:auto;">${fullJson}</pre>
-                            </details>
+                            <div style="margin-top:8px;"><div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Throughput Degradation Window</div>${windowBlockHtml}</div>
+                            <div style="margin-top:12px;"><div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">KPI Snapshot Used</div>${snapshotHtml}</div>
+                            <div style="margin-top:12px;"><div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Root Causes</div>${causesHtml}</div>
+                            <div style="margin-top:12px;"><div style="font-size:12px;color:#60a5fa;font-weight:700;margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Suggested Actions</div>${recHtml}</div>
+                            <details style="margin-top:12px;"><summary style="cursor:pointer;color:#93c5fd;font-size:12px;">Full point data used (${Object.keys(d || {}).length} fields)</summary><pre style="margin-top:6px; background:#08101d; border:1px solid #1f3559; border-radius:6px; padding:8px; color:#cbd5e1; font-size:11px; overflow:auto;">${fullJson}</pre></details>
                         </div>
                     </div>
                 </div>`;
-
             const div = document.createElement('div');
             div.innerHTML = modalHtml;
             document.body.appendChild(div.firstElementChild);
