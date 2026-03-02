@@ -980,7 +980,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (log && window.mapRenderer) {
             console.log('[SmartCare] Switching metric for ' + (layerId) + ' to ' + (metric));
             log.currentParam = metric; // Track active metric for this layer
-            window.mapRenderer.updateLayerMetric(layerId, log.points, metric);
+            const shouldAutoZoom = window.shouldAutoZoomOnMetricFirstOpen(log, metric);
+            if (shouldAutoZoom) {
+                window.mapRenderer.removeLogLayer(layerId);
+                window.mapRenderer.addLogLayer(layerId, log.points, metric, false);
+            } else {
+                window.mapRenderer.updateLayerMetric(layerId, log.points, metric);
+            }
 
             // Update UI active state
             const container = document.querySelector('#sc-item-' + (layerId) + ' .sc-metric-container');
@@ -4108,6 +4114,34 @@ document.addEventListener('DOMContentLoaded', () => {
         window.updateLegend();
     }
 
+    // First-open auto-zoom for key radio metrics (per log)
+    window.__metricFirstOpenZoomState = window.__metricFirstOpenZoomState || Object.create(null);
+    window.normalizeMetricForFirstOpenZoom = (metric) => {
+        const m = String(metric || '').toLowerCase().trim();
+        if (!m) return null;
+        if (m === 'level' || m === 'rscp' || m === 'rscp_not_combined') return 'rscp';
+        if (m === 'quality' || m === 'ecno' || m === 'serving ecno') return 'ecno';
+        if (m === 'rsrp') return 'rsrp';
+        if (m === 'rsrq') return 'rsrq';
+        const isNeighborMetric = /^n\d+[_\s]/.test(m) || m.includes('neighbor[') || m.includes('neighbor.');
+        if (isNeighborMetric) return null;
+        if (/\brsrp\b/.test(m)) return 'rsrp';
+        if (/\brsrq\b/.test(m)) return 'rsrq';
+        if (/\becno\b/.test(m)) return 'ecno';
+        if (/\brscp\b/.test(m)) return 'rscp';
+        return null;
+    };
+    window.shouldAutoZoomOnMetricFirstOpen = (log, metric) => {
+        const family = window.normalizeMetricForFirstOpenZoom(metric);
+        if (!family) return false;
+        const logKey = (log && (log.id ?? log.name)) !== undefined ? String(log.id ?? log.name) : '';
+        if (!logKey) return false;
+        const stateKey = `${logKey}::${family}`;
+        if (window.__metricFirstOpenZoomState[stateKey]) return false;
+        window.__metricFirstOpenZoomState[stateKey] = true;
+        return true;
+    };
+
     // Add overlay metric layer + legend entry (keeps existing layers)
     window.addMetricLegendLayer = (log, metric) => {
         if (!log || !metric || !window.mapRenderer) return;
@@ -4128,7 +4162,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         log.visible = false;
 
-        window.mapRenderer.addLogLayer(layerId, log.points, metric, true);
+        const shouldAutoZoom = window.shouldAutoZoomOnMetricFirstOpen(log, metric);
+        window.mapRenderer.addLogLayer(layerId, log.points, metric, !shouldAutoZoom);
         // Track current metric for this log (for later toggles)
         log.currentParam = metric;
 
@@ -5451,6 +5486,75 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 };
             }
 
+            // Fallback: direct SC/Pci matching from site index (helps neighbor-name resolution in point details)
+            const siteIndex = window.mapRenderer.siteIndex;
+            const toNum = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const valCI = (obj, key) => {
+                if (!obj || typeof obj !== 'object') return undefined;
+                const wanted = String(key || '').toLowerCase();
+                const hit = Object.keys(obj).find((k) => String(k || '').toLowerCase() === wanted);
+                return hit ? obj[hit] : undefined;
+            };
+            const sourceProps = p && p.properties && typeof p.properties === 'object' ? p.properties : null;
+            const sc = toNum(
+                p?.sc ?? p?.pci ?? p?.psc ??
+                valCI(sourceProps, 'Serving SC') ?? valCI(sourceProps, 'SC') ?? valCI(sourceProps, 'PSC')
+            );
+            const freq = toNum(
+                p?.freq ?? p?.uarfcn ?? p?.earfcn ??
+                valCI(sourceProps, 'Serving Freq') ?? valCI(sourceProps, 'Freq') ?? valCI(sourceProps, 'UARFCN') ?? valCI(sourceProps, 'EARFCN')
+            );
+            if (siteIndex && siteIndex.bySc && sc !== null) {
+                const pool = Array.isArray(siteIndex.bySc.get(String(sc))) ? siteIndex.bySc.get(String(sc)) : [];
+                if (pool.length) {
+                    const freqMatched = (freq !== null)
+                        ? pool.filter((x) => {
+                            const sf = toNum(x?.currentFreq ?? x?.freq);
+                            return sf === null ? false : Math.abs(sf - freq) < 1;
+                        })
+                        : [];
+                    const candidates = freqMatched.length ? freqMatched : pool;
+                    const chooseByDistance = (arr) => {
+                        if (!Array.isArray(arr) || !arr.length) return null;
+                        const plat = toNum(p?.lat);
+                        const plng = toNum(p?.lng);
+                        if (plat === null || plng === null) return arr[0];
+                        return arr
+                            .slice()
+                            .sort((a, b) => {
+                                const da = Math.pow(Number(a?.lat) - plat, 2) + Math.pow(Number(a?.lng) - plng, 2);
+                                const db = Math.pow(Number(b?.lat) - plat, 2) + Math.pow(Number(b?.lng) - plng, 2);
+                                return da - db;
+                            })[0];
+                    };
+                    const hit = chooseByDistance(candidates);
+                    if (hit) {
+                        const isLte = String(hit.tech || '').toLowerCase().includes('lte') || Boolean(hit.rawEnodebCellId);
+                        let finalId = hit.cellId || hit.calculatedEci || hit.id;
+                        if (isLte && hit.rawEnodebCellId) finalId = hit.rawEnodebCellId;
+                        else if (hit.rnc && hit.cid) finalId = `${hit.rnc}/${hit.cid}`;
+                        return {
+                            name: hit.cellName || hit.name || hit.siteName || null,
+                            id: finalId || null,
+                            lat: hit.lat,
+                            lng: hit.lng,
+                            tipLat: hit.tipLat,
+                            tipLng: hit.tipLng,
+                            azimuth: hit.azimuth,
+                            range: hit.currentRadius || hit.range || 100,
+                            rnc: hit.rnc,
+                            cid: hit.cid,
+                            pci: hit.pci || hit.sc,
+                            freq: hit.currentFreq || hit.freq,
+                            rawEnodebCellId: hit.rawEnodebCellId
+                        };
+                    }
+                }
+            }
+
             return NO_MATCH;
         } catch (e) {
             console.warn("resolveSmartSite error:", e);
@@ -5506,6 +5610,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         let connectionTargets = [];
         const sLac = p.lac || (p.parsed && p.parsed.serving ? p.parsed.serving.lac : null);
         const sFreq = p.freq || (p.parsed && p.parsed.serving ? p.parsed.serving.freq : null);
+        const getPointValCI = (key) => {
+            if (p && p[key] !== undefined) return p[key];
+            if (p && p.properties && typeof p.properties === 'object') {
+                const match = Object.keys(p.properties).find(k => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+                if (match) return p.properties[match];
+            }
+            return undefined;
+        };
 
         // 1. Serving Cell Connection
         let servingRes = window.resolveSmartSite(p);
@@ -5525,21 +5637,83 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 sc: pci, cellId: cellId, lac: sLac, freq: freq || sFreq, lat: p.lat, lng: p.lng
             });
         }
+        const neighborConnSeen = new Set();
+        const pushTypedNeighborConnection = (prefix, scRaw, freqRaw) => {
+            const typePrefix = String(prefix || '').toUpperCase().charAt(0);
+            if (typePrefix !== 'A' && typePrefix !== 'M' && typePrefix !== 'D') return;
+            if (scRaw === undefined || scRaw === null || String(scRaw).trim() === '' || String(scRaw).trim() === '-') return;
+            const scNum = Number(scRaw);
+            const freqNum = Number(freqRaw);
+            const scProbe = Number.isFinite(scNum) ? scNum : scRaw;
+            const freqProbe = Number.isFinite(freqNum) ? freqNum : (freqRaw !== undefined && freqRaw !== null && String(freqRaw).trim() !== '' ? freqRaw : sFreq);
+            const key = `${typePrefix}:${String(scProbe)}:${String(freqProbe ?? '')}`.toLowerCase();
+            if (neighborConnSeen.has(key)) return;
+            neighborConnSeen.add(key);
+            const lineColor = typePrefix === 'A' ? '#3b82f6' : (typePrefix === 'M' ? '#22c55e' : '#ef4444');
+            const lineWeight = typePrefix === 'A' ? 5 : 4;
+            const nRes = resolveNeighbor(scProbe, null, freqProbe);
+            if (!nRes) return;
+            if ((Number.isFinite(Number(nRes.lat)) && Number.isFinite(Number(nRes.lng))) || nRes.id) {
+                connectionTargets.push({
+                    lat: Number.isFinite(Number(nRes.lat)) ? Number(nRes.lat) : null,
+                    lng: Number.isFinite(Number(nRes.lng)) ? Number(nRes.lng) : null,
+                    color: lineColor, weight: lineWeight, cellId: nRes.id || null,
+                    azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
+                });
+            }
+        };
+        const readNeighborFromFields = (prefix, idx) => {
+            const base = `${prefix}${idx}`;
+            const sc = getPointValCI(`${base}_sc`)
+                ?? getPointValCI(`${base} SC`)
+                ?? getPointValCI(`${base}_psc`)
+                ?? getPointValCI(`${base} PSC`)
+                ?? getPointValCI(`${base}_pci`)
+                ?? getPointValCI(`${base} PCI`);
+            const freq = getPointValCI(`${base}_freq`)
+                ?? getPointValCI(`${base} Freq`)
+                ?? getPointValCI(`${base}_uarfcn`)
+                ?? getPointValCI(`${base} UARFCN`)
+                ?? getPointValCI(`${base}_earfcn`)
+                ?? getPointValCI(`${base} EARFCN`);
+            pushTypedNeighborConnection(prefix, sc, freq);
+        };
 
         // 2. Active Set Connections
         if (p.a2_sc !== undefined && p.a2_sc !== null) {
             const a2Res = resolveNeighbor(p.a2_sc, null, sFreq);
             if (a2Res.lat && a2Res.lng) connectionTargets.push({
-                lat: a2Res.lat, lng: a2Res.lng, color: '#ef4444', weight: 8, cellId: a2Res.id,
+                lat: a2Res.lat, lng: a2Res.lng, color: '#3b82f6', weight: 5, cellId: a2Res.id,
                 azimuth: a2Res.azimuth, range: a2Res.range, tipLat: a2Res.tipLat, tipLng: a2Res.tipLng
             });
         }
         if (p.a3_sc !== undefined && p.a3_sc !== null) {
             const a3Res = resolveNeighbor(p.a3_sc, null, sFreq);
             if (a3Res.lat && a3Res.lng) connectionTargets.push({
-                lat: a3Res.lat, lng: a3Res.lng, color: '#ef4444', weight: 8, cellId: a3Res.id,
+                lat: a3Res.lat, lng: a3Res.lng, color: '#3b82f6', weight: 5, cellId: a3Res.id,
                 azimuth: a3Res.azimuth, range: a3Res.range, tipLat: a3Res.tipLat, tipLng: a3Res.tipLng
             });
+        }
+
+        // 3. Monitored/Detected neighbor connections
+        if (p && p.parsed && Array.isArray(p.parsed.neighbors)) {
+            p.parsed.neighbors.forEach((n) => {
+                const typePrefix = String(n && (n.type || n.typeDisplay || n.neighbor_type) || '').trim().toUpperCase().charAt(0);
+                if (typePrefix !== 'M' && typePrefix !== 'D') return;
+                const sc = (n && (n.psc ?? n.sc ?? n.pci));
+                const freq = (n && (n.uarfcn ?? n.freq ?? n.earfcn));
+                pushTypedNeighborConnection(typePrefix, sc, freq);
+            });
+        }
+        for (let i = 1; i <= 16; i++) {
+            readNeighborFromFields('m', i);
+            readNeighborFromFields('d', i);
+            readNeighborFromFields('M', i);
+            readNeighborFromFields('D', i);
+            if (i >= 2 && i <= 3) {
+                readNeighborFromFields('a', i);
+                readNeighborFromFields('A', i);
+            }
         }
 
         // Generate RAW Data HTML
@@ -5802,7 +5976,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '</div>';
 
         let html = '\n' +
-            '            <div style="padding: 10px;">\n' +
+            '            <div class="point-details-root" style="padding: 10px;">\n' +
             '                <!-- Serving Cell Header (Fixed) -->\n' +
             '                ' + (servingRes && servingRes.name ?
                 '<div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid #444;">' +
@@ -5826,7 +6000,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '                    ' + (rawHtml) + '\n' +
             '                </div>\n' +
             '                \n' +
-            '                <div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:10px;">\n' +
+            '                <div class="point-analysis-actions" style="display:none; flex-wrap:wrap; gap:5px; margin-top:10px;">\n' +
             '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>\n' +
             '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>\n' +
             '                    <button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>\n' +
@@ -11033,6 +11207,24 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (typeof onClick === 'function') onClick();
         };
     }
+    function upsertPointDetailsAnalysisButton(headerDom) {
+        if (!headerDom) return;
+        let btn = document.getElementById('pointAnalysisToggleBtn');
+        const closeBtn = headerDom.querySelector('.info-panel-close');
+        if (!btn) {
+            btn = document.createElement('span');
+            btn.id = 'pointAnalysisToggleBtn';
+            btn.className = 'toggle-view-btn';
+            if (closeBtn) headerDom.insertBefore(btn, closeBtn);
+            else headerDom.appendChild(btn);
+        }
+        btn.innerHTML = 'Analysis';
+        btn.title = 'Show/hide analysis actions';
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            window.togglePointDetailsActions(btn);
+        };
+    }
 
     const doc = (s) => String(s || '').trim();
     const POINT_DETAILS_METRIC_INFO = {
@@ -11872,6 +12064,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     onSave: () => window.updateFloatingInfoPanel(p, logColor, contextLog || window.__activePointLog)
                 });
             });
+            upsertPointDetailsAnalysisButton(headerDom);
 
             // 3. Select Generator based on Mode
             const mode = window.pointDetailsMode || 'log'; // Default to log if undefined
@@ -11943,6 +12136,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         window.__pointDetailsNeighborSourceFilter = (cur === 'decoded_configured') ? 'all' : 'decoded_configured';
         if (window.lastMultiHits && typeof window.updateFloatingInfoPanelMulti === 'function') {
             window.updateFloatingInfoPanelMulti(window.lastMultiHits);
+        }
+    };
+    window.togglePointDetailsActions = (btn) => {
+        try {
+            const root = (btn && btn.closest && (btn.closest('.log-view-container') || btn.closest('.point-details-root')))
+                || document.getElementById('infoPanelContent')
+                || document;
+            const actionNodes = root && root.querySelectorAll ? Array.from(root.querySelectorAll('.point-analysis-actions')) : [];
+            if (!actionNodes.length) return;
+            const first = actionNodes[0];
+            const isHidden = !first || first.style.display === 'none' || window.getComputedStyle(first).display === 'none';
+            actionNodes.forEach((actions) => {
+                actions.style.display = isHidden ? 'flex' : 'none';
+            });
+            if (btn) btn.textContent = isHidden ? 'Hide Analysis' : 'Analysis';
+        } catch (e) {
+            console.warn('togglePointDetailsActions error:', e);
         }
     };
 
@@ -13238,7 +13448,28 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return undefined;
         };
         const servingSourceHint = String(getValCI('Serving Source') || '');
-        const showDualServing = /mimomeas/i.test(servingSourceHint);
+        const hasSnapshotValue = (v) => {
+            if (v === undefined || v === null) return false;
+            const s = String(v).trim();
+            if (!s) return false;
+            const low = s.toLowerCase();
+            return !(low === 'n/a' || low === 'na' || low === '-' || low === 'unknown' || low === 'null' || low === 'undefined' || low === 'nan');
+        };
+        const cellServingScExplicit = getValCI('CELLMEAS Serving SC');
+        const cellServingRscpExplicit = getValCI('CELLMEAS Serving RSCP');
+        const cellServingEcnoExplicit = getValCI('CELLMEAS Serving EcNo');
+        const cellServingFreqExplicit = getValCI('CELLMEAS Serving Freq');
+        const hasExplicitCellServingSnapshot = [cellServingScExplicit, cellServingRscpExplicit, cellServingEcnoExplicit, cellServingFreqExplicit].some(hasSnapshotValue);
+        const hasGenericCellServingSnapshot = [
+            getValCI('Serving SC'),
+            getValCI('Serving RSCP'),
+            getValCI('Serving EcNo'),
+            getValCI('Serving Freq'),
+            getValCI('Freq')
+        ].some(hasSnapshotValue);
+        const mimoBlocksForServing = (p && p.parsed && (p.parsed.mimoBlocks || p.parsed.blocks || p.parsed.cells)) || null;
+        const hasMimomeasEvidence = /mimomeas/i.test(servingSourceHint) || (Array.isArray(mimoBlocksForServing) && mimoBlocksForServing.length > 0);
+        const showDualServing = (!isLTE) && (hasMimomeasEvidence || hasExplicitCellServingSnapshot || hasGenericCellServingSnapshot);
         const cellServingScForDedup = getValCI('CELLMEAS Serving SC') ?? getValCI('Serving SC');
         const cellServingFreqForDedup = getValCI('CELLMEAS Serving Freq') ?? getValCI('Serving Freq') ?? getValCI('Freq') ?? sFreq;
         const findByKeyPattern = (obj, predicate) => {
@@ -13415,6 +13646,29 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const rscp = getValCI(`${base}_rscp`) ?? getValCI(`${base} RSCP`);
             const ecno = getValCI(`${base}_ecno`) ?? getValCI(`${base} EcNo`);
             const freq = getValCI(`${base}_freq`) ?? getValCI(`${base} Freq`) ?? sFreq;
+            const fuzzyNameByBase = (() => {
+                const b = String(base || '').toLowerCase();
+                const check = (obj) => {
+                    if (!obj || typeof obj !== 'object') return undefined;
+                    const keys = Object.keys(obj);
+                    const hit = keys.find((k) => {
+                        const lk = String(k || '').toLowerCase();
+                        if (!lk) return false;
+                        if (!(lk.startsWith(`${b} `) || lk.startsWith(`${b}_`) || lk === b)) return false;
+                        return lk.includes('name') || lk.includes('cell name') || lk.includes('cellname') || lk.includes('identifier');
+                    });
+                    return hit ? obj[hit] : undefined;
+                };
+                return check(p) ?? check(p && p.properties);
+            })();
+            const name = getValCI(`${base}_cell_name`)
+                ?? getValCI(`${base} Cell Name`)
+                ?? getValCI(`${base}_name`)
+                ?? getValCI(`${base} Name`)
+                ?? fuzzyNameByBase
+                ?? null;
+            const scNum = parseFiniteInt(sc);
+            const freqNum = parseFiniteInt(freq);
 
             if (sc === undefined && rscp === undefined && ecno === undefined) return null;
             return {
@@ -13422,7 +13676,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 sc: sc !== undefined ? sc : '-',
                 rscp: rscp !== undefined ? rscp : '-',
                 ecno: ecno !== undefined ? ecno : '-',
-                freq: freq !== undefined ? freq : '-'
+                freq: freq !== undefined ? freq : '-',
+                rat: 'UTRA',
+                psc: Number.isFinite(scNum) ? scNum : null,
+                uarfcn: Number.isFinite(freqNum) ? freqNum : null,
+                cellName: name,
+                name,
+                source_kind: 'measured'
             };
         };
         const normalizeCellKeyPart = (v) => {
@@ -13543,29 +13803,31 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const psc = parseFiniteInt(neighbor && neighbor.psc);
             const uarfcn = parseFiniteInt(neighbor && neighbor.uarfcn);
             const arfcn = parseFiniteInt(neighbor && neighbor.arfcn);
-                const bsicNorm = normalizeBsicValue(neighbor && neighbor.bsic, true) || null;
-                const bsicCode = bsicToResolverCode(neighbor && neighbor.bsic);
-                const lteSc = (neighbor && neighbor.sc !== undefined) ? neighbor.sc : undefined;
-                const lteFreq = (neighbor && neighbor.freq !== undefined) ? neighbor.freq : undefined;
-                const geranBcch = parseFiniteInt(neighbor && neighbor.bcch);
-                const probe = {
-                    sc: rat === 'UTRA'
-                        ? (Number.isFinite(psc) ? psc : lteSc)
-                        : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : lteSc) : lteSc),
-                    freq: rat === 'UTRA'
-                        ? (Number.isFinite(uarfcn) ? uarfcn : lteFreq)
-                        : (rat === 'GERAN' ? (Number.isFinite(arfcn) ? arfcn : (Number.isFinite(geranBcch) ? geranBcch : lteFreq)) : lteFreq),
-                    pci: rat === 'UTRA'
-                        ? (Number.isFinite(psc) ? psc : undefined)
-                        : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : undefined) : lteSc),
+            const bsicNorm = normalizeBsicValue(neighbor && neighbor.bsic, true) || null;
+            const bsicCode = bsicToResolverCode(neighbor && neighbor.bsic);
+            const lteSc = (neighbor && neighbor.sc !== undefined) ? neighbor.sc : undefined;
+            const lteScInt = parseFiniteInt(lteSc);
+            const lteFreq = (neighbor && neighbor.freq !== undefined) ? neighbor.freq : undefined;
+            const lteFreqInt = parseFiniteInt(lteFreq);
+            const geranBcch = parseFiniteInt(neighbor && neighbor.bcch);
+            const probe = {
+                sc: rat === 'UTRA'
+                    ? (Number.isFinite(psc) ? psc : lteScInt)
+                    : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : lteScInt) : lteScInt),
+                freq: rat === 'UTRA'
+                    ? (Number.isFinite(uarfcn) ? uarfcn : lteFreqInt)
+                    : (rat === 'GERAN' ? (Number.isFinite(arfcn) ? arfcn : (Number.isFinite(geranBcch) ? geranBcch : lteFreqInt)) : lteFreqInt),
+                pci: rat === 'UTRA'
+                    ? (Number.isFinite(psc) ? psc : lteScInt)
+                    : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : undefined) : lteScInt),
                 psc: Number.isFinite(psc) ? psc : undefined,
-                    uarfcn: Number.isFinite(uarfcn) ? uarfcn : undefined,
-                    arfcn: Number.isFinite(arfcn) ? arfcn : undefined,
-                    bcch: Number.isFinite(geranBcch) ? geranBcch : undefined,
-                    bsic: bsicNorm || undefined,
-                    lat: p.lat,
-                    lng: p.lng,
-                    lac: sLac
+                uarfcn: Number.isFinite(uarfcn) ? uarfcn : undefined,
+                arfcn: Number.isFinite(arfcn) ? arfcn : undefined,
+                bcch: Number.isFinite(geranBcch) ? geranBcch : undefined,
+                bsic: bsicNorm || undefined,
+                lat: p.lat,
+                lng: p.lng,
+                lac: sLac
             };
             if (window.resolveSmartSite && (probe.sc !== undefined || probe.freq !== undefined)) {
                 // Try with current LAC first
@@ -13586,7 +13848,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 }
             }
             return {
-                name: (neighbor && neighbor.cellName) || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null,
+                name: (neighbor && (neighbor.cellName || neighbor.name)) || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null,
                 azimuth: null, range: null, tipLat: null, tipLng: null
             };
         };
@@ -13707,7 +13969,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const rat = inferNeighborRat(n);
             const displayName = (resolved.name && resolved.name !== 'Unknown')
                 ? resolved.name
-                : (rat !== 'LTE' ? `${rat} Neighbor` : (n.cellName || 'Unknown'));
+                : (rat !== 'LTE' ? (n.cellName || n.name || `${rat} Neighbor`) : (n.cellName || n.name || 'Unknown'));
             const sourceKindRaw = String(n && n.source_kind || (isLteTrp ? 'inferred' : '')).toLowerCase();
             const rsrpNum = Number(n && (n.rsrp ?? n.rscp));
             const rsrqNum = Number(n && n.ecno);
@@ -13792,10 +14054,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? servingRes.rnc + '/' + servingRes.cid : '');
             sClickAction = 'onclick="window.highlightAndPan(' + servingRes.lat + ', ' + servingRes.lng + ', \'' + safeId + '\', \'serving\')" style="cursor: pointer; color: #fff; "';
         }
-        const cellServingSc = getValCI('CELLMEAS Serving SC') ?? getValCI('Serving SC');
-        const cellServingRscp = getValCI('CELLMEAS Serving RSCP') ?? getValCI('Serving RSCP') ?? p.level;
-        const cellServingEcno = getValCI('CELLMEAS Serving EcNo') ?? getValCI('Serving EcNo') ?? getValCI('EcNo');
-        const cellServingFreq = getValCI('CELLMEAS Serving Freq') ?? getValCI('Serving Freq') ?? getValCI('Freq') ?? sFreq;
+        const cellServingSc = cellServingScExplicit ?? getValCI('Serving SC');
+        const cellServingRscp = cellServingRscpExplicit ?? getValCI('Serving RSCP') ?? p.level;
+        const cellServingEcno = cellServingEcnoExplicit ?? getValCI('Serving EcNo') ?? getValCI('EcNo');
+        const cellServingFreq = cellServingFreqExplicit ?? getValCI('Serving Freq') ?? getValCI('Freq') ?? sFreq;
         const asCellDisplay = (v) => {
             if (v === undefined || v === null) return '-';
             const s = String(v).trim();
@@ -13808,8 +14070,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const s = String(v).trim();
             return s ? s : '-';
         };
-        const hasCellServingSnapshot = [cellServingSc, cellServingRscp, cellServingEcno, cellServingFreq]
-            .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
+        const hasCellServingSnapshot = [cellServingSc, cellServingRscp, cellServingEcno, cellServingFreq].some(hasSnapshotValue);
+        let cellServingName = sName;
+        let cellServingIdentity = identityLabel;
+        if (showDualServing && hasCellServingSnapshot && window.resolveSmartSite) {
+            const cellProbe = {
+                sc: parseFiniteInt(cellServingSc) ?? cellServingSc,
+                pci: parseFiniteInt(cellServingSc) ?? cellServingSc,
+                freq: parseFiniteInt(cellServingFreq) ?? cellServingFreq,
+                lac: sLac,
+                lat: p.lat,
+                lng: p.lng,
+                properties: p.properties
+            };
+            const cellResolved = window.resolveSmartSite(cellProbe);
+            if (cellResolved && cellResolved.name && cellResolved.name !== 'Unknown') {
+                cellServingName = cellResolved.name;
+            }
+            const cellResolvedId = cellResolved && (cellResolved.rawEnodebCellId || cellResolved.id);
+            if (cellResolvedId) cellServingIdentity = cellResolvedId;
+        }
 
         // Serving Row
         rows += '<tr class="log-row serving-row">' +
@@ -13820,10 +14100,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             '<td class="log-cell-val">' + asRfDisplay(sEcNo) + '</td>' +
             '<td class="log-cell-val">' + sFreq + '</td>' +
             '</tr>';
-        if (showDualServing && hasCellServingSnapshot) {
+        if (showDualServing) {
             rows += '<tr class="log-row">' +
                 '<td class="log-cell-type" style="color:#93c5fd;">Serving (CELLMEAS)</td>' +
-                '<td class="log-cell-name">' + sName + ' <span style="color:#666; font-size:10px;">(' + identityLabel + ')</span></td>' +
+                '<td class="log-cell-name">' + cellServingName + ' <span style="color:#666; font-size:10px;">(' + cellServingIdentity + ')</span></td>' +
                 '<td class="log-cell-val">' + asCellDisplay(cellServingSc) + '</td>' +
                 '<td class="log-cell-val">' + asRfDisplay(cellServingRscp) + '</td>' +
                 '<td class="log-cell-val">' + asRfDisplay(cellServingEcno) + '</td>' +
@@ -14558,6 +14838,45 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             findByTokens(['tx', 'power']);
         const txPowerNum = Number(txPowerRaw);
         const txPowerValue = Number.isFinite(txPowerNum) ? (Number.isInteger(txPowerNum) ? `${txPowerNum} dBm` : `${txPowerNum.toFixed(1)} dBm`) : txPowerRaw;
+        const rssiValue = getAny(
+            'RSSI',
+            'Rssi',
+            'Serving RSSI',
+            'Radio.UMTS.CellMeasure.RSSI',
+            'Radio.UMTS.ServingCell.RSSI',
+            'Radio.UMTS.RSSI'
+        ) ?? findByTokens(['serving', 'rssi']) ?? findByTokens(['rssi']);
+        const activeSetSizeValue = getAny(
+            'Active Set Size',
+            'ActiveSetSize',
+            'AS Size',
+            'AS size',
+            'Radio.UMTS.ActiveSet.Size'
+        ) ?? findByTokens(['active', 'set', 'size']);
+        const activeSetSizeValueFinal = (() => {
+            const toIntIfValid = (v) => {
+                const n = Number(v);
+                if (!Number.isFinite(n)) return null;
+                const rounded = Math.round(n);
+                return (rounded >= 1 && rounded <= 8) ? rounded : null;
+            };
+            const raw = toIntIfValid(activeSetSizeValue);
+            if (isLTE) return raw ?? activeSetSizeValue;
+
+            // Derive UMTS AS size from detected active-neighbor rows (A2/A3/...)
+            const activeNeighborCount = Array.isArray(neighbors)
+                ? neighbors.reduce((acc, n) => {
+                    const typeTxt = String((n && (n.type || n.typeDisplay)) || '').trim().toUpperCase();
+                    return typeTxt.startsWith('A') ? acc + 1 : acc;
+                }, 0)
+                : 0;
+            const derived = activeNeighborCount > 0 ? (1 + activeNeighborCount) : null;
+
+            if (raw !== null && derived !== null) return Math.max(raw, derived);
+            if (raw !== null) return raw;
+            if (derived !== null) return derived;
+            return activeSetSizeValue;
+        })();
         const cqiDlValue = getAny(
             'Radio.Lte.ServingCell[8].Stream[2].Cqi',
             'Radio.Lte.ServingCell[8].Cqi',
@@ -16158,14 +16477,24 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         })();
 
         const servingNameMetricDisplay = String(sName || '').replace(/\s+\(est\)$/i, '').trim() || 'Unknown';
+        const rncCidValue = (sRnc !== null && sRnc !== undefined && sCid !== null && sCid !== undefined)
+            ? `${sRnc}/${sCid}`
+            : (String(identityLabel || '').includes('/') ? identityLabel : undefined);
+        const servingFreqMetricLabel = isLTE ? 'Downlink EARFCN' : 'UARFCN';
+        const servingScMetricLabel = isLTE ? 'Physical cell ID' : 'SC';
         pushMetric('Serving cell name', servingNameMetricDisplay, { estimated: false });
         pushMetric('PCell', pCellSCellInfo && pCellSCellInfo.pcell, { estimated: false });
         pushMetric('SCell', pCellSCellInfo && pCellSCellInfo.scell, { estimated: false });
         pushMetric('Application throughput DL', appThroughputDl);
-        pushMetric('Cell ID', cellIdValue);
-        pushMetric('Cellid', cellidValue);
+        if (isLTE) {
+            pushMetric('Cell ID', cellIdValue);
+            pushMetric('Cellid', cellidValue);
+            pushMetric('eNodeB ID', enbOnly);
+        } else {
+            pushMetric('RNC/CID', rncCidValue);
+        }
         pushMetric('DL throughput', dlThroughput);
-        pushMetric('Downlink EARFCN', sFreq);
+        pushMetric(servingFreqMetricLabel, sFreq);
         pushMetric('Band', bandValue);
         pushMetric('BW', bwValue);
         pushMetric('UE category', ueCategoryValue);
@@ -16173,10 +16502,16 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('CA capability', caCapabilityValue);
         pushMetric('CA Status', caStatusValue);
         pushMetric('CA SCell Add/Remove', caScellAddRemoveValue);
-        pushMetric('eNodeB ID', enbOnly);
-        pushMetric('Physical cell ID', sSC);
-        pushMetric('RSRP', sRSCP);
-        pushMetric('RSRQ', sEcNo);
+        pushMetric(servingScMetricLabel, sSC, { estimated: false });
+        if (isLTE) {
+            pushMetric('RSRP', sRSCP);
+            pushMetric('RSRQ', sEcNo);
+        } else {
+            pushMetric('RSCP', sRSCP);
+            pushMetric('EcNo', sEcNo);
+            pushMetric('RSSI', rssiValue);
+            pushMetric('Active Set Size', activeSetSizeValueFinal);
+        }
         pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
         pushMetric('Tracking area code', tacValue);
         pushMetric('UL throughput', ulThroughput);
@@ -16261,6 +16596,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'Physical cell ID': sSC,
             'RSRP': sRSCP,
             'RSRQ': sEcNo,
+            'RSCP': sRSCP,
+            'EcNo': sEcNo,
+            'RSSI': rssiValue,
+            'Active Set Size': activeSetSizeValueFinal,
             'SINR': (getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr'])),
             'Tracking area code': tacValue,
             'UL throughput': ulThroughput,
@@ -16340,14 +16679,124 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const srcTag = String(n && n.source_kind || '').toLowerCase();
             const nameWithSource = (n.name || 'N/A') + (srcTag ? ` [${srcTag}]` : '');
             pushMetric(`N${i} cell name`, nameWithSource);
-            pushMetric(`N${i} RSRP`, n.rscp);
-            pushMetric(`N${i} RSRQ`, n.ecno);
+            pushMetric(`N${i} ${isLTE ? 'RSRP' : 'RSCP'}`, n.rscp);
+            pushMetric(`N${i} ${isLTE ? 'RSRQ' : 'EcNo'}`, n.ecno);
             pushMetric(`N${i} SINR`, n.sinr ?? 'N/A');
             pushMetric(`N${i} Freq`, n.freq);
         }
 
+        const buildRatScopedMetricRows = (rows, isLteServing) => {
+            if (isLteServing) return rows;
+            const out = [];
+            const byBase = new Map();
+            const allMetricRows = (rows || []).filter(r => r && !r.header);
+            allMetricRows.forEach((row) => {
+                const base = String(row.baseLabel || row.label || '').trim();
+                if (!base || byBase.has(base)) return;
+                byBase.set(base, row);
+            });
+            const used = new Set();
+            const appendSection = (title, labels) => {
+                const picked = [];
+                (labels || []).forEach((label) => {
+                    const row = byBase.get(label);
+                    if (!row) return;
+                    used.add(label);
+                    picked.push(row);
+                });
+                if (!picked.length) return;
+                out.push({ label: title, value: '', header: true });
+                out.push(...picked);
+            };
+
+            appendSection('VOICE', [
+                'Serving cell name',
+                'RNC/CID',
+                'SC',
+                'UARFCN',
+                'RSCP',
+                'EcNo',
+                'RSSI',
+                'Active Set Size',
+                'RRC State (decoded exact)',
+                'RRC State',
+                'RRC Re-establishment',
+                'HO Start/Complete',
+                'HO command',
+                'HO execution time',
+                'HO failure',
+                'RLF',
+                'RLF root-cause details',
+                'Reestablishment timeline',
+                'RLF reason breakdown',
+                'Cell/PCI Change (inferred)',
+                'RRC State Transition',
+                'HARQ',
+                'HARQ (proxy)',
+                'BLER DL',
+                'BLER UL',
+                'Tx power'
+            ]);
+
+            appendSection('DATA', [
+                'DL throughput',
+                'UL throughput',
+                'RTT',
+                'Packet loss (proxy)',
+                'Retransmissions (proxy)',
+                'Bearer active'
+            ]);
+
+            const neighborMetricPriority = (metricLabel) => {
+                const m = String(metricLabel || '').toLowerCase();
+                if (m.includes('cell name')) return 0;
+                if (m.includes('rscp') || m.includes('rsrp')) return 1;
+                if (m.includes('ecno') || m.includes('rsrq')) return 2;
+                if (m.includes('sinr')) return 3;
+                if (m.includes('freq')) return 4;
+                return 9;
+            };
+            const neighborRows = allMetricRows
+                .filter((row) => /^N\d+\s/.test(String(row.baseLabel || row.label || '').trim()))
+                .slice()
+                .sort((a, b) => {
+                    const ma = String(a.baseLabel || a.label || '').trim().match(/^N(\d+)\s+(.+)$/);
+                    const mb = String(b.baseLabel || b.label || '').trim().match(/^N(\d+)\s+(.+)$/);
+                    const na = ma ? Number(ma[1]) : 999;
+                    const nb = mb ? Number(mb[1]) : 999;
+                    if (na !== nb) return na - nb;
+                    const pa = neighborMetricPriority(ma ? ma[2] : '');
+                    const pb = neighborMetricPriority(mb ? mb[2] : '');
+                    return pa - pb;
+                });
+            if (neighborRows.length) {
+                out.push({ label: 'NEIGHBORS', value: '', header: true });
+                neighborRows.forEach((row) => {
+                    const base = String(row.baseLabel || row.label || '').trim();
+                    if (base) used.add(base);
+                    out.push(row);
+                });
+            }
+
+            // Keep any UMTS-safe leftovers at the end to avoid silently hiding useful decoded fields.
+            const leftovers = allMetricRows.filter((row) => {
+                const base = String(row.baseLabel || row.label || '').trim();
+                if (!base || used.has(base)) return false;
+                if (/^A3\/A5/.test(base)) return false;
+                if (/EARFCN|Band/i.test(base)) return false;
+                if (/Cell ID|Cellid|eNodeB ID/i.test(base)) return false;
+                return true;
+            });
+            if (leftovers.length) {
+                out.push({ label: 'OTHER', value: '', header: true });
+                out.push(...leftovers);
+            }
+            return out;
+        };
+        const scopedMetricRows = buildRatScopedMetricRows(metricRows, isLTE);
+
         let extraMetricsHtml = '';
-        metricRows.forEach((row) => {
+        scopedMetricRows.forEach((row) => {
             if (row.header) {
                 extraMetricsHtml += '<div style="border-bottom:1px solid #334155; padding:6px 0 4px 0; margin-top:4px; color:#93c5fd; font-size:11px; font-weight:700;">' +
                     row.label +
@@ -16425,7 +16874,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
             extraMetricsSection +
 
-            '<div style="display:flex; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
+            '<div class="point-analysis-actions" style="display:none; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
             '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
             '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>' +
             '<button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>' +
@@ -16440,35 +16889,55 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             '</div>';
 
 
-        // Add connection targets for top 3 neighbors if they resolve
-        neighbors.slice(0, 3).forEach(n => {
+        // Draw neighbor connection lines by source type:
+        // - Active    (A*) => Blue (thinner than serving)
+        // - Monitored (M*) => Green
+        // - Detected  (D*) => Red
+        // Serving line remains Blue/thick (already pushed above)
+        const neighborConnectionSeen = new Set();
+        neighbors.forEach((n) => {
+            const typeRaw = String((n && (n.type || n.typeDisplay)) || '').trim().toUpperCase();
+            const prefix = typeRaw.charAt(0);
+            if (prefix !== 'A' && prefix !== 'M' && prefix !== 'D') return;
+
+            const lineColor = prefix === 'A' ? '#3b82f6' : (prefix === 'M' ? '#22c55e' : '#ef4444');
+            const lineWeight = prefix === 'A' ? 5 : 4;
+            const dedupeKey = String(
+                (n && n.id) ||
+                `${prefix}:${n && n.sc !== undefined ? n.sc : '-'}:${n && n.freq !== undefined ? n.freq : '-'}`
+            ).toLowerCase();
+            if (neighborConnectionSeen.has(dedupeKey)) return;
+            neighborConnectionSeen.add(dedupeKey);
+
             const hasDirectCoords = Number.isFinite(Number(n.lat)) && Number.isFinite(Number(n.lng));
             if (hasDirectCoords) {
                 connectionTargets.push({
-                    lat: Number(n.lat), lng: Number(n.lng), color: '#ef4444', weight: 4, cellId: n.id,
+                    lat: Number(n.lat), lng: Number(n.lng), color: lineColor, weight: lineWeight, cellId: n.id,
                     azimuth: n.azimuth, range: n.range, tipLat: n.tipLat, tipLng: n.tipLng
                 });
                 return;
             }
             if (!window.resolveSmartSite) return;
-            const nRes = window.resolveSmartSite({ sc: n.sc, freq: n.freq, lat: p.lat, lng: p.lng, pci: n.sc, lac: sLac });
+            const scProbe = (Number.isFinite(Number(n && n.psc)) ? Number(n.psc) : (Number.isFinite(Number(n && n.sc)) ? Number(n.sc) : n.sc));
+            const freqProbe = (Number.isFinite(Number(n && n.uarfcn)) ? Number(n.uarfcn) : (Number.isFinite(Number(n && n.freq)) ? Number(n.freq) : n.freq));
+            const nRes = window.resolveSmartSite({ sc: scProbe, freq: freqProbe, lat: p.lat, lng: p.lng, pci: scProbe, lac: sLac });
             if (nRes && Number.isFinite(Number(nRes.lat)) && Number.isFinite(Number(nRes.lng))) {
                 connectionTargets.push({
-                    lat: Number(nRes.lat), lng: Number(nRes.lng), color: '#ef4444', weight: 4, cellId: nRes.id,
+                    lat: Number(nRes.lat), lng: Number(nRes.lng), color: lineColor, weight: lineWeight, cellId: nRes.id,
                     azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
                 });
                 return;
             }
             if (nRes && (nRes.rawEnodebCellId || nRes.id)) {
                 connectionTargets.push({
-                    lat: null, lng: null, color: '#ef4444', weight: 4, cellId: (nRes.rawEnodebCellId || nRes.id),
+                    lat: null, lng: null, color: lineColor, weight: lineWeight, cellId: (nRes.rawEnodebCellId || nRes.id),
                     azimuth: nRes.azimuth, range: nRes.range, tipLat: nRes.tipLat, tipLng: nRes.tipLng
                 });
                 return;
             }
             if (n && n.id) {
                 connectionTargets.push({
-                    lat: null, lng: null, color: '#ef4444', weight: 4, cellId: n.id,
+                    lat: null, lng: null, color: lineColor, weight: lineWeight, cellId: n.id,
                     azimuth: n.azimuth, range: n.range, tipLat: n.tipLat, tipLng: n.tipLng
                 });
             }
@@ -16514,6 +16983,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             upsertPointDetailsLteSettingsButton(headerDom, showLteSettings, () => {
                 window.openDtLteEpisodeSettings();
             });
+            upsertPointDetailsAnalysisButton(headerDom);
 
             let allConnectionTargets = [];
             let aggregatedData = [];
@@ -23069,7 +23539,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             // 3. Visualize
             if (window.mapRenderer) {
                 log.currentParam = data.param; // SYNC: Update active metric for this log
-                window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);
+                const shouldAutoZoom = window.shouldAutoZoomOnMetricFirstOpen(log, data.param);
+                if (shouldAutoZoom) {
+                    window.mapRenderer.removeLogLayer(log.id);
+                    window.mapRenderer.addLogLayer(log.id, log.points, data.param, false);
+                } else {
+                    window.mapRenderer.updateLayerMetric(log.id, log.points, data.param);
+                }
 
                 // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)
                 // Ensure Legend is updated AGAIN after metric update (metrics might be calc'd inside renderer)

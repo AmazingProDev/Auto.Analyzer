@@ -1265,11 +1265,33 @@ class MapRenderer {
 
         const layerGroup = L.layerGroup();
         const useIcon = options && options.iconUrl;
+        const useFlag = !!(options && options.useFlag);
         const iconObj = useIcon ? L.icon({
             iconUrl: options.iconUrl,
             iconSize: options.iconSize || [32, 32],
             iconAnchor: options.iconAnchor || [16, 16],
             className: options.iconClass || ''
+        }) : null;
+        const flagColor = (options && options.flagColor) || '#ef4444';
+        const isTallFlag = String((options && options.flagStyle) || '').toLowerCase() === 'tall';
+        const flagWidth = isTallFlag ? 18 : 14;
+        const flagHeight = isTallFlag ? 34 : 18;
+        const poleHeight = isTallFlag ? 32 : 16;
+        const poleWidth = isTallFlag ? 3 : 2;
+        const triangleTop = isTallFlag ? 3 : 2;
+        const triangleHalfHeight = isTallFlag ? 7 : 5;
+        const triangleWidth = isTallFlag ? 13 : 10;
+        const poleLeft = isTallFlag ? 1 : 1;
+        const triangleLeft = isTallFlag ? 4 : 3;
+        const iconAnchorY = isTallFlag ? 32 : 16;
+        const flagIcon = useFlag ? L.divIcon({
+            className: 'event-flag-icon',
+            html: '<div style="position:relative;width:' + flagWidth + 'px;height:' + flagHeight + 'px;">' +
+                '<span style="position:absolute;left:' + poleLeft + 'px;top:1px;width:' + poleWidth + 'px;height:' + poleHeight + 'px;background:#f8fafc;border-radius:1px;opacity:0.95;"></span>' +
+                '<span style="position:absolute;left:' + triangleLeft + 'px;top:' + triangleTop + 'px;width:0;height:0;border-top:' + triangleHalfHeight + 'px solid transparent;border-bottom:' + triangleHalfHeight + 'px solid transparent;border-left:' + triangleWidth + 'px solid ' + flagColor + ';filter:drop-shadow(0 0 1px rgba(0,0,0,0.6));"></span>' +
+                '</div>',
+            iconSize: [flagWidth, flagHeight],
+            iconAnchor: [2, iconAnchorY]
         }) : null;
 
         points.forEach(p => {
@@ -1313,16 +1335,18 @@ class MapRenderer {
 
             const marker = useIcon
                 ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: true })
-                : L.circleMarker([p.lat, p.lng], {
-                    radius: radius,
-                    color: '#fff', // White border for contrast
-                    weight: 2,
-                    fillColor: fillColor,
-                    fillOpacity: 1,
-                    pane: 'eventsPane',
-                    className: 'event-marker',
-                    interactive: true
-                });
+                : useFlag
+                    ? L.marker([p.lat, p.lng], { icon: flagIcon, pane: 'eventsPane', interactive: true })
+                    : L.circleMarker([p.lat, p.lng], {
+                        radius: radius,
+                        color: '#fff', // White border for contrast
+                        weight: 2,
+                        fillColor: fillColor,
+                        fillOpacity: 1,
+                        pane: 'eventsPane',
+                        className: 'event-marker',
+                        interactive: true
+                    });
 
             if (typeof this.layerZ === 'number') {
                 if (typeof marker.setZIndexOffset === 'function') marker.setZIndexOffset(this.layerZ);

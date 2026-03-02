@@ -18,7 +18,9 @@ from trp_importer import (
     ensure_schema,
     build_metric_catalog,
     build_event_catalog,
-    build_kpi_type_summary
+    build_kpi_type_summary,
+    _extract_sidebar_info,
+    build_l1l2_scheduler_index,
 )
 
 
@@ -38,6 +40,113 @@ def build_minimal_trp(path):
 
 
 class TrpImporterTests(unittest.TestCase):
+    def test_l1l2_scheduler_index_flags_non_per_tti_when_sampling_is_slow(self):
+        kpis = [
+            {"time": "2025-12-04T11:00:00.000Z", "name": "Radio.Lte.ServingCell[8].Pdsch.NumberOfResourceBlocks", "value_num": 8},
+            {"time": "2025-12-04T11:00:01.000Z", "name": "Radio.Lte.ServingCell[8].Pdsch.NumberOfResourceBlocks", "value_num": 10},
+            {"time": "2025-12-04T11:00:02.000Z", "name": "Radio.Lte.ServingCell[8].Pdsch.NumberOfResourceBlocks", "value_num": 7},
+            {"time": "2025-12-04T11:00:00.000Z", "name": "Radio.Lte.ServingCell[8].Pdsch.Throughput", "value_num": 10240},
+        ]
+        idx = build_l1l2_scheduler_index(kpis, [])
+        fields = idx.get("fields") or {}
+        rb = fields.get("allocated_rb_dl") or {}
+        stats = rb.get("stats") or {}
+        self.assertEqual(stats.get("sampleCount"), 3)
+        self.assertFalse(bool(stats.get("perTtiExact")))
+        self.assertEqual((stats.get("intervalMs") or {}).get("p50"), 1000.0)
+        limitations = (idx.get("availability") or {}).get("limitations") or []
+        self.assertTrue(any("~1 ms cadence" in str(x) for x in limitations))
+        self.assertTrue(any("Layer1/Layer2 raw message payload" in str(x) for x in limitations))
+
+    def test_l1l2_scheduler_index_detects_payload_event_presence(self):
+        events = [
+            {"event_name": "Message.Layer2.LteMac.UlGrant"},
+            {"event_name": "Message.Layer3.Errc.DcchUl.MeasurementReport"},
+        ]
+        idx = build_l1l2_scheduler_index([], events)
+        avail = idx.get("availability") or {}
+        self.assertTrue(bool(avail.get("rawPayloadEventsDetected")))
+        self.assertTrue(bool(avail.get("perDecodeSupported")))
+        self.assertIn("Message.Layer2.LteMac.UlGrant", avail.get("matchingPayloadEvents") or [])
+
+    def test_extract_sidebar_info_prefers_decoded_ue_capability_summary(self):
+        events = [
+            {
+                "time": "2025-12-04T11:35:57.100Z",
+                "event_name": "Message.Layer3.Errc.DcchUl.UeCapabilityInformation",
+                "params_map": {
+                    "ue_cap_info_summary": json.dumps({
+                        "ueCategory": 6,
+                        "ueCategoryLabel": "Cat 6",
+                        "mimoCapability": "2x2 capable (decoded UE capability)",
+                        "caCapability": "CA capable (MaxNumCarriers=3)"
+                    })
+                },
+            }
+        ]
+        info = _extract_sidebar_info([], events)
+        self.assertEqual(info.get("ue_category"), "Cat 6")
+        self.assertEqual(info.get("mimo_capability"), "2x2 capable (decoded UE capability)")
+        self.assertEqual(info.get("ca_capability"), "CA capable (MaxNumCarriers=3)")
+        self.assertEqual(info.get("ue_capability_source"), "decoded_ue_capability_information")
+
+    def test_extract_sidebar_info_builds_ca_capability_from_band_combos(self):
+        events = [
+            {
+                "time": "2025-12-04T11:35:58.100Z",
+                "event_name": "Message.Layer3.Errc.DcchUl.UeCapabilityInformation",
+                "params_map": {
+                    "ue_cap_info_summary": json.dumps({
+                        "ueCategory": 6,
+                        "ueCategoryLabel": "Cat 6",
+                        "mimoCapability": "2x2 capable (decoded UE capability)",
+                        "maxNumCarriers": 10
+                    }),
+                    "ue_cap_info_full_json": json.dumps({
+                        "supportedBandCombination-r10": [
+                            {"bandParameterList-r10": [{"bandEUTRA-r10": 3}, {"bandEUTRA-r10": 7}]},
+                            {"bandParameterList-r10": [{"bandEUTRA-r10": 3}, {"bandEUTRA-r10": 20}]}
+                        ]
+                    }),
+                },
+            }
+        ]
+        info = _extract_sidebar_info([], events)
+        ca = str(info.get("ca_capability") or "")
+        self.assertIn("band combos:", ca)
+        self.assertIn("B3+B7", ca)
+        self.assertIn("B3+B20", ca)
+        self.assertIn("MaxNumCarriers=10", ca)
+        self.assertEqual(info.get("ca_band_combinations"), ["B3+B7", "B3+B20"])
+
+    def test_extract_sidebar_info_infers_capabilities_from_kpis(self):
+        kpis = [
+            {"time": "2025-12-04T11:00:00Z", "name": "Pocket.General.Device.MaxNumCarriers", "value_num": 10},
+            {"time": "2025-12-04T11:00:01Z", "name": "Radio.Lte.ServingCell[8].Rank4.FeedbackCount", "value_num": 7},
+            {"time": "2025-12-04T11:00:01Z", "name": "Radio.Lte.ServingSystem.MimoEnabled", "value_num": 1},
+            {"time": "2025-12-04T11:00:02Z", "name": "Radio.Lte.ServingSystem.Tac", "value_num": 8362},
+        ]
+        info = _extract_sidebar_info(kpis, [])
+        self.assertEqual(info.get("ca_capability_inferred"), "CA capable (MaxNumCarriers=10)")
+        self.assertEqual(info.get("mimo_capability_inferred"), "4x4 capable (inferred from Rank4 feedback)")
+        self.assertTrue(str(info.get("ue_category_inferred") or "").startswith("Cat 6+"))
+        self.assertEqual(info.get("tac"), 8362)
+
+    def test_extract_sidebar_info_prefers_decoded_sib1_tac_when_kpi_missing(self):
+        events = [
+            {
+                "time": "2025-12-04T11:00:01Z",
+                "event_name": "Message.Layer3.Errc.BcchDlSch.SystemInformationBlockType1",
+                "params_map": {
+                    "rrc_message_id": "sib1",
+                    "sib1_summary": json.dumps({"trackingAreaCode": "0x20AA"}),
+                },
+            }
+        ]
+        info = _extract_sidebar_info([], events)
+        self.assertEqual(info.get("tac"), 8362)
+        self.assertEqual(info.get("tac_source"), "decoded_sib1")
+
     def test_zip_slip_prevention(self):
         with tempfile.TemporaryDirectory() as td:
             zpath = os.path.join(td, 'evil.zip')

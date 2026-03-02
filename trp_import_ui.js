@@ -70,8 +70,8 @@
 
     const TRP_NEIGHBOR_WINDOW_STORAGE_KEY = 'OPTIM_TRP_NEIGHBOR_WINDOW_MS';
     const TRP_NEIGHBOR_ALIGN_STORAGE_KEY = 'OPTIM_TRP_NEIGHBOR_ALIGN_MS';
-    const TRP_NEIGHBOR_WINDOW_DEFAULT_MS = 1000;
-    const TRP_NEIGHBOR_ALIGN_DEFAULT_MS = 300;
+    const TRP_NEIGHBOR_WINDOW_DEFAULT_MS = 200;
+    const TRP_NEIGHBOR_ALIGN_DEFAULT_MS = 80;
     const TRP_NEIGHBOR_WINDOW_MIN_MS = 100;
     const TRP_NEIGHBOR_WINDOW_MAX_MS = 10000;
     const TRP_NEIGHBOR_ALIGN_MIN_MS = 20;
@@ -1046,7 +1046,13 @@
             { key: '__info_enodeb_id', src: 'enodeb_id', label: 'eNodeB ID' },
             { key: '__info_cell_id', src: 'cell_id', label: 'Cell ID' },
             { key: '__info_dl_earfcn', src: 'dl_earfcn', label: 'Downlink EARFCN' },
-            { key: '__info_tac', src: 'tac', label: 'Tracking area code' }
+            { key: '__info_tac', src: 'tac', label: 'Tracking area code' },
+            { key: '__info_ue_category', src: 'ue_category', label: 'UE category' },
+            { key: '__info_ue_category_inferred', src: 'ue_category_inferred', label: 'UE category' },
+            { key: '__info_mimo_capability', src: 'mimo_capability', label: 'MIMO capability' },
+            { key: '__info_mimo_capability_inferred', src: 'mimo_capability_inferred', label: 'MIMO capability' },
+            { key: '__info_ca_capability', src: 'ca_capability', label: 'CA capability' },
+            { key: '__info_ca_capability_inferred', src: 'ca_capability_inferred', label: 'CA capability' }
         ];
         const out = [];
         const values = {};
@@ -1251,16 +1257,64 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         if (s === 'pci') return 'pci';
         if (s === 'rsrp') return 'rsrp';
         if (s === 'rsrq') return 'rsrq';
+        if (s === 'cinr' || s === 'sinr') return 'cinr';
         if (s === 'earfcn' || s === 'frequency') return 'earfcn';
         return null;
     }
 
     function parseLteNeighborMetricName(metricName) {
-        const m = String(metricName || '').match(/^Radio\.Lte\.Neighbor\[(\d+)\]\.(Pci|Rsrp|Rsrq|Earfcn|Frequency)$/i);
+        const m = String(metricName || '').match(/^Radio\.Lte\.Neighbor\[(\d+)\]\.(Pci|Rsrp|Rsrq|Cinr|Earfcn|Frequency)$/i);
         if (!m) return null;
         const field = normalizeNeighborFieldName(m[2]);
         if (!field) return null;
         return { index: Number(m[1]), field };
+    }
+
+    function parseSyntheticLteNeighborWindowMetricName(metricName) {
+        const m = String(metricName || '').match(/^__lte_neighbor_window_n(\d+)_(pci|rsrp|rsrq|cinr|earfcn)$/i);
+        if (!m) return null;
+        const rank = Number(m[1]);
+        if (!Number.isFinite(rank) || rank < 1 || rank > 128) return null;
+        return { rank: Math.trunc(rank), field: String(m[2]).toLowerCase() };
+    }
+
+    function parseMetricWithNeighborIndexQualifier(metricName) {
+        const raw = String(metricName || '').trim();
+        const m = raw.match(/^(.*?)(?:\|idx=(-?\d+))?$/i);
+        if (!m) return { baseName: raw, idx: null };
+        const baseName = String(m[1] || '').trim();
+        const idx = (m[2] !== undefined) ? Number(m[2]) : null;
+        return {
+            baseName,
+            idx: Number.isFinite(idx) ? Math.trunc(idx) : null
+        };
+    }
+
+    function extractNeighborSampleIndexFromRow(row) {
+        if (!row || typeof row !== 'object') return null;
+        const toInt = (v) => {
+            if (v === undefined || v === null || v === '') return null;
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            const i = Math.trunc(n);
+            if (Math.abs(i - n) > 1e-9) return null;
+            if (i < 0 || i > 1024) return null;
+            return i;
+        };
+        const rootKeys = ['idx', 'index', 'neighbor_index', 'array_index', 'slot_index'];
+        for (const k of rootKeys) {
+            const v = toInt(row[k]);
+            if (v !== null) return v;
+        }
+        for (const objKey of ['tags', 'meta', 'lookup']) {
+            const obj = row[objKey];
+            if (!obj || typeof obj !== 'object') continue;
+            for (const k of rootKeys) {
+                const v = toInt(obj[k]);
+                if (v !== null) return v;
+            }
+        }
+        return null;
     }
 
     function lowerBoundByTime(samples, targetMs) {
@@ -1291,8 +1345,13 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
     async function hydrateLteNeighborWindowContext(points, runId, sidebarNeighbors, options = {}) {
         if (!Array.isArray(points) || !points.length || !runId) return;
 
-        const windowMs = Number.isFinite(Number(options.windowMs)) ? Number(options.windowMs) : 1000;
-        const alignMs = Number.isFinite(Number(options.alignMs)) ? Number(options.alignMs) : 300;
+        const baseTolMs = Number.isFinite(Number(options.windowMs))
+            ? Math.max(50, Math.min(500, Number(options.windowMs)))
+            : 200;
+        const expandedTolMs = Math.max(baseTolMs, 500);
+        const bucketMs = Number.isFinite(Number(options.alignMs))
+            ? Math.max(50, Math.min(100, Number(options.alignMs)))
+            : 80;
         const servingEarfcnSet = new Set(
             (Array.isArray(options.servingEarfcnSet) ? options.servingEarfcnSet : [])
                 .map(v => Number(v))
@@ -1320,7 +1379,7 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         const ensureIndexBucket = (idx) => {
             const key = String(idx);
             if (!samplesByIndex[key]) {
-                samplesByIndex[key] = { pci: [], rsrp: [], rsrq: [], earfcn: [] };
+                samplesByIndex[key] = { pci: [], rsrp: [], rsrq: [], cinr: [], earfcn: [] };
             }
             return samplesByIndex[key];
         };
@@ -1328,12 +1387,14 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         loaded.forEach(({ name, rows }) => {
             const meta = parseLteNeighborMetricName(name);
             if (!meta) return;
-            const bucket = ensureIndexBucket(meta.index);
-            if (!bucket[meta.field]) return;
             rows.forEach((r) => {
                 const t = toEpochMs(r && r.time);
                 const v = Number(r && r.value_num);
                 if (!Number.isFinite(t) || !Number.isFinite(v)) return;
+                const rowIndex = extractNeighborSampleIndexFromRow(r);
+                const effectiveIndex = Number.isFinite(rowIndex) ? rowIndex : meta.index;
+                const bucket = ensureIndexBucket(effectiveIndex);
+                if (!bucket[meta.field]) return;
                 bucket[meta.field].push({ t, v });
             });
         });
@@ -1345,92 +1406,254 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
             Object.values(b).forEach(arr => arr.sort((a, b2) => a.t - b2.t));
         });
 
+        const neighborEarfcnRawUnique = [];
+        const neighborEarfcnRawSet = new Set();
+        indexKeys.forEach((idxKey) => {
+            const b = samplesByIndex[idxKey];
+            const arr = Array.isArray(b && b.earfcn) ? b.earfcn : [];
+            arr.forEach((x) => {
+                const v = Number(x && x.v);
+                if (!Number.isFinite(v)) return;
+                const r = Math.round(v);
+                if (neighborEarfcnRawSet.has(r)) return;
+                neighborEarfcnRawSet.add(r);
+                neighborEarfcnRawUnique.push(r);
+            });
+        });
+        let neighborEarfcnScaleDiv = 1;
+        if (neighborEarfcnRawUnique.length) {
+            const evenRaw = neighborEarfcnRawUnique.filter(v => (v % 2) === 0);
+            const rawServingHits = neighborEarfcnRawUnique.filter(v => servingEarfcnSet.has(v)).length;
+            const halfServingHits = evenRaw.filter(v => servingEarfcnSet.has(v / 2)).length;
+            const rawMax = Math.max(...neighborEarfcnRawUnique);
+            // Auto-detect x2 encoded EARFCN (observed in this TEMS source).
+            if (halfServingHits > rawServingHits) {
+                neighborEarfcnScaleDiv = 2;
+            } else if (rawMax >= 10000 && evenRaw.length / neighborEarfcnRawUnique.length >= 0.8) {
+                neighborEarfcnScaleDiv = 2;
+            }
+        }
+
+        const pickMostVotedNumber = (votes) => {
+            const entries = Object.entries(votes || {});
+            if (!entries.length) return null;
+            entries.sort((a, b) => {
+                const ca = Number(a[1] || 0);
+                const cb = Number(b[1] || 0);
+                if (cb !== ca) return cb - ca;
+                return Number(a[0]) - Number(b[0]);
+            });
+            const raw = Number(entries[0][0]);
+            return Number.isFinite(raw) ? raw : null;
+        };
+
+        const normalizeNeighborEarfcn = (rawEarfcn) => {
+            if (!Number.isFinite(rawEarfcn)) return null;
+            const rounded = Math.round(rawEarfcn);
+            if (neighborEarfcnScaleDiv === 2) {
+                const halved = rounded / 2;
+                if (Number.isInteger(halved)) return halved;
+            }
+            return rounded;
+        };
+
+        const distinctPcisAround = (targetMs, tolMs) => {
+            const out = new Set();
+            for (const idxKey of indexKeys) {
+                const arr = samplesByIndex[idxKey] && samplesByIndex[idxKey].pci;
+                if (!Array.isArray(arr) || !arr.length) continue;
+                const start = lowerBoundByTime(arr, targetMs - tolMs);
+                const end = lowerBoundByTime(arr, targetMs + tolMs + 1);
+                for (let i = start; i < end; i++) {
+                    const raw = Number(arr[i] && arr[i].v);
+                    const pci = Number.isFinite(raw) ? Math.round(raw) : null;
+                    if (Number.isFinite(pci)) out.add(pci);
+                }
+            }
+            return out;
+        };
+
+        const pushFieldSamplesToBuckets = (bucketMap, fieldName, samples, targetMs, tolMs, idxKey) => {
+            if (!Array.isArray(samples) || !samples.length) return;
+            const start = lowerBoundByTime(samples, targetMs - tolMs);
+            const end = lowerBoundByTime(samples, targetMs + tolMs + 1);
+            for (let i = start; i < end; i++) {
+                const row = samples[i];
+                const sampleTime = Number(row && row.t);
+                const sampleVal = Number(row && row.v);
+                if (!Number.isFinite(sampleTime) || !Number.isFinite(sampleVal)) continue;
+                const bucketId = Math.floor(sampleTime / bucketMs);
+                if (!bucketMap.has(bucketId)) {
+                    bucketMap.set(bucketId, { id: bucketId, source_idx: Number(idxKey), pci: [], rsrp: [], rsrq: [], cinr: [], earfcn: [] });
+                }
+                bucketMap.get(bucketId)[fieldName].push({ t: sampleTime, v: sampleVal });
+            }
+        };
+
+        const takeOrderedNumeric = (arr, idx) => {
+            const v = Number(arr && arr[idx] && arr[idx].v);
+            return Number.isFinite(v) ? v : null;
+        };
+
         for (const p of points) {
             const t = Number(p && (p.timestamp || toEpochMs(p.time)));
             if (!Number.isFinite(t)) continue;
 
-            const byPci = new Map();
-
-            for (const idxKey of indexKeys) {
-                const idxBucket = samplesByIndex[idxKey];
-                const pciSamples = idxBucket.pci;
-                if (!Array.isArray(pciSamples) || !pciSamples.length) continue;
-
-                const start = lowerBoundByTime(pciSamples, t - windowMs);
-                const end = lowerBoundByTime(pciSamples, t + windowMs + 1);
-
-                for (let i = start; i < end; i++) {
-                    const pciRaw = Number(pciSamples[i].v);
-                    const pci = Number.isFinite(pciRaw) ? Math.round(pciRaw) : null;
-                    if (!Number.isFinite(pci)) continue;
-
-                    const row = byPci.get(pci) || {
-                        pci,
-                        rsrpSum: 0,
-                        rsrpCount: 0,
-                        rsrqSum: 0,
-                        rsrqCount: 0,
-                        earfcnVotes: {},
-                        sampleCount: 0
-                    };
-                    row.sampleCount += 1;
-
-                    const sampleTime = pciSamples[i].t;
-                    const rsrp = nearestValueWithin(idxBucket.rsrp, sampleTime, alignMs);
-                    if (Number.isFinite(rsrp)) {
-                        row.rsrpSum += rsrp;
-                        row.rsrpCount += 1;
-                    }
-                    const rsrq = nearestValueWithin(idxBucket.rsrq, sampleTime, alignMs);
-                    if (Number.isFinite(rsrq)) {
-                        row.rsrqSum += rsrq;
-                        row.rsrqCount += 1;
-                    }
-                    const earfcn = nearestValueWithin(idxBucket.earfcn, sampleTime, alignMs);
-                    if (Number.isFinite(earfcn)) {
-                        // TRP neighbor EARFCN in this source is encoded on a x2 scale (e.g., 12600 -> 6300).
-                        const e = Math.round(earfcn / 2);
-                        row.earfcnVotes[e] = (row.earfcnVotes[e] || 0) + 1;
-                    }
-
-                    byPci.set(pci, row);
-                }
+            let usedTolMs = baseTolMs;
+            let candidatePcis = distinctPcisAround(t, usedTolMs);
+            if (candidatePcis.size < 2 && expandedTolMs > usedTolMs) {
+                usedTolMs = expandedTolMs;
+                candidatePcis = distinctPcisAround(t, usedTolMs);
             }
 
-            const neighbors = Array.from(byPci.values())
-                .map((row) => ({
-                    pci: row.pci,
-                    rsrp: row.rsrpCount ? Number((row.rsrpSum / row.rsrpCount).toFixed(1)) : null,
-                    rsrq: row.rsrqCount ? Number((row.rsrqSum / row.rsrqCount).toFixed(1)) : null,
-                    earfcn: (() => {
-                        const entries = Object.entries(row.earfcnVotes || {});
-                        if (!entries.length) return null;
-                        entries.sort((a, b) => {
-                            const ca = Number(a[1] || 0);
-                            const cb = Number(b[1] || 0);
-                            if (cb !== ca) return cb - ca;
-                            return Number(a[0]) - Number(b[0]);
-                        });
-                        const raw = Number(entries[0][0]);
-                        if (!Number.isFinite(raw)) return null;
-                        if (servingEarfcnSet.size > 0 && !servingEarfcnSet.has(raw)) {
-                            const half = raw / 2;
-                            if (Number.isInteger(half) && servingEarfcnSet.has(half)) return half;
+            const bucketMap = new Map();
+            for (const idxKey of indexKeys) {
+                const src = samplesByIndex[idxKey] || {};
+                pushFieldSamplesToBuckets(bucketMap, 'pci', src.pci, t, usedTolMs, idxKey);
+                pushFieldSamplesToBuckets(bucketMap, 'rsrp', src.rsrp, t, usedTolMs, idxKey);
+                pushFieldSamplesToBuckets(bucketMap, 'rsrq', src.rsrq, t, usedTolMs, idxKey);
+                pushFieldSamplesToBuckets(bucketMap, 'cinr', src.cinr, t, usedTolMs, idxKey);
+                pushFieldSamplesToBuckets(bucketMap, 'earfcn', src.earfcn, t, usedTolMs, idxKey);
+            }
+
+            const byNeighborKey = new Map();
+            const sortedBuckets = Array.from(bucketMap.values()).sort((a, b) => a.id - b.id);
+            sortedBuckets.forEach((bucket) => {
+                ['pci', 'rsrp', 'rsrq', 'cinr', 'earfcn'].forEach((f) => bucket[f].sort((a, b) => a.t - b.t));
+
+                const pciList = bucket.pci || [];
+                if (pciList.length) {
+                    for (let i = 0; i < pciList.length; i++) {
+                        const pciRaw = Number(pciList[i] && pciList[i].v);
+                        const pci = Number.isFinite(pciRaw) ? Math.round(pciRaw) : null;
+                        if (!Number.isFinite(pci)) continue;
+                        const key = `pci:${pci}`;
+                        const row = byNeighborKey.get(key) || {
+                            group_key: key,
+                            source_idx: Number(bucket.source_idx),
+                            source_pos: i,
+                            pci,
+                            pciVotes: {},
+                            rsrpSum: 0,
+                            rsrpCount: 0,
+                            rsrqSum: 0,
+                            rsrqCount: 0,
+                            cinrSum: 0,
+                            cinrCount: 0,
+                            earfcnVotes: {},
+                            sample_count: 0
+                        };
+                        row.sample_count += 1;
+                        row.pciVotes[pci] = (row.pciVotes[pci] || 0) + 1;
+
+                        const rsrp = takeOrderedNumeric(bucket.rsrp, i);
+                        if (Number.isFinite(rsrp)) { row.rsrpSum += rsrp; row.rsrpCount += 1; }
+                        const rsrq = takeOrderedNumeric(bucket.rsrq, i);
+                        if (Number.isFinite(rsrq)) { row.rsrqSum += rsrq; row.rsrqCount += 1; }
+                        const cinr = takeOrderedNumeric(bucket.cinr, i);
+                        if (Number.isFinite(cinr)) { row.cinrSum += cinr; row.cinrCount += 1; }
+                        const earfcnRaw = takeOrderedNumeric(bucket.earfcn, i);
+                        if (Number.isFinite(earfcnRaw)) {
+                            const normalized = normalizeNeighborEarfcn(earfcnRaw);
+                            if (Number.isFinite(normalized)) {
+                                const e = Math.round(normalized);
+                                row.earfcnVotes[e] = (row.earfcnVotes[e] || 0) + 1;
+                            }
                         }
-                        return raw;
-                    })(),
-                    sample_count: row.sampleCount
-                }))
+
+                        byNeighborKey.set(key, row);
+                    }
+                } else {
+                    // Fallback pairing when PCI is missing: preserve metric order inside same burst bucket.
+                    const mlen = Math.max(bucket.rsrp.length, bucket.rsrq.length, bucket.cinr.length, bucket.earfcn.length);
+                    for (let i = 0; i < mlen; i++) {
+                        const key = `pos:${bucket.id}:${i}`;
+                        const row = byNeighborKey.get(key) || {
+                            group_key: key,
+                            source_idx: Number(bucket.source_idx),
+                            source_pos: i,
+                            pci: null,
+                            pciVotes: {},
+                            rsrpSum: 0,
+                            rsrpCount: 0,
+                            rsrqSum: 0,
+                            rsrqCount: 0,
+                            cinrSum: 0,
+                            cinrCount: 0,
+                            earfcnVotes: {},
+                            sample_count: 0
+                        };
+                        row.sample_count += 1;
+
+                        const rsrp = takeOrderedNumeric(bucket.rsrp, i);
+                        if (Number.isFinite(rsrp)) { row.rsrpSum += rsrp; row.rsrpCount += 1; }
+                        const rsrq = takeOrderedNumeric(bucket.rsrq, i);
+                        if (Number.isFinite(rsrq)) { row.rsrqSum += rsrq; row.rsrqCount += 1; }
+                        const cinr = takeOrderedNumeric(bucket.cinr, i);
+                        if (Number.isFinite(cinr)) { row.cinrSum += cinr; row.cinrCount += 1; }
+                        const earfcnRaw = takeOrderedNumeric(bucket.earfcn, i);
+                        if (Number.isFinite(earfcnRaw)) {
+                            const normalized = normalizeNeighborEarfcn(earfcnRaw);
+                            if (Number.isFinite(normalized)) {
+                                const e = Math.round(normalized);
+                                row.earfcnVotes[e] = (row.earfcnVotes[e] || 0) + 1;
+                            }
+                        }
+
+                        byNeighborKey.set(key, row);
+                    }
+                }
+            });
+
+            let neighbors = Array.from(byNeighborKey.values())
+                .map((row) => {
+                    const pciVote = pickMostVotedNumber(row.pciVotes);
+                    const finalPci = Number.isFinite(pciVote) ? pciVote : (Number.isFinite(row.pci) ? row.pci : null);
+                    return {
+                        group_key: row.group_key,
+                        source_idx: row.source_idx,
+                        source_pos: row.source_pos,
+                        pci: finalPci,
+                        rsrp: row.rsrpCount ? Number((row.rsrpSum / row.rsrpCount).toFixed(1)) : null,
+                        rsrq: row.rsrqCount ? Number((row.rsrqSum / row.rsrqCount).toFixed(1)) : null,
+                        cinr: row.cinrCount ? Number((row.cinrSum / row.cinrCount).toFixed(1)) : null,
+                        earfcn: pickMostVotedNumber(row.earfcnVotes),
+                        sample_count: row.sample_count
+                    };
+                });
+
+            // Keep PCI-backed neighbors when available; fallback positional rows only if PCI rows absent.
+            const pciRows = neighbors.filter((n) => Number.isFinite(Number(n.pci)));
+            if (pciRows.length) neighbors = pciRows;
+
+            // Optional strictness: if candidate PCI set exists, retain only those candidates.
+            if (candidatePcis.size > 0) {
+                const filtered = neighbors.filter((n) => Number.isFinite(Number(n.pci)) && candidatePcis.has(Math.round(Number(n.pci))));
+                if (filtered.length) neighbors = filtered;
+            }
+
+            neighbors = neighbors
                 .sort((a, b) => {
                     const ra = Number.isFinite(a.rsrp) ? a.rsrp : -999;
                     const rb = Number.isFinite(b.rsrp) ? b.rsrp : -999;
                     if (rb !== ra) return rb - ra;
                     if ((b.sample_count || 0) !== (a.sample_count || 0)) return (b.sample_count || 0) - (a.sample_count || 0);
-                    return (a.pci || 0) - (b.pci || 0);
-                });
+                    const pa = Number.isFinite(a.pci) ? a.pci : 1e9;
+                    const pb = Number.isFinite(b.pci) ? b.pci : 1e9;
+                    if (pa !== pb) return pa - pb;
+                    return (Number(a.source_pos) || 0) - (Number(b.source_pos) || 0);
+                })
+                .map((row, i) => ({ ...row, neighbor_index: i + 1 }));
 
             p.__lteTrpNeighborWindow = {
-                window_ms: windowMs,
+                window_ms: usedTolMs,
+                base_tol_ms: baseTolMs,
+                expanded_tol_ms: expandedTolMs,
+                used_expanded_window: usedTolMs > baseTolMs,
+                bucket_ms: bucketMs,
+                candidate_pcis: Array.from(candidatePcis.values()).sort((a, b) => a - b),
+                index_mode: 'pci_grouped_bucket',
+                index_base: 1,
                 neighbors
             };
         }
@@ -1569,7 +1792,10 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             'eNodeB ID',
             'Cell ID',
             'Downlink EARFCN',
-            'Tracking area code'
+            'Tracking area code',
+            'UE category',
+            'MIMO capability',
+            'CA capability'
         ];
 
         const idLabelsMap = buildFriendlyTrpLabels(identifierMetrics);
@@ -1599,13 +1825,18 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
                 return;
             }
             // Fallback to constant run-level info only if we really have nothing else.
-            const fbKey = (lbl === 'Cellid') ? '__info_cellid'
-                : (lbl === 'Physical cell ID') ? '__info_pci'
-                : (lbl === 'eNodeB ID') ? '__info_enodeb_id'
-                : (lbl === 'Cell ID') ? '__info_cell_id'
-                : (lbl === 'Downlink EARFCN') ? '__info_dl_earfcn'
-                : (lbl === 'Tracking area code') ? '__info_tac'
-                : null;
+            const fbKey = (() => {
+                if (lbl === 'Cellid') return '__info_cellid';
+                if (lbl === 'Physical cell ID') return '__info_pci';
+                if (lbl === 'eNodeB ID') return '__info_enodeb_id';
+                if (lbl === 'Cell ID') return '__info_cell_id';
+                if (lbl === 'Downlink EARFCN') return '__info_dl_earfcn';
+                if (lbl === 'Tracking area code') return '__info_tac';
+                if (lbl === 'UE category') return (infoFallback.values.__info_ue_category !== undefined) ? '__info_ue_category' : '__info_ue_category_inferred';
+                if (lbl === 'MIMO capability') return (infoFallback.values.__info_mimo_capability !== undefined) ? '__info_mimo_capability' : '__info_mimo_capability_inferred';
+                if (lbl === 'CA capability') return (infoFallback.values.__info_ca_capability !== undefined) ? '__info_ca_capability' : '__info_ca_capability_inferred';
+                return null;
+            })();
             if (fbKey && infoFallback.values && infoFallback.values[fbKey] !== undefined) {
                 identifierKeys.push(fbKey);
                 trpInfoMetricValues[fbKey] = infoFallback.values[fbKey];
@@ -1686,9 +1917,30 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         if (!log || !log.trpRunId || !metricName) return false;
 
         let series = null;
+        const syntheticNeighborMetric = parseSyntheticLteNeighborWindowMetricName(metricName);
+
+        if (syntheticNeighborMetric) {
+            const rankIdx = syntheticNeighborMetric.rank - 1;
+            const field = syntheticNeighborMetric.field;
+            const rows = [];
+            (log.points || []).forEach((p) => {
+                const t = p && p.time;
+                if (!t) return;
+                const neighbors = p && p.__lteTrpNeighborWindow && Array.isArray(p.__lteTrpNeighborWindow.neighbors)
+                    ? p.__lteTrpNeighborWindow.neighbors
+                    : [];
+                if (!neighbors.length || rankIdx >= neighbors.length) return;
+                const row = neighbors[rankIdx] || {};
+                const v = Number(row[field]);
+                if (!Number.isFinite(v)) return;
+                rows.push({ time: t, value_num: v, value_str: null, metric_id: null });
+            });
+            if (!rows.length) return false;
+            series = rows;
+        }
 
         // Derived identifier metrics (eNodeB ID / Cell ID) computed from a base Cellid/ECGI series
-        if (log.trpDerivedMap && log.trpDerivedMap[metricName]) {
+        else if (log.trpDerivedMap && log.trpDerivedMap[metricName]) {
             const cfg = log.trpDerivedMap[metricName];
             const baseMetric = cfg && cfg.baseMetric;
             if (!baseMetric) return false;
@@ -1972,23 +2224,28 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     }
 
     async function fetchSeries(runId, name) {
-        const cacheKey = String(runId) + '::' + String(name || '');
+        const metricRef = parseMetricWithNeighborIndexQualifier(name);
+        const metricName = metricRef.baseName;
+        const metricIdx = Number.isFinite(metricRef.idx) ? metricRef.idx : null;
+        const cacheKey = String(runId) + '::' + String(metricName || '') + '::idx=' + String(metricIdx === null ? '' : metricIdx);
         if (trpSeriesCache.has(cacheKey)) {
             return trpSeriesCache.get(cacheKey);
         }
         const request = (async () => {
-        const isNeighborMetric = /^Radio\.Lte\.Neighbor\[\d+\]\./i.test(String(name || ''));
+        const isNeighborMetric = /^Radio\.Lte\.Neighbor\[\d+\]\./i.test(String(metricName || ''));
         // Verification trace:
         // click a Neighbors button (e.g., N1 RSRP) and confirm this request is logged
         // with /api/runs/<runId>/kpi?name=Radio.Lte.Neighbor[1].Rsrp
         if (isNeighborMetric) {
-            console.log('[Neighbors] requesting KPI series:', '/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(name));
+            const tracePath = '/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName) + (metricIdx === null ? '' : ('&idx=' + encodeURIComponent(metricIdx)));
+            console.log('[Neighbors] requesting KPI series:', tracePath);
         }
-        const { res, payload: data } = await fetchJsonWithApiFallback('/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(name));
+        const requestPath = '/api/runs/' + encodeURIComponent(runId) + '/kpi?name=' + encodeURIComponent(metricName) + (metricIdx === null ? '' : ('&idx=' + encodeURIComponent(metricIdx)));
+        const { res, payload: data } = await fetchJsonWithApiFallback(requestPath);
         if (!res.ok || data.status !== 'success') throw new Error(data.message || ('HTTP ' + res.status));
         const series = data.series || [];
         if (isNeighborMetric) {
-            console.log('[Neighbors] received samples:', series.length, 'for', name);
+            console.log('[Neighbors] received samples:', series.length, 'for', metricName, metricIdx === null ? '' : ('idx=' + metricIdx));
         }
         return series;
         })();
@@ -2022,6 +2279,48 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         return data.track || [];
     }
 
+    async function fetchNeighborsAtTime(runId, timeIso, options = {}) {
+        const cfg = getNeighborWindowConfig();
+        const tolMs = Number.isFinite(Number(options.tolMs))
+            ? Math.max(TRP_NEIGHBOR_WINDOW_MIN_MS, Math.min(TRP_NEIGHBOR_WINDOW_MAX_MS, Math.round(Number(options.tolMs))))
+            : cfg.windowMs;
+        const bucketMs = Number.isFinite(Number(options.bucketMs))
+            ? Math.max(TRP_NEIGHBOR_ALIGN_MIN_MS, Math.min(TRP_NEIGHBOR_ALIGN_MAX_MS, Math.round(Number(options.bucketMs))))
+            : cfg.alignMs;
+        const path = '/api/runs/' + encodeURIComponent(runId) + '/neighbors_at_time'
+            + '?time=' + encodeURIComponent(String(timeIso || ''))
+            + '&tolMs=' + encodeURIComponent(String(tolMs))
+            + '&bucketMs=' + encodeURIComponent(String(bucketMs));
+        const { res, payload: data } = await fetchJsonWithApiFallback(path);
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) || ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    async function fetchL1L2AtTime(runId, timeIso, options = {}) {
+        const windowMs = Number.isFinite(Number(options.windowMs))
+            ? Math.max(1, Math.round(Number(options.windowMs)))
+            : 3000;
+        const path = '/api/runs/' + encodeURIComponent(runId) + '/l1l2/at_time'
+            + '?time=' + encodeURIComponent(String(timeIso || ''))
+            + '&windowMs=' + encodeURIComponent(String(windowMs));
+        const { res, payload: data } = await fetchJsonWithApiFallback(path);
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) || ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    async function fetchL1L2Capabilities(runId) {
+        const path = '/api/runs/' + encodeURIComponent(runId) + '/l1l2/capabilities';
+        const { res, payload: data } = await fetchJsonWithApiFallback(path);
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) || ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
     // Expose helpers for cross-module consumers (sidebar throughput analysis).
     window.trpFetchSeries = fetchSeries;
     window.trpFetchEvents = fetchEvents;
@@ -2029,6 +2328,10 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     window.trpFetchSignals = fetchSignals;
     window.trpFetchTimeseries = fetchTimeseries;
     window.trpFetchTrack = fetchTrack;
+    window.trpFetchNeighborsAtTime = fetchNeighborsAtTime;
+    window.trpFetchL1L2AtTime = fetchL1L2AtTime;
+    window.trpFetchL1L2Capabilities = fetchL1L2Capabilities;
+    window.trpGetNeighborWindowConfig = getNeighborWindowConfig;
 
     async function selectKpiMetric(name) {
         trpState.selectedMetric = name;

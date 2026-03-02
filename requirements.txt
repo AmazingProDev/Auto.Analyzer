@@ -1,1 +1,3 @@
 libsql
+asn1tools
+pycrate
