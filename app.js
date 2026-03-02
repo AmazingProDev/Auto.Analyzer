@@ -1302,6 +1302,52 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function pickAutoQualityMetric(points, techHint = '', customMetrics = []) {
+        const normalizeKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const keyMap = new Map();
+        const addKey = (k) => {
+            const raw = String(k || '').trim();
+            if (!raw) return;
+            const nk = normalizeKey(raw);
+            if (!nk || keyMap.has(nk)) return;
+            keyMap.set(nk, raw);
+        };
+
+        (Array.isArray(customMetrics) ? customMetrics : []).forEach(addKey);
+        const sample = Array.isArray(points) ? points.slice(0, 80) : [];
+        sample.forEach((p) => {
+            if (!p || typeof p !== 'object') return;
+            Object.keys(p).forEach(addKey);
+            if (p.properties && typeof p.properties === 'object') Object.keys(p.properties).forEach(addKey);
+            if (p.parsed && typeof p.parsed === 'object') Object.keys(p.parsed).forEach(addKey);
+            if (p.parsed && p.parsed.serving && typeof p.parsed.serving === 'object') Object.keys(p.parsed.serving).forEach(addKey);
+        });
+
+        const findKey = (aliases) => {
+            const aliasNorm = (aliases || []).map(normalizeKey).filter(Boolean);
+            if (!aliasNorm.length) return null;
+            for (const a of aliasNorm) {
+                if (keyMap.has(a)) return keyMap.get(a);
+            }
+            for (const [nk, raw] of keyMap.entries()) {
+                if (aliasNorm.some((a) => nk.includes(a))) return raw;
+            }
+            return null;
+        };
+
+        const rsrqKey = findKey(['rsrq', 'servingrsrq', 'servingcellrsrq', 'quality']);
+        const ecnoKey = findKey(['ecno', 'servingecno', 'bestactiveecno', 'bestactiveecn0', 'quality']);
+        const fallbackLevel = findKey(['level', 'rsrp', 'rscp', 'servingrsrp', 'servingrscp']) || 'level';
+
+        const tech = String(techHint || '').toLowerCase();
+        const isUmts = tech.includes('3g') || tech.includes('umts') || tech.includes('wcdma');
+        const isLte = tech.includes('4g') || tech.includes('lte');
+
+        if (isUmts) return ecnoKey || rsrqKey || fallbackLevel;
+        if (isLte) return rsrqKey || ecnoKey || fallbackLevel;
+        return rsrqKey || ecnoKey || fallbackLevel;
+    }
+
     async function handleExcelImport(file) {
         fileStatus.textContent = 'Parsing Excel: ' + (file.name) + '...';
         try {
@@ -1319,7 +1365,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 visible: true,
                 type: 'excel',
                 customMetrics: customMetrics,
-                currentParam: 'level' // Default
+                currentParam: pickAutoQualityMetric(points, 'excel', customMetrics)
             };
             newLog.dynamicThresholds = computeSmartCareThresholds(points);
 
@@ -1334,7 +1380,7 @@ document.addEventListener('DOMContentLoaded', () => {
             window.map.fitBounds(bounds);
 
             if (window.mapRenderer) {
-                window.mapRenderer.updateLayerMetric(logId, points, 'level');
+                window.mapRenderer.updateLayerMetric(logId, points, newLog.currentParam || 'level');
             }
         } catch (e) {
             console.error(e);
@@ -1415,7 +1461,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 visible: true,
                 type: 'excel',
                 customMetrics: Array.from(allMetrics),
-                currentParam: 'level'
+                currentParam: pickAutoQualityMetric(pooledPoints, 'excel', Array.from(allMetrics))
             };
             newLog.dynamicThresholds = computeSmartCareThresholds(pooledPoints);
 
@@ -1430,7 +1476,7 @@ document.addEventListener('DOMContentLoaded', () => {
             window.map.fitBounds(bounds);
 
             if (window.mapRenderer) {
-                window.mapRenderer.updateLayerMetric(logId, pooledPoints, 'level');
+                window.mapRenderer.updateLayerMetric(logId, pooledPoints, newLog.currentParam || 'level');
             }
 
         } catch (e) {
@@ -1524,7 +1570,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 color: '#8b5cf6', // Violet
                 visible: true,
                 type: 'nmf', // Treat as NMF-like standard log
-                currentParam: 'level',
+                currentParam: pickAutoQualityMetric(allPoints, detectedConfig && detectedConfig.tech ? detectedConfig.tech : 'nmf', []),
                 config: detectedConfig
             };
 
@@ -1537,7 +1583,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const bounds = L.latLngBounds(latLngs);
                 window.map.fitBounds(bounds);
                 if (window.mapRenderer) {
-                    window.mapRenderer.renderLog(newLog, 'level');
+                    window.mapRenderer.renderLog(newLog, newLog.currentParam || 'level');
                 }
             }
 
@@ -9895,7 +9941,51 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     }
 
     function pointDetailsTsMs(v) {
-        const t = new Date(v || '').getTime();
+        if (v === undefined || v === null) return null;
+
+        // Direct numeric handling first (epoch, Excel serial, day-fraction).
+        if (typeof v === 'number' && Number.isFinite(v)) {
+            if (v > 1e12) return Math.round(v);          // epoch ms
+            if (v > 1e9) return Math.round(v * 1000);    // epoch seconds
+            if (v > 0 && v < 1) return Math.round(v * 86400000); // day fraction
+            if (v > 1 && v < 100000) {                   // Excel serial date/time
+                const frac = v - Math.floor(v);
+                return Math.round(frac * 86400000);
+            }
+        }
+
+        const s = String(v).trim();
+        if (!s) return null;
+
+        // Parse pure time-of-day strings like 00:20:50.420
+        const mTod = s.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+        if (mTod) {
+            const hh = Number(mTod[1]);
+            const mm = Number(mTod[2]);
+            const ss = Number(mTod[3]);
+            const msRaw = String(mTod[4] || '');
+            const ms = msRaw ? Number(msRaw.padEnd(3, '0').slice(0, 3)) : 0;
+            if (
+                Number.isFinite(hh) && Number.isFinite(mm) && Number.isFinite(ss) && Number.isFinite(ms) &&
+                hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59 && ss >= 0 && ss <= 59
+            ) {
+                return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+            }
+        }
+
+        // Numeric-like strings (epoch/day-fraction/Excel serial)
+        const num = Number(s.replace(',', '.'));
+        if (Number.isFinite(num)) {
+            if (num > 1e12) return Math.round(num);
+            if (num > 1e9) return Math.round(num * 1000);
+            if (num > 0 && num < 1) return Math.round(num * 86400000);
+            if (num > 1 && num < 100000) {
+                const frac = num - Math.floor(num);
+                return Math.round(frac * 86400000);
+            }
+        }
+
+        const t = new Date(s).getTime();
         return Number.isFinite(t) ? t : null;
     }
 
@@ -12031,7 +12121,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
             if (!panel || !content) return;
             bindPointDetailsMetricInfoBadges(content);
-            window.__activePointLog = getOwningLogForPoint(p, contextLog || window.__activePointLog);
+            // Keep explicit click context authoritative; fallback only when absent.
+            if (contextLog && Array.isArray(contextLog.points)) {
+                window.__activePointLog = contextLog;
+            } else {
+                window.__activePointLog = getOwningLogForPoint(p, window.__activePointLog);
+            }
 
             if (panel.style.display !== 'block') panel.style.display = 'block';
 
@@ -12165,23 +12260,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
     function getOwningLogForPoint(point, preferredLog) {
         const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
-        const inLog = (log) => {
-            if (!log || !Array.isArray(log.points)) return false;
-            if (log.points.includes(point)) return true;
-            const pid = point && point.id;
-            const ptime = point && point.time;
-            const plat = Number(point && point.lat);
-            const plng = Number(point && point.lng);
-            return log.points.some(lp => {
-                if (!lp) return false;
-                if (pid !== undefined && lp.id === pid && ptime && lp.time === ptime) return true;
-                if (ptime && lp.time === ptime && Number.isFinite(plat) && Number.isFinite(plng)) {
-                    return Math.abs(Number(lp.lat) - plat) < 1e-7 && Math.abs(Number(lp.lng) - plng) < 1e-7;
-                }
-                return false;
-            });
+        const sameByIdentity = (lp, p) => {
+            if (!lp || !p) return false;
+            if (lp === p) return true;
+            const pid = p && p.id;
+            const ptime = p && p.time;
+            const plat = Number(p && p.lat);
+            const plng = Number(p && p.lng);
+            if (pid !== undefined && lp.id === pid && ptime && lp.time === ptime) return true;
+            if (ptime && lp.time === ptime && Number.isFinite(plat) && Number.isFinite(plng)) {
+                return Math.abs(Number(lp.lat) - plat) < 1e-7 && Math.abs(Number(lp.lng) - plng) < 1e-7;
+            }
+            return false;
         };
-        if (inLog(preferredLog)) return preferredLog;
+        const inLog = (log) => {
+            if (!log) return false;
+            const pointRows = Array.isArray(log.points) ? log.points : [];
+            const eventRows = Array.isArray(log.events) ? log.events : [];
+            if (pointRows.some((lp) => sameByIdentity(lp, point))) return true;
+            if (eventRows.some((ev) => sameByIdentity(ev, point))) return true;
+            return false;
+        };
+        if (preferredLog && inLog(preferredLog)) return preferredLog;
+        // Keep explicit context for event clicks (event-layer points can be mapped clones).
+        if (preferredLog && String(point && point.type || '').toUpperCase() === 'EVENT') return preferredLog;
         return logs.find(inLog) || null;
     }
 
@@ -14308,6 +14410,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
             return true;
         };
+        const pickFirstUsable = (...vals) => {
+            for (const v of vals) {
+                if (hasValue(v)) return v;
+            }
+            return undefined;
+        };
         const getValCIEntry = (key) => {
             if (p && p[key] !== undefined) return { value: p[key], sourceKey: key };
             if (p?.properties && typeof p.properties === 'object') {
@@ -15450,12 +15558,18 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return undefined;
         };
         const nearEventsDetailed = (() => {
-            if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return [];
+            if (!activeLog || !p.time) return [];
+            const eventSource = (Array.isArray(activeLog.events) && activeLog.events.length)
+                ? activeLog.events
+                : ((Array.isArray(activeLog.points) && activeLog.points.length)
+                    ? activeLog.points.filter((row) => String(row && row.type || '').toUpperCase() === 'EVENT')
+                    : []);
+            if (!Array.isArray(eventSource) || !eventSource.length) return [];
             const target = pointDetailsTsMs(p.time);
             if (!Number.isFinite(target)) return [];
             const windowMs = 10000;
             const rows = [];
-            activeLog.events.forEach((ev) => {
+            eventSource.forEach((ev) => {
                 const te = pointDetailsTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts));
                 if (!Number.isFinite(te) || Math.abs(te - target) > windowMs) return;
                 const nameRaw = ev && (
@@ -16102,6 +16216,172 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const hoCommandInferred = summarizeNearEventRows(hoCommandRowsAll, 2);
         const hoFailureInferred = summarizeNearEventRows(hoFailureRowsAll, 2);
         const rlfInferred = summarizeNearEventRows(rlfRowsAll, 2);
+        const isRlfTextLocal = (txt) => /\brlf\b|radio\s*link\s*failure|out\s*of\s*sync|t310|n310|rrc.*reestablish/i.test(String(txt || '').toLowerCase());
+        const deriveRlfRootDetail = (nameRaw, messageRaw) => {
+            const name = String(nameRaw || '').trim();
+            const message = String(messageRaw || '').trim();
+            const txt = `${name} ${message}`.toLowerCase();
+            let m = txt.match(/rra\s*cause\s*(\d+)/i);
+            if (m) return `Radio Resource Alarm (RRA) cause ${m[1]}`;
+            m = txt.match(/rrd\s*release\s*cause\s*(\d+)/i);
+            if (m) return `RRD release cause ${m[1]}`;
+            if (/channel\s*activation\s*failure|\bcaf\b/i.test(txt)) return 'Channel Activation Failure (CAF)';
+            if (/ul\s*sync\s*loss/i.test(txt)) return 'Uplink sync loss';
+            if (/dl\s*sync\s*loss|out\s*of\s*sync/i.test(txt)) return 'Downlink out-of-sync';
+            if (/\bt310\b/i.test(txt)) return 'T310 expiry';
+            if (/\bt312\b/i.test(txt)) return 'T312 expiry';
+            if (/reestablish/i.test(txt)) return 'RRC re-establishment failure';
+            if (hasValue(message) && message.toLowerCase() !== name.toLowerCase()) return message;
+            if (hasValue(name)) return name;
+            return undefined;
+        };
+        const summarizeRlfHits = (hits, max = 2) => {
+            const arr = Array.isArray(hits) ? hits : [];
+            if (!arr.length) return undefined;
+            const out = [];
+            const seen = new Set();
+            for (const h of arr) {
+                const name = String(h && h.name || '').trim();
+                const time = String(h && h.time || '').trim();
+                const key = `${name.toLowerCase()}|${time}`;
+                if (!name || seen.has(key)) continue;
+                seen.add(key);
+                out.push(time ? `${name} @ ${time}` : name);
+                if (out.length >= max) break;
+            }
+            return out.length ? out.join(' | ') : undefined;
+        };
+        const summarizeRlfRootDetails = (hits, max = 2) => {
+            const arr = Array.isArray(hits) ? hits : [];
+            if (!arr.length) return undefined;
+            const out = [];
+            const seen = new Set();
+            for (const h of arr) {
+                const detail = deriveRlfRootDetail(h && h.name, h && h.message);
+                const key = String(detail || '').toLowerCase();
+                if (!detail || seen.has(key)) continue;
+                seen.add(key);
+                out.push(detail);
+                if (out.length >= max) break;
+            }
+            return out.length ? out.join(' | ') : undefined;
+        };
+        const summarizeRlfReasonBreakdown = (hits, max = 4) => {
+            const arr = Array.isArray(hits) ? hits : [];
+            if (!arr.length) return undefined;
+            const counts = new Map();
+            arr.forEach((h) => {
+                const detail = deriveRlfRootDetail(h && h.name, h && h.message) || String(h && h.name || '').trim();
+                if (!detail) return;
+                counts.set(detail, (counts.get(detail) || 0) + 1);
+            });
+            if (!counts.size) return undefined;
+            return Array.from(counts.entries())
+                .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])))
+                .slice(0, Math.max(1, Number(max) || 4))
+                .map(([k, v]) => `${k}=${Math.round(v)}`)
+                .join(' | ');
+        };
+        const collectRlfFromAllLogsNearPoint = () => {
+            const targetMs = pointDetailsTsMs(p && (p.time ?? p.timestamp ?? p.ts ?? p?.properties?.Time));
+            if (!Number.isFinite(targetMs)) return [];
+            const dayMs = 86400000;
+            const todDiffMs = (a, b) => {
+                if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
+                const aa = ((a % dayMs) + dayMs) % dayMs;
+                const bb = ((b % dayMs) + dayMs) % dayMs;
+                const d = Math.abs(aa - bb);
+                return Math.min(d, dayMs - d);
+            };
+            const pLat = Number(p && p.lat);
+            const pLng = Number(p && p.lng);
+            const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+            const hits = [];
+            logs.forEach((log) => {
+                const events = Array.isArray(log && log.events) ? log.events : [];
+                events.forEach((ev) => {
+                    const name = String(
+                        ev && (
+                            ev.event_name ??
+                            ev.event ??
+                            ev.name ??
+                            ev.message ??
+                            (ev.properties && (ev.properties.Event ?? ev.properties.Message))
+                        ) || ''
+                    ).trim();
+                    if (!name || !isRlfTextLocal(name)) return;
+                    const evMs = pointDetailsTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts ?? ev?.properties?.Time));
+                    if (!Number.isFinite(evMs)) return;
+                    const dtMs = todDiffMs(evMs, targetMs);
+                    if (dtMs > 10000) return;
+                    const evLat = Number(ev && ev.lat);
+                    const evLng = Number(ev && (ev.lng ?? ev.lon));
+                    let distM = Infinity;
+                    if (Number.isFinite(pLat) && Number.isFinite(pLng) && Number.isFinite(evLat) && Number.isFinite(evLng)) {
+                        distM = distanceMeters(pLat, pLng, evLat, evLng);
+                        if (distM > 250) return;
+                    }
+                    hits.push({
+                        name,
+                        message: String(ev && (ev.message ?? ev.details ?? ev.event_name ?? '') || '').trim(),
+                        time: String(ev && (ev.time ?? ev.timestamp ?? ev.ts ?? '') || '').trim(),
+                        dtMs,
+                        distM
+                    });
+                });
+            });
+            if (!hits.length) return [];
+            hits.sort((a, b) => (a.dtMs - b.dtMs) || (a.distM - b.distM));
+            return hits;
+        };
+        const localRlfHits = rlfRowsAll.map((row) => ({
+            name: String(row && row.name || '').trim(),
+            message: String(row && row?.eventObj?.message || '').trim(),
+            time: String(row && row.time || '').trim(),
+            dtMs: Number(row && row.dms),
+            distM: 0
+        }));
+        const collectExactTimeRlfHits = () => {
+            const targetTime = String(p && (p.time ?? p.timestamp ?? p.ts ?? p?.properties?.Time) || '').trim();
+            if (!targetTime) return [];
+            const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+            const hits = [];
+            logs.forEach((log) => {
+                const events = Array.isArray(log && log.events) ? log.events : [];
+                events.forEach((ev) => {
+                    const evTime = String(ev && (ev.time ?? ev.timestamp ?? ev.ts ?? ev?.properties?.Time) || '').trim();
+                    if (!evTime || evTime !== targetTime) return;
+                    const name = String(
+                        ev && (
+                            ev.event_name ??
+                            ev.event ??
+                            ev.name ??
+                            ev.message ??
+                            (ev.properties && (ev.properties.Event ?? ev.properties.Message))
+                        ) || ''
+                    ).trim();
+                    if (!name || !isRlfTextLocal(name)) return;
+                    hits.push({
+                        name,
+                        message: String(ev && (ev.message ?? ev.details ?? ev.event_name ?? '') || '').trim(),
+                        time: evTime,
+                        dtMs: 0,
+                        distM: 0
+                    });
+                });
+            });
+            return hits;
+        };
+        const rlfExactHits = collectExactTimeRlfHits();
+        const rlfGlobalHits = collectRlfFromAllLogsNearPoint();
+        const rlfExactFallback = summarizeRlfHits(rlfExactHits, 2);
+        const rlfGlobalFallback = summarizeRlfHits(rlfGlobalHits, 2);
+        const rlfRootFromExact = summarizeRlfRootDetails(rlfExactHits, 2);
+        const rlfRootFromWindow = summarizeRlfRootDetails(localRlfHits, 2);
+        const rlfRootFromGlobal = summarizeRlfRootDetails(rlfGlobalHits, 2);
+        const rlfReasonFromExact = summarizeRlfReasonBreakdown(rlfExactHits, 4);
+        const rlfReasonFromWindow = summarizeRlfReasonBreakdown(localRlfHits, 4);
+        const rlfReasonFromGlobal = summarizeRlfReasonBreakdown(rlfGlobalHits, 4);
         const parseReasonBreakdownText = (raw) => {
             const parsed = parseJsonSafeLocal(raw);
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
@@ -16186,9 +16466,24 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (Number.isFinite(reestReqToRejectMs)) parts.push(`ReestReq->Reject=${Math.round(reestReqToRejectMs)} ms`);
             return parts.length ? parts.join(' | ') : undefined;
         })();
-        const rlfRootCauseDetailsValue = getAny('RLF root-cause details', 'RLF root cause details') ?? rlfRootCauseDetailsDecoded;
-        const reestablishmentTimelineValue = getAny('Reestablishment timeline', 'Reestablishment-related timeline', 'Reestablishment timers') ?? reestablishmentTimelineDecoded;
-        const rlfReasonBreakdownValue = getAny('RLF reason breakdown', 'RLF reason KPI breakdown') ?? rlfReasonBreakdownDecoded;
+        const rlfRootCauseDetailsValue = pickFirstUsable(
+            getAny('RLF root-cause details', 'RLF root cause details'),
+            rlfRootCauseDetailsDecoded,
+            rlfRootFromExact,
+            rlfRootFromWindow,
+            rlfRootFromGlobal
+        );
+        const reestablishmentTimelineValue = pickFirstUsable(
+            getAny('Reestablishment timeline', 'Reestablishment-related timeline', 'Reestablishment timers'),
+            reestablishmentTimelineDecoded
+        );
+        const rlfReasonBreakdownValue = pickFirstUsable(
+            getAny('RLF reason breakdown', 'RLF reason KPI breakdown'),
+            rlfReasonBreakdownDecoded,
+            rlfReasonFromExact,
+            rlfReasonFromWindow,
+            rlfReasonFromGlobal
+        );
         const rlfDecodedSource = hasValue(rlfRootCauseDetailsDecoded) || hasValue(reestablishmentTimelineDecoded) || hasValue(rlfReasonBreakdownDecoded);
         const hoExecutionTimeInferred = Number.isFinite(hoExecMsDecoded)
             ? `${(hoExecMsDecoded / 1000).toFixed(2)} s (decoded)`
@@ -16288,7 +16583,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const hoExecutionTimeValue = getAny('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency') ?? hoExecutionTimeInferred;
         const hoStartCompleteValue = getAny('HO Start/Complete') ?? hoStartCompleteDecoded ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents;
         const hoFailureValue = getAny('HO failure', 'HO Failure', 'Handover Failure', 'HOF') ?? hoFailureInferred;
-        const rlfValue = getAny('RLF', 'RLF indication', 'Radio Link Failure') ?? rlfInferred;
+        const rlfFromPointEvent = (() => {
+            const directCandidates = [
+                p && p.event,
+                p && p.message,
+                p && p.type,
+                p && p.name,
+                p && p.properties && (p.properties.Event || p.properties.event),
+                p && p.properties && (p.properties.Message || p.properties.message),
+                p && p.properties && (p.properties.Details || p.properties.details),
+                p && p.properties && (p.properties['RLF indication'] || p.properties['Radio Link Failure'])
+            ];
+            const firstHit = directCandidates
+                .map((v) => String(v || '').trim())
+                .find((txt) => txt && isRlfTextLocal(txt));
+            if (firstHit) return firstHit;
+            return undefined;
+        })();
+        const rlfValue = pickFirstUsable(
+            rlfFromPointEvent,
+            rlfExactFallback,
+            getAny('RLF', 'RLF indication', 'Radio Link Failure'),
+            rlfInferred,
+            rlfGlobalFallback
+        );
         const a3a5TriggersDecodedSource = hasValue(a3a5DecodedDirect) || hasValue(a3a5Decoded);
         const a3a5ThresholdsDecodedSource = hasValue(a3a5ThresholdsDecodedDirect) || hasValue(a3a5ThresholdsDecoded);
         const hoCommandDecodedSource = /decoded/i.test(String(hoCommandValue || ''));
@@ -17153,7 +17471,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     window.addEventListener('map-point-clicked', (e) => {
         const { logId, point, source } = e.detail;
 
+        const resolveBaseLogId = (rawId) => {
+            const s = String(rawId || '');
+            if (!s) return null;
+            let m = s.match(/^metric__(.+?)__/);
+            if (m && m[1]) return m[1];
+            m = s.match(/^event__(.+?)__/);
+            if (m && m[1]) return m[1];
+            return null;
+        };
+
         let log = loadedLogs.find(l => String(l.id) === String(logId));
+        if (!log && logId) {
+            const baseId = resolveBaseLogId(logId);
+            if (baseId) {
+                log = loadedLogs.find(l => String(l.id) === String(baseId));
+            }
+        }
         if (!log && point) {
             // Fallback when event logId type differs/missing: infer owning log from point identity/time/coords.
             log = getOwningLogForPoint(point, window.__activePointLog);
@@ -17721,12 +18055,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (parsedData.length > 0 || (signalingData && signalingData.length > 0)) {
                 const id = Date.now().toString();
                 const name = fileName.replace(/\.[^/.]+$/, "");
-                const defaultMetric = (technology && (technology.toLowerCase().includes('3g') || technology.toLowerCase().includes('umts') || technology.toLowerCase().includes('wcdma')))
-                    ? 'EcNo'
-                    : 'level';
+                const defaultMetric = pickAutoQualityMetric(parsedData, technology, customMetrics);
 
                 // Add to Logs
-                loadedLogs.push({
+                const newLog = {
                     id: id,
                     name: name,
                     points: parsedData,
@@ -17737,11 +18069,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     tech: technology,
                     customMetrics: customMetrics,
                     color: getRandomColor(),
-                    visible: false,
+                    visible: true,
                     currentParam: defaultMetric,
                     config: configData,
                     configHistory: configHistory
-                });
+                };
+                loadedLogs.push(newLog);
 
                 if (umtsCallAnalysis && umtsCallAnalysis.summary) {
                     const s = umtsCallAnalysis.summary;
@@ -17753,7 +18086,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
                 if (parsedData.length > 0) {
                     console.log('[App] Debug First Point:', parsedData[0]);
-                    // Keep map empty on import; user will add metrics/events explicitly
+                    const latLngs = parsedData
+                        .filter((pt) => Number.isFinite(Number(pt && pt.lat)) && Number.isFinite(Number(pt && pt.lng)))
+                        .map((pt) => [Number(pt.lat), Number(pt.lng)]);
+                    if (latLngs.length && window.map) {
+                        window.map.fitBounds(L.latLngBounds(latLngs));
+                    }
+                    if (window.mapRenderer) {
+                        window.mapRenderer.addLogLayer(newLog.id, parsedData, newLog.currentParam || 'level', false);
+                    }
                 }
 
                 fileStatus.textContent = 'Loaded: ' + name + '(' + parsedData.length + ' pts)';
