@@ -2179,6 +2179,189 @@ document.addEventListener('DOMContentLoaded', () => {
         return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
     };
 
+    const extractEventParamPairs = (ev) => {
+        const out = [];
+        if (!ev || typeof ev !== 'object') return out;
+        const pushPair = (k, v) => {
+            const key = String(k ?? '').trim();
+            const val = v === null || v === undefined ? '' : String(v);
+            if (!key && !val) return;
+            out.push([key, val]);
+        };
+
+        if (Array.isArray(ev.params)) {
+            ev.params.forEach((p) => {
+                if (!p || typeof p !== 'object') return;
+                const key = p.param_id ?? p.param_name ?? p.name ?? p.key ?? '';
+                const value = p.param_value ?? p.value ?? p.value_str ?? '';
+                pushPair(key, value);
+            });
+        }
+        if (ev.params_map && typeof ev.params_map === 'object') {
+            Object.entries(ev.params_map).forEach(([k, v]) => pushPair(k, v));
+        }
+        if (ev.properties && typeof ev.properties === 'object') {
+            Object.entries(ev.properties).forEach(([k, v]) => pushPair(k, v));
+        }
+        return out;
+    };
+
+    const isA3A5Token = (text) => {
+        const s = String(text || '').toLowerCase();
+        if (!s) return false;
+        if (/(^|[^a-z0-9])event\s*a3([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])event\s*a5([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])eventa3([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])eventa5([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])a3\/a5([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])a3([^a-z0-9]|$)/.test(s)) return true;
+        if (/(^|[^a-z0-9])a5([^a-z0-9]|$)/.test(s)) return true;
+        return false;
+    };
+
+    const isA3A5Event = (ev) => {
+        const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+        if (isA3A5Token(name)) return true;
+        const pairs = extractEventParamPairs(ev);
+        for (const [k, v] of pairs) {
+            const key = String(k || '').toLowerCase();
+            const value = String(v || '').toLowerCase();
+            if (key === 'rrc_recfg_a3a5_inferred' && value.includes('no measurementreport evidence')) continue;
+            if (key === 'rrc_recfg_a3a5_thresholds_inferred' && (value === 'n/a' || value === 'none')) continue;
+            if (isA3A5Token(key) || isA3A5Token(value)) return true;
+            if (key.includes('rrc_recfg_a3') || key.includes('rrc_recfg_a5') || key.includes('rrc_recfg_a3a5')) return true;
+        }
+        return false;
+    };
+
+    const isRlfToken = (text) => {
+        const s = String(text || '').toLowerCase();
+        if (!s) return false;
+        if (/(^|[^a-z0-9])rlf([^a-z0-9]|$)/.test(s)) return true;
+        if (s.includes('radio link failure')) return true;
+        if (s.includes('out of sync')) return true;
+        if (s.includes('t310')) return true;
+        if (s.includes('rrcconnectionreestablishment')) return true;
+        if (s.includes('reestablishment reject') || s.includes('reestablishmentreject')) return true;
+        return false;
+    };
+
+    const isRLFEvent = (ev) => {
+        const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+        if (isRlfToken(name)) return true;
+        const pairs = extractEventParamPairs(ev);
+        for (const [k, v] of pairs) {
+            const key = String(k || '').toLowerCase();
+            const value = String(v || '').toLowerCase();
+            if (isRlfToken(key) || isRlfToken(value)) return true;
+            if (key.includes('rlf') || key.includes('reestab') || key.includes('radio_link_failure')) return true;
+        }
+        return false;
+    };
+
+    const nearestPointByTime = (sortedPts, ts) => {
+        if (!Array.isArray(sortedPts) || !sortedPts.length || !Number.isFinite(ts)) return null;
+        let lo = 0;
+        let hi = sortedPts.length - 1;
+        while (lo < hi) {
+            const mid = Math.floor((lo + hi) / 2);
+            if ((sortedPts[mid]._ts || 0) < ts) lo = mid + 1;
+            else hi = mid;
+        }
+        const cand = sortedPts[lo] || null;
+        const prev = lo > 0 ? sortedPts[lo - 1] : null;
+        if (!cand) return prev;
+        if (!prev) return cand;
+        const d1 = Math.abs((cand._ts || 0) - ts);
+        const d0 = Math.abs((prev._ts || 0) - ts);
+        return d0 <= d1 ? prev : cand;
+    };
+
+    window.mapEventsToNearestLogPoints = (log, events, maxDeltaMs = 15000) => {
+        const rows = Array.isArray(events) ? events : [];
+        if (!rows.length) return [];
+        const pointsSorted = (Array.isArray(log && log.points) ? log.points : [])
+            .map((p) => {
+                const lat = Number(p && p.lat);
+                const lng = Number(p && p.lng);
+                const t = parsePointTimeMs(p && (p.time || p.timestamp || p.ts || p?.properties?.Time));
+                if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(t)) return null;
+                return { _ts: t, lat, lng, time: p.time };
+            })
+            .filter(Boolean)
+            .sort((a, b) => (a._ts || 0) - (b._ts || 0));
+
+        return rows.map((ev) => {
+            const out = Object.assign({}, ev || {});
+            const existingLat = Number(out.lat);
+            const existingLng = Number(out.lng ?? out.lon);
+            const hasGeo = Number.isFinite(existingLat) && Number.isFinite(existingLng);
+            let mapped = null;
+            let diffMs = null;
+            if (!hasGeo && pointsSorted.length) {
+                const ts = parsePointTimeMs(out.time || out.timestamp || out.ts);
+                if (Number.isFinite(ts)) {
+                    const hit = nearestPointByTime(pointsSorted, ts);
+                    if (hit) {
+                        mapped = hit;
+                        diffMs = Math.abs((hit._ts || 0) - ts);
+                    }
+                }
+            }
+
+            const allowMapped = mapped && (!Number.isFinite(maxDeltaMs) || diffMs <= Number(maxDeltaMs));
+            if (hasGeo) {
+                out.lat = existingLat;
+                out.lng = existingLng;
+            } else if (allowMapped) {
+                out.lat = mapped.lat;
+                out.lng = mapped.lng;
+                if (!out.time && mapped.time) out.time = mapped.time;
+                out._mapByTimeMs = diffMs;
+            }
+            out.type = 'EVENT';
+            if (!out.event) out.event = String(out.event_name || out.message || 'Event');
+            if (!out.message) out.message = String(out.event_name || out.event || 'Event');
+            return out;
+        }).filter((ev) => Number.isFinite(Number(ev && ev.lat)) && Number.isFinite(Number(ev && ev.lng)));
+    };
+
+    window.filterA3A5Events = (log, options = {}) => {
+        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const matches = allEvents.filter((ev) => isA3A5Event(ev));
+        const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
+        const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
+        return mapped.map((ev) => {
+            const out = Object.assign({}, ev);
+            const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+            out.event = 'A3/A5 Event';
+            out.message = name || 'A3/A5 Event';
+            out.properties = Object.assign({}, ev && ev.properties ? ev.properties : {}, {
+                'Event': 'A3/A5 Event',
+                'Event Name': name || 'N/A'
+            });
+            return out;
+        });
+    };
+
+    window.filterRLFEvents = (log, options = {}) => {
+        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const matches = allEvents.filter((ev) => isRLFEvent(ev));
+        const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
+        const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
+        return mapped.map((ev) => {
+            const out = Object.assign({}, ev);
+            const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+            out.event = 'RLF';
+            out.message = name || 'RLF';
+            out.properties = Object.assign({}, ev && ev.properties ? ev.properties : {}, {
+                'Event': 'RLF',
+                'Event Name': name || 'N/A'
+            });
+            return out;
+        });
+    };
+
     const distanceMeters = (aLat, aLng, bLat, bLng) => {
         if (![aLat, aLng, bLat, bLng].every(v => Number.isFinite(Number(v)))) return Infinity;
         const rad = Math.PI / 180;
@@ -2330,6 +2513,55 @@ document.addEventListener('DOMContentLoaded', () => {
                             count: log.events.length,
                             logId: log.id,
                             points: log.events,
+                            layerId: layerId,
+                            visible: true
+                        };
+                        if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                        if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                        if (window.updateLegend) window.updateLegend();
+                        if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+                    }
+                    if (data.param === 'a3a5_event' && log) {
+                        const a3a5 = window.filterA3A5Events(log, { maxDeltaMs: 15000 });
+                        const layerId = 'event__' + log.id + '__a3a5_event';
+                        map.addEventsLayer(layerId, a3a5, {
+                            useFlag: true,
+                            flagColor: '#ef4444'
+                        });
+                        if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                        const eventKey = log.id + '::a3a5_event';
+                        window.eventLegendEntries[eventKey] = {
+                            title: 'A3/A5 event',
+                            iconUrl: null,
+                            color: '#ef4444',
+                            count: a3a5.length,
+                            logId: log.id,
+                            points: a3a5,
+                            layerId: layerId,
+                            visible: true
+                        };
+                        if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                        if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                        if (window.updateLegend) window.updateLegend();
+                        if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+                    }
+                    if (data.param === 'rlf_event' && log) {
+                        const rlf = window.filterRLFEvents(log, { maxDeltaMs: 15000 });
+                        const layerId = 'event__' + log.id + '__rlf_event';
+                        map.addEventsLayer(layerId, rlf, {
+                            useFlag: true,
+                            flagStyle: 'tall',
+                            flagColor: '#dc2626'
+                        });
+                        if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                        const eventKey = log.id + '::rlf_event';
+                        window.eventLegendEntries[eventKey] = {
+                            title: 'RLF',
+                            iconUrl: null,
+                            color: '#dc2626',
+                            count: rlf.length,
+                            logId: log.id,
+                            points: rlf,
                             layerId: layerId,
                             visible: true
                         };
@@ -3525,6 +3757,181 @@ document.addEventListener('DOMContentLoaded', () => {
     const resetThemeBtn = document.getElementById('resetThemeBtn');
     const themeSelect = document.getElementById('themeSelect');
     const thresholdsContainer = document.getElementById('thresholdsContainer');
+    const headerActions = document.querySelector('.header-map-actions');
+
+    let nmfsSettingsBtn = document.getElementById('nmfsSettingsBtn');
+    if (!nmfsSettingsBtn && headerActions) {
+        nmfsSettingsBtn = document.createElement('button');
+        nmfsSettingsBtn.id = 'nmfsSettingsBtn';
+        nmfsSettingsBtn.className = 'btn header-btn';
+        nmfsSettingsBtn.title = 'NMFS Converter Settings';
+        nmfsSettingsBtn.textContent = '🧩 NMFS';
+        if (themeSettingsBtn && themeSettingsBtn.parentNode === headerActions) {
+            headerActions.insertBefore(nmfsSettingsBtn, themeSettingsBtn.nextSibling);
+        } else {
+            headerActions.appendChild(nmfsSettingsBtn);
+        }
+    }
+
+    function ensureNmfsSettingsModal() {
+        let overlay = document.getElementById('nmfsSettingsModal');
+        if (overlay) return overlay;
+        overlay = document.createElement('div');
+        overlay.id = 'nmfsSettingsModal';
+        overlay.className = 'analysis-modal-overlay';
+        overlay.style.zIndex = '10055';
+        overlay.style.display = 'none';
+        overlay.innerHTML = '' +
+            '<div class="analysis-modal" style="width:760px; max-width:95vw; background:#0f172a; border:1px solid #334155; color:#e2e8f0;">' +
+            '  <div class="analysis-header" id="nmfsSettingsHeader" style="display:flex; justify-content:space-between; align-items:center; background:#0b2447; cursor:grab;">' +
+            '    <div style="font-weight:700;">NMFS Converter Settings</div>' +
+            '    <button id="nmfsSettingsClose" class="analysis-close-btn" style="background:none; border:none; color:#fff; font-size:22px; cursor:pointer;">×</button>' +
+            '  </div>' +
+            '  <div class="analysis-content" style="max-height:72vh; overflow:auto; padding:14px 16px;">' +
+            '    <div style="font-size:12px; color:#93c5fd; margin-bottom:10px;">Configure external converter bridge for secure .nmfs payload decoding.</div>' +
+            '    <div style="display:flex; flex-direction:column; gap:10px;">' +
+            '      <label style="font-size:12px; color:#cbd5e1;">Converter command template</label>' +
+            '      <textarea id="nmfsCfgCmd" style="width:100%; min-height:88px; background:#020617; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-family:ui-monospace, Menlo, monospace; font-size:12px;" placeholder=\'python "C:\\\\path\\\\to\\\\Optim_Analyzer\\\\tools\\\\nmfs_com_extract.py" --input "{input}" --output "{output}"\'></textarea>' +
+            '      <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">' +
+            '        <label style="font-size:12px; color:#cbd5e1;">Timeout (sec) <input id="nmfsCfgTimeout" type="number" min="10" step="1" value="180" style="margin-left:6px; width:88px; background:#020617; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:4px 6px;"></label>' +
+            '        <label style="font-size:12px; color:#cbd5e1;"><input id="nmfsCfgKeepTemp" type="checkbox"> Keep temp files</label>' +
+            '      </div>' +
+            '      <div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+            '        <button id="nmfsCfgSaveBtn" class="btn header-btn" style="background:#2563eb; color:#fff;">Save</button>' +
+            '        <button id="nmfsCfgTestBtn" class="btn header-btn">Test Command</button>' +
+            '      </div>' +
+            '      <div id="nmfsCfgMeta" style="font-size:11px; color:#93c5fd;"></div>' +
+            '      <pre id="nmfsCfgStatus" style="margin:0; white-space:pre-wrap; background:#020617; border:1px solid #334155; border-radius:8px; padding:8px; color:#dbeafe; min-height:72px;"></pre>' +
+            '    </div>' +
+            '  </div>' +
+            '</div>';
+        document.body.appendChild(overlay);
+        const modal = overlay.querySelector('.analysis-modal');
+        const header = overlay.querySelector('#nmfsSettingsHeader');
+        if (modal && header && typeof makeElementDraggable === 'function') {
+            makeElementDraggable(header, modal);
+        }
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.style.display = 'none';
+        });
+        const closeBtn = overlay.querySelector('#nmfsSettingsClose');
+        if (closeBtn) closeBtn.onclick = () => { overlay.style.display = 'none'; };
+        return overlay;
+    }
+
+    async function fetchNmfsConfigApi() {
+        const res = await fetch('/api/nmfs/config');
+        const data = await res.json();
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) ? data.message : ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    async function saveNmfsConfigApi(payload) {
+        const res = await fetch('/api/nmfs/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        const data = await res.json();
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) ? data.message : ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    async function testNmfsConfigApi() {
+        const res = await fetch('/api/nmfs/config/test', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) ? data.message : ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
+    async function openNmfsSettings() {
+        const overlay = ensureNmfsSettingsModal();
+        overlay.style.display = 'flex';
+        const cmdEl = overlay.querySelector('#nmfsCfgCmd');
+        const timeoutEl = overlay.querySelector('#nmfsCfgTimeout');
+        const keepEl = overlay.querySelector('#nmfsCfgKeepTemp');
+        const statusEl = overlay.querySelector('#nmfsCfgStatus');
+        const metaEl = overlay.querySelector('#nmfsCfgMeta');
+        const saveBtn = overlay.querySelector('#nmfsCfgSaveBtn');
+        const testBtn = overlay.querySelector('#nmfsCfgTestBtn');
+
+        const renderTest = (report) => {
+            if (!statusEl) return;
+            if (!report) {
+                statusEl.textContent = 'No test report.';
+                return;
+            }
+            const lines = [];
+            lines.push('OK: ' + (report.ok ? 'Yes' : 'No'));
+            lines.push('Binary: ' + (report.resolvedBinary || 'N/A') + ' | Found: ' + (report.binaryFound ? 'Yes' : 'No'));
+            if (Array.isArray(report.issues) && report.issues.length) {
+                lines.push('Issues:');
+                report.issues.forEach(i => lines.push('- ' + i));
+            }
+            if (Array.isArray(report.warnings) && report.warnings.length) {
+                lines.push('Warnings:');
+                report.warnings.forEach(i => lines.push('- ' + i));
+            }
+            statusEl.textContent = lines.join('\n');
+        };
+
+        if (!overlay.dataset.bound) {
+            overlay.dataset.bound = '1';
+            if (saveBtn) {
+                saveBtn.onclick = async () => {
+                    try {
+                        const payload = {
+                            converterCmd: String((cmdEl && cmdEl.value) || '').trim(),
+                            timeoutSec: Math.max(10, parseInt((timeoutEl && timeoutEl.value) || '180', 10) || 180),
+                            keepTemp: !!(keepEl && keepEl.checked)
+                        };
+                        statusEl.textContent = 'Saving...';
+                        const out = await saveNmfsConfigApi(payload);
+                        const cfg = out.config || {};
+                        if (metaEl) metaEl.textContent = 'Config path: ' + (out.configPath || 'N/A') + ' | Source(cmd): ' + ((cfg.source && cfg.source.converterCmd) || 'unknown');
+                        statusEl.textContent = 'Saved successfully.';
+                    } catch (err) {
+                        statusEl.textContent = 'Save failed: ' + err.message;
+                    }
+                };
+            }
+            if (testBtn) {
+                testBtn.onclick = async () => {
+                    try {
+                        statusEl.textContent = 'Testing converter command...';
+                        const out = await testNmfsConfigApi();
+                        renderTest(out.report || null);
+                    } catch (err) {
+                        statusEl.textContent = 'Test failed: ' + err.message;
+                    }
+                };
+            }
+        }
+
+        try {
+            statusEl.textContent = 'Loading config...';
+            const out = await fetchNmfsConfigApi();
+            const cfg = out.config || {};
+            if (cmdEl) cmdEl.value = String(cfg.converterCmd || '');
+            if (timeoutEl) timeoutEl.value = String(cfg.timeoutSec || 180);
+            if (keepEl) keepEl.checked = !!cfg.keepTemp;
+            if (metaEl) {
+                const src = cfg.source || {};
+                metaEl.textContent = 'Config path: ' + (out.configPath || 'N/A') +
+                    ' | Source(cmd): ' + (src.converterCmd || 'default') +
+                    ' | Source(timeout): ' + (src.timeoutSec || 'default');
+            }
+            statusEl.textContent = 'Loaded.';
+        } catch (err) {
+            statusEl.textContent = 'Load failed: ' + err.message;
+        }
+    }
 
     // Smooth Edges Toggle
     // Smooth Edges Button Logic (Toggle)
@@ -4233,6 +4640,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             themeSettingsPanel.style.display = 'block';
             renderThresholdInputs();
             // Maybe update legend preview? Legend updates on Apply
+        };
+    }
+
+    if (nmfsSettingsBtn) {
+        nmfsSettingsBtn.onclick = () => {
+            openNmfsSettings();
         };
     }
 
@@ -5173,6 +5586,220 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'Cell Name': (servingRes && servingRes.name) ? servingRes.name : (stashCellName || 'Unknown'),
             'Tech': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? 'LTE' : 'UMTS')
         });
+        const simpleFindByTokens = (...tokens) => {
+            const wanted = tokens.map(t => String(t || '').toLowerCase());
+            const rows = [sourceObj, p?.parsed, p?.parsed?.serving];
+            for (const src of rows) {
+                if (!src || typeof src !== 'object') continue;
+                for (const [k, v] of Object.entries(src)) {
+                    if (v === undefined || v === null || typeof v === 'object') continue;
+                    const lk = String(k || '').toLowerCase();
+                    if (wanted.every(tok => lk.includes(tok))) return v;
+                }
+            }
+            return undefined;
+        };
+        const simpleToNum = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const simpleDrx = simpleFindByTokens('drx');
+        const simpleTxRaw = simpleFindByTokens('ue', 'tx', 'power') ??
+            simpleFindByTokens('pusch', 'tx', 'power') ??
+            simpleFindByTokens('tx', 'power');
+        const simpleTxNum = simpleToNum(simpleTxRaw);
+        const simpleTxPower = Number.isFinite(simpleTxNum)
+            ? (Number.isInteger(simpleTxNum) ? `${simpleTxNum} dBm` : `${simpleTxNum.toFixed(1)} dBm`)
+            : (simpleTxRaw ?? 'N/A');
+        const simpleBearerRaw = simpleFindByTokens('eps', 'bearer') ??
+            simpleFindByTokens('bearer') ??
+            simpleFindByTokens('erab') ??
+            simpleFindByTokens('drb');
+        const simpleDl = simpleToNum(simpleFindByTokens('pdsch', 'throughput') ?? simpleFindByTokens('throughput', 'dl'));
+        const simpleUl = simpleToNum(simpleFindByTokens('pusch', 'throughput') ?? simpleFindByTokens('throughput', 'ul'));
+        const simpleApp = simpleToNum(simpleFindByTokens('application', 'throughput', 'dl') ?? simpleFindByTokens('http', 'download', 'throughput'));
+        const simpleTrafficActive = [simpleDl, simpleUl, simpleApp].some(v => Number.isFinite(v) && v > 50);
+        const simpleNormalizePct = (v) => {
+            const n = simpleToNum(v);
+            if (!Number.isFinite(n) || n < 0) return null;
+            if (n <= 1) return Number((n * 100).toFixed(1));
+            if (n <= 100) return Number(n.toFixed(1));
+            return null;
+        };
+        const simpleRbRaw = simpleFindByTokens('dl', 'prb') ??
+            simpleFindByTokens('prb', 'load') ??
+            simpleFindByTokens('dl', 'rb', 'quantity') ??
+            simpleFindByTokens('dl', 'rb', 'usage');
+        const simpleRbDirectPct = simpleNormalizePct(simpleRbRaw);
+        const simpleRbEstPct = (() => {
+            if (simpleRbDirectPct !== null) return null;
+            if (!Number.isFinite(simpleDl) || simpleDl <= 0) return null;
+            const cqiNum = simpleToNum(simpleFindByTokens('cqi'));
+            const mcsNum = simpleToNum(simpleFindByTokens('dl', 'mcs') ?? simpleFindByTokens('pdsch', 'mcs'));
+            const riNum = simpleToNum(simpleFindByTokens('rank', 'indicator') ?? simpleFindByTokens('ri'));
+            const cqiSe = [0, 0.15, 0.23, 0.38, 0.6, 0.88, 1.18, 1.48, 1.91, 2.41, 2.73, 3.32, 3.9, 4.52, 5.12, 5.55];
+            let se = null;
+            if (Number.isFinite(cqiNum)) {
+                const idx = Math.max(1, Math.min(15, Math.round(cqiNum)));
+                se = cqiSe[idx];
+            } else if (Number.isFinite(mcsNum) && mcsNum >= 0) {
+                se = Math.max(0.2, Math.min(5.5, (mcsNum / 28) * 5.5));
+            }
+            if (!Number.isFinite(se) || se <= 0) return null;
+            const layers = Number.isFinite(riNum) ? Math.max(1, Math.min(4, Math.round(riNum))) : 1;
+            const usableHz = 18e6;
+            const est = (simpleDl * 1000) / (se * layers * usableHz) * 100;
+            if (!Number.isFinite(est) || est < 0) return null;
+            return Math.max(0, Math.min(100, Number(est.toFixed(1))));
+        })();
+        const simpleRbUsage = (simpleRbDirectPct !== null)
+            ? `${simpleRbDirectPct}%`
+            : (simpleRbEstPct !== null ? `${simpleRbEstPct}% (est)` : 'N/A');
+        const simpleMapBandwidthToTotalRbs = (rawBw) => {
+            let bw = simpleToNum(rawBw);
+            if (!Number.isFinite(bw) || bw <= 0) return null;
+            if (bw > 1000) bw = bw / 1e6; // Hz -> MHz
+            const pairs = [
+                { mhz: 1.4, rb: 6 },
+                { mhz: 3, rb: 15 },
+                { mhz: 5, rb: 25 },
+                { mhz: 10, rb: 50 },
+                { mhz: 15, rb: 75 },
+                { mhz: 20, rb: 100 }
+            ];
+            let best = null;
+            let bestDiff = Infinity;
+            for (const p of pairs) {
+                const d = Math.abs(bw - p.mhz);
+                if (d < bestDiff) {
+                    best = p;
+                    bestDiff = d;
+                }
+            }
+            return (best && bestDiff <= 1.0) ? best.rb : null;
+        };
+        const simpleBwRaw = simpleFindByTokens('downlink', 'bandwidth') ??
+            simpleFindByTokens('dl', 'bandwidth') ??
+            simpleFindByTokens('channel', 'bandwidth') ??
+            simpleFindByTokens('bandwidth') ??
+            simpleFindByTokens('bw');
+        const simpleNormalizeBw = (rawBw) => {
+            let bw = simpleToNum(rawBw);
+            if (!Number.isFinite(bw) || bw <= 0) return null;
+            if (bw > 1000) bw = bw / 1e6;
+            return Number(bw.toFixed(1));
+        };
+        const simpleBwMhz = simpleNormalizeBw(simpleBwRaw);
+        const simpleBwDisplay = (simpleBwMhz !== null)
+            ? `${simpleBwMhz} MHz`
+            : (simpleBwRaw ?? 'N/A');
+        const simpleInferLteBand = (earfcnRaw) => {
+            const earfcn = simpleToNum(earfcnRaw);
+            if (!Number.isFinite(earfcn)) return null;
+            const ranges = [
+                { lo: 0, hi: 599, band: 1 },
+                { lo: 600, hi: 1199, band: 2 },
+                { lo: 1200, hi: 1949, band: 3 },
+                { lo: 1950, hi: 2399, band: 4 },
+                { lo: 2400, hi: 2649, band: 5 },
+                { lo: 2750, hi: 3449, band: 7 },
+                { lo: 3450, hi: 3799, band: 8 },
+                { lo: 6150, hi: 6449, band: 20 },
+                { lo: 9210, hi: 9659, band: 28 }
+            ];
+            const hit = ranges.find((r) => earfcn >= r.lo && earfcn <= r.hi);
+            return hit ? `B${hit.band}` : null;
+        };
+        const simpleBandRaw = simpleFindByTokens('serving', 'band') ??
+            simpleFindByTokens('lte', 'band') ??
+            simpleFindByTokens('freq', 'band');
+        const simpleBandDisplay = (() => {
+            if (simpleBandRaw !== undefined && simpleBandRaw !== null && String(simpleBandRaw).trim() !== '') return String(simpleBandRaw).trim();
+            const earfcn = simpleFindByTokens('earfcn') ?? simpleFindByTokens('downlink', 'earfcn') ?? simpleFindByTokens('freq');
+            return simpleInferLteBand(earfcn) || 'N/A';
+        })();
+        const simpleTotalRbs = simpleMapBandwidthToTotalRbs(simpleBwRaw) || 100;
+        const simpleAllocPct = (simpleRbDirectPct !== null) ? simpleRbDirectPct : simpleRbEstPct;
+        const simpleAllocatedRbsEst = Number.isFinite(simpleAllocPct)
+            ? Math.max(0, Math.min(simpleTotalRbs, Math.round((simpleAllocPct / 100) * simpleTotalRbs)))
+            : null;
+        const simpleAllocatedRbs = simpleFindByTokens('allocated', 'prb') ??
+            simpleFindByTokens('allocated', 'rb') ??
+            simpleFindByTokens('prb', 'allocated') ??
+            simpleFindByTokens('rb', 'allocated');
+        const simpleTbs = simpleFindByTokens('transport', 'block', 'size') ??
+            simpleFindByTokens('pdsch', 'tbs') ??
+            simpleFindByTokens('pusch', 'tbs') ??
+            simpleFindByTokens('tbs');
+        const simpleLayersRaw = simpleFindByTokens('number', 'layers') ??
+            simpleFindByTokens('num', 'layers') ??
+            simpleFindByTokens('#layers') ??
+            simpleFindByTokens('layers') ??
+            simpleFindByTokens('rank', 'indicator') ??
+            simpleFindByTokens('ri');
+        const simpleLayersNum = simpleToNum(simpleLayersRaw);
+        const simpleLayers = Number.isFinite(simpleLayersNum)
+            ? (Number.isInteger(simpleLayersNum) ? String(simpleLayersNum) : String(Number(simpleLayersNum.toFixed(1))))
+            : (simpleLayersRaw ?? 'N/A');
+        const simpleRtt = simpleFindByTokens('round', 'trip', 'time') ??
+            simpleFindByTokens('ping', 'rtt') ??
+            simpleFindByTokens('tcp', 'rtt') ??
+            simpleFindByTokens('latency') ??
+            simpleFindByTokens('rtt');
+        const simplePacketLoss = simpleFindByTokens('packet', 'loss') ??
+            simpleFindByTokens('ip', 'loss') ??
+            simpleFindByTokens('plr');
+        const simpleRetrans = simpleFindByTokens('harq', 'retrans') ??
+            simpleFindByTokens('rlc', 'retrans') ??
+            simpleFindByTokens('retx') ??
+            simpleFindByTokens('retrans');
+        const simpleHarq = simpleFindByTokens('harq', 'nack') ??
+            simpleFindByTokens('harq', 'ack') ??
+            simpleFindByTokens('harq');
+        const simpleBlerRaw = simpleFindByTokens('bler', 'dl') ??
+            simpleFindByTokens('dl', 'ibler') ??
+            simpleFindByTokens('ibler') ??
+            simpleFindByTokens('bler');
+        const simpleBlerPct = simpleNormalizePct(simpleBlerRaw);
+        const simpleHarqProxyPer100 = (() => {
+            if (!Number.isFinite(simpleBlerPct)) return null;
+            const p = Math.max(0, Math.min(1, Number(simpleBlerPct) / 100));
+            const est = p + (p * p) + (p * p * p);
+            return Number((est * 100).toFixed(1));
+        })();
+        const simpleHarqProxyDisplay = Number.isFinite(simpleHarqProxyPer100)
+            ? `${simpleHarqProxyPer100} /100 TB (proxy)`
+            : null;
+        const simpleHarqHasDirect = !(simpleHarq === undefined || simpleHarq === null || String(simpleHarq).trim() === '');
+        const simpleHarqLabel = simpleHarqHasDirect ? 'HARQ' : 'HARQ (proxy)';
+        const simpleHarqDisplay = simpleHarqHasDirect ? simpleHarq : (simpleHarqProxyDisplay || 'N/A');
+        const simpleBearerActive = (() => {
+            const txt = String(simpleBearerRaw ?? '').trim().toLowerCase();
+            if (txt) {
+                if (/(inactive|deactiv|released?|detach|none|failed)/i.test(txt)) return 'Inactive';
+                if (/(active|connected|established|erab|drb|eps bearer|dedicated)/i.test(txt)) return 'Active';
+            }
+            if (simpleTrafficActive) return 'Active (inferred)';
+            return 'N/A';
+        })();
+        const quickLteChecksHtml =
+            '<div style="margin-bottom:10px; border:1px solid #334155; border-radius:6px; padding:8px; background:#0b1220;">' +
+            '<div style="font-size:11px; font-weight:700; color:#93c5fd; margin-bottom:6px;">LTE quick checks</div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Bearer active</span><span style="color:#fff; font-weight:700;">' + String(simpleBearerActive) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">DRX (DTX)</span><span style="color:#fff; font-weight:700;">' + String(simpleDrx ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Tx power</span><span style="color:#fff; font-weight:700;">' + String(simpleTxPower) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Band</span><span style="color:#fff; font-weight:700;">' + String(simpleBandDisplay) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">BW</span><span style="color:#fff; font-weight:700;">' + String(simpleBwDisplay) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Estimated RB usage</span><span style="color:#fff; font-weight:700;">' + String(simpleRbUsage) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Allocated RBs</span><span style="color:#fff; font-weight:700;">' + String(simpleAllocatedRbs ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Allocated RBs (est)</span><span style="color:#fff; font-weight:700;">' + String(Number.isFinite(simpleAllocatedRbsEst) ? simpleAllocatedRbsEst : 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">TBS</span><span style="color:#fff; font-weight:700;">' + String(simpleTbs ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">#layers</span><span style="color:#fff; font-weight:700;">' + String(simpleLayers) + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">RTT</span><span style="color:#fff; font-weight:700;">' + String(simpleRtt ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Packet loss (proxy)</span><span style="color:#fff; font-weight:700;">' + String(simplePacketLoss ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0; border-bottom:1px solid #1f2937;"><span style="color:#94a3b8;">Retransmissions (proxy)</span><span style="color:#fff; font-weight:700;">' + String(simpleRetrans ?? 'N/A') + '</span></div>' +
+            '<div style="display:flex; justify-content:space-between; font-size:11px; padding:2px 0;"><span style="color:#94a3b8;">' + String(simpleHarqLabel) + '</span><span style="color:#fff; font-weight:700;">' + String(simpleHarqDisplay) + '</span></div>' +
+            '</div>';
 
         let html = '\n' +
             '            <div style="padding: 10px;">\n' +
@@ -5193,6 +5820,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 '<div style="background:#451a1a; color:#f87171; padding:5px; border-radius:4px; margin-bottom:10px; font-weight:bold; text-align:center;">' +
                 p.event +
                 '</div>' : '') + '\n' +
+            '                ' + quickLteChecksHtml + '\n' +
             '                \n' +
             '                <div class="raw-data-container" style="max-height: 400px; overflow-y: auto;">\n' +
             '                    ' + (rawHtml) + '\n' +
@@ -7053,7 +7681,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     ecno: { good: -10, fair: -15, poor: -20 },
                     rssi: { good: -75, fair: -85, poor: -95 },
                     bler: { good: 2, moderate: 10 },
-                    pilot: { ecno: -15, delta: 6, count: 3 }
+                    pilot: { ecno: -15, delta: 6, count: 3 },
+                    window: { mode: 'time', ms: 5000, samples: 25 }
                 };
                 try {
                     const saved = JSON.parse(localStorage.getItem('dtAnalysisConfig') || '{}');
@@ -7064,7 +7693,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                         ecno: { ...defaults.ecno, ...(saved.ecno || {}) },
                         rssi: { ...defaults.rssi, ...(saved.rssi || {}) },
                         bler: { ...defaults.bler, ...(saved.bler || {}) },
-                        pilot: { ...defaults.pilot, ...(saved.pilot || {}) }
+                        pilot: { ...defaults.pilot, ...(saved.pilot || {}) },
+                        window: { ...defaults.window, ...(saved.window || {}) }
                     };
                 } catch {
                     return defaults;
@@ -7075,6 +7705,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             };
 
             const cfg = getDtConfig();
+            const windowCfg = {
+                mode: cfg.window && cfg.window.mode === 'sample' ? 'sample' : 'time',
+                ms: Number.isFinite(Number(cfg.window && cfg.window.ms)) ? Math.max(1000, Number(cfg.window.ms)) : 5000,
+                samples: Number.isFinite(Number(cfg.window && cfg.window.samples)) ? Math.max(10, Math.round(Number(cfg.window.samples))) : 25
+            };
 
             const i18n = {
                 EN: {
@@ -7147,6 +7782,165 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const t = i18n[cfg.lang] || i18n.EN;
             const tr = (key) => t[key] || key;
             const tText = (en, fr) => (cfg.lang === 'FR' ? fr : en);
+            const esc = (s) => String(s ?? '')
+                .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+                .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+            const median = (arr) => {
+                const v = (arr || []).filter(x => Number.isFinite(x)).slice().sort((a,b)=>a-b);
+                if (!v.length) return null;
+                return v[Math.floor((v.length - 1) / 2)];
+            };
+            const quantile = (arr, p) => {
+                const v = (arr || []).filter(x => Number.isFinite(x)).slice().sort((a,b)=>a-b);
+                if (!v.length) return null;
+                const idx = Math.floor((v.length - 1) * p);
+                return v[idx];
+            };
+            const iqr = (arr) => {
+                const q1 = quantile(arr, 0.25);
+                const q3 = quantile(arr, 0.75);
+                return (q1 === null || q3 === null) ? null : (q3 - q1);
+            };
+            const slopePerSample = (arr) => {
+                const v = (arr || []).filter(x => Number.isFinite(x));
+                if (v.length < 2) return null;
+                return (v[v.length - 1] - v[0]) / (v.length - 1);
+            };
+            const trendArrow = (s) => {
+                if (!Number.isFinite(s)) return '→';
+                if (s > 0.15) return '↗︎';
+                if (s < -0.15) return '↘︎';
+                return '→';
+            };
+            const fmt = (x, d=1) => Number.isFinite(x) ? x.toFixed(d) : '-';
+            const pct = (x, d=0) => Number.isFinite(x) ? (x*100).toFixed(d) + '%' : '-';
+            const toNum = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const hasVal = (v) => {
+                if (v === undefined || v === null) return false;
+                if (typeof v === 'string') {
+                    const s = v.trim().toLowerCase();
+                    if (!s || s === 'n/a' || s === '-' || s === 'nan' || s === 'unknown') return false;
+                }
+                return true;
+            };
+            const pointSources = (pt) => {
+                return [pt, pt && pt.properties, pt && pt.parsed, pt && pt.parsed && pt.parsed.serving].filter(x => x && typeof x === 'object');
+            };
+            const getPointVal = (pt, key) => {
+                const target = norm(key);
+                for (const src of pointSources(pt)) {
+                    for (const k of Object.keys(src)) {
+                        if (norm(k) === target && hasVal(src[k])) return src[k];
+                    }
+                }
+                return undefined;
+            };
+            const getPointNum = (pt, key) => toNum(getPointVal(pt, key));
+            const getPointNumAny = (pt, keys) => {
+                for (const key of keys) {
+                    const n = getPointNum(pt, key);
+                    if (n !== null) return n;
+                }
+                return null;
+            };
+            const getPointContainsVal = (pt, tokens) => {
+                const wanted = (tokens || []).map(norm).filter(Boolean);
+                if (!wanted.length) return undefined;
+                for (const src of pointSources(pt)) {
+                    for (const [k, v] of Object.entries(src)) {
+                        if (!hasVal(v)) continue;
+                        const nk = norm(k);
+                        if (wanted.every(tk => nk.includes(tk))) return v;
+                    }
+                }
+                return undefined;
+            };
+            const getPointContainsNum = (pt, tokens) => toNum(getPointContainsVal(pt, tokens));
+            const parseTodMs = (value) => {
+                const s = String(value || '').trim();
+                const m = s.match(/(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?/);
+                if (!m) return null;
+                const hh = Number(m[1]);
+                const mm = Number(m[2]);
+                const ss = Number(m[3]);
+                const ms = Number((m[4] || '0').padEnd(3, '0'));
+                if (![hh, mm, ss, ms].every(Number.isFinite)) return null;
+                return (((hh * 60) + mm) * 60 + ss) * 1000 + ms;
+            };
+            const parseTimeMs = (value) => {
+                if (value === undefined || value === null) return null;
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                    if (value > 1e12) return value;
+                    if (value > 1e9) return Math.round(value * 1000);
+                    return value;
+                }
+                const s = String(value).trim();
+                if (!s) return null;
+                if (/^-?\d+(\.\d+)?$/.test(s)) {
+                    const n = Number(s);
+                    if (!Number.isFinite(n)) return null;
+                    if (n > 1e12) return n;
+                    if (n > 1e9) return Math.round(n * 1000);
+                    return n;
+                }
+                const d = Date.parse(s);
+                if (Number.isFinite(d)) return d;
+                return parseTodMs(s);
+            };
+            const getPointTimeMs = (pt) => {
+                return parseTimeMs(pt && (pt.tsMs ?? pt._ts ?? pt.tod ?? pt.time ?? pt.timestamp))
+                    ?? parseTimeMs(getPointVal(pt, 'Time'))
+                    ?? parseTimeMs(getPointVal(pt, 'timestamp'))
+                    ?? parseTimeMs(getPointVal(pt, 'tod'));
+            };
+            const seriesStats = (arr) => {
+                const finite = (arr || []).filter(Number.isFinite);
+                if (!finite.length) {
+                    return { count: 0, median: null, p10: null, min: null, max: null, last: null, mean: null, iqr: null, slope: null };
+                }
+                const firstIdx = arr.findIndex(Number.isFinite);
+                let lastVal = null;
+                for (let i = arr.length - 1; i >= 0; i--) {
+                    if (Number.isFinite(arr[i])) { lastVal = arr[i]; break; }
+                }
+                const firstVal = firstIdx >= 0 ? arr[firstIdx] : finite[0];
+                return {
+                    count: finite.length,
+                    median: median(arr),
+                    p10: quantile(arr, 0.1),
+                    min: Math.min(...finite),
+                    max: Math.max(...finite),
+                    last: lastVal,
+                    mean: finite.reduce((a, b) => a + b, 0) / finite.length,
+                    iqr: iqr(arr),
+                    slope: (finite.length >= 2 && Number.isFinite(firstVal) && Number.isFinite(lastVal))
+                        ? (lastVal - firstVal) / (finite.length - 1)
+                        : null
+                };
+            };
+            const ratioWhere = (arr, pred) => {
+                const finite = (arr || []).filter(Number.isFinite);
+                if (!finite.length) return null;
+                const hit = finite.reduce((a, x) => a + (pred(x) ? 1 : 0), 0);
+                return hit / finite.length;
+            };
+            const extractNeighborRscpsForPoint = (pt) => {
+                const out = [];
+                ['A', 'M', 'D'].forEach(prefix => {
+                    for (let i = 1; i <= 16; i++) {
+                        const rscp = getPointNumAny(pt, [
+                            `${prefix}${i} RSCP`,
+                            `${prefix}${i}_RSCP`,
+                            `${prefix}${i}RSCP`
+                        ]);
+                        if (Number.isFinite(rscp)) out.push(rscp);
+                    }
+                });
+                return out;
+            };
 
             const servingRscp = getNum('Serving RSCP') ?? getNum('rscp') ?? getNum('level');
             const servingEcno = getNum('EcNo') ?? getNum('Serving EcNo') ?? getNum('rsrq');
@@ -7175,9 +7969,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 else addInterp('RRC', 'Info', rrcState, tText('No action.', 'Aucune action.'));
             }
             if (ueTx !== null) {
-                if (ueTx > 0) addInterp('UE Tx', 'Degraded', tText('UL power is high (possible UL coverage issue or interference).', 'Puissance UL élevée (couverture UL faible ou interférence).'), tText('Check UL coverage, antenna tilt, and UL interference sources.', 'Vérifier couverture UL, tilt antenne, interférences UL.'));
-                else if (ueTx > -10) addInterp('UE Tx', 'Moderate', tText('UL power moderate.', 'Puissance UL modérée.'), tText('Monitor if persistent.', 'Surveiller si persistant.'));
-                else addInterp('UE Tx', 'OK', tText('UL power low (good conditions).', 'Puissance UL faible (bonnes conditions).'), tText('No action.', 'Aucune action.'));
+                if (ueTx >= 21) addInterp('UE Tx', 'Degraded', tText('UL power is high/saturating (possible UL coverage issue or interference).', 'Puissance UL élevée/proche saturation (couverture UL faible ou interférence).'), tText('Check UL coverage, antenna tilt, and UL interference sources.', 'Vérifier couverture UL, tilt antenne, interférences UL.'));
+                else if (ueTx >= 17) addInterp('UE Tx', 'Moderate', tText('UL power is moderate-high.', 'Puissance UL modérée-haute.'), tText('Monitor and correlate with RSCP/EcNo evolution.', 'Surveiller et corréler avec l’évolution RSCP/EcNo.'));
+                else addInterp('UE Tx', 'OK', tText('UL power low/normal.', 'Puissance UL faible/normale.'), tText('No action.', 'Aucune action.'));
             }
             if (nbTx !== null) {
                 if (nbTx > 20) addInterp('NodeB Tx', 'Degraded', tText('DL power high (load or coverage dominance).', 'Puissance DL élevée (charge ou dominance couverture).'), tText('Review DL power, tilt/azimuth, and load balancing.', 'Vérifier puissance DL, tilt/azimut et équilibrage de charge.'));
@@ -7224,20 +8018,43 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const coverageLabel = (rscp) => {
                 if (rscp === null) return 'Unknown';
                 if (rscp >= cfg.rscp.good) return 'Good';
-                if (rscp >= cfg.rscp.fair) return 'Fair';
-                if (rscp >= cfg.rscp.poor) return 'Poor';
-                return 'Bad';
+                if (rscp < cfg.rscp.poor) return 'Poor';
+                return 'Fair';
             };
 
             const neighbors = [];
-            for (let i = 1; i <= 16; i++) {
-                const sc = getNum(`M${i} SC`);
-                const rscp = getNum(`M${i} RSCP`);
-                const ecno = getNum(`M${i} EcNo`);
-                const freq = getNum(`M${i} Freq`) ?? getNum('Freq');
-                if (sc === null && rscp === null && ecno === null) continue;
-                neighbors.push({ type: `M${i}`, sc, rscp, ecno, freq });
+            const readSet = (prefix, max) => {
+                for (let i = 1; i <= max; i++) {
+                    const sc = getNum(`${prefix}${i} SC`);
+                    const rscp = getNum(`${prefix}${i} RSCP`);
+                    const ecno = getNum(`${prefix}${i} EcNo`);
+                    const freq = getNum(`${prefix}${i} Freq`) ?? getNum('Freq');
+                    if (sc === null && rscp === null && ecno === null) continue;
+                    neighbors.push({ type: `${prefix}${i}`, sc, rscp, ecno, freq });
+                }
+            };
+            // A2.. (A1 reserved for serving; reading A1 is harmless if present)
+            readSet('A', 16);
+            readSet('M', 16);
+            readSet('D', 16);
+
+            // Remove obvious duplicates
+            const seenKey = new Set();
+            const cleanNeighbors = [];
+            for (const n of neighbors) {
+                const key = `${n.freq ?? ''}:${n.sc ?? ''}:${n.type[0]}`;
+                if (seenKey.has(key)) continue;
+                seenKey.add(key);
+                cleanNeighbors.push(n);
             }
+            neighbors.length = 0;
+            neighbors.push(...cleanNeighbors);
+            const cellmeasNeighborRscpHint = String(getVal('CELLMEAS Neighbor RSCP') || '').toLowerCase();
+            const hasAnyNeighborRscp = neighbors.some((n) => Number.isFinite(n.rscp));
+            const hasAnyNeighborEcno = neighbors.some((n) => Number.isFinite(n.ecno));
+            const cellmeasDominanceUnavailable =
+                cellmeasNeighborRscpHint.includes('unavailable')
+                || (!hasAnyNeighborRscp && hasAnyNeighborEcno && neighbors.length > 0);
 
             let strongestNeighbor = null;
             neighbors.forEach(n => {
@@ -7267,15 +8084,41 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 if (servingRscp === null || n.rscp === null) return acc;
                 return (n.rscp >= (servingRscp - cfg.pilot.delta)) ? acc + 1 : acc;
             }, 0);
-            const pilotPollution = (servingEcno !== null && servingEcno < cfg.pilot.ecno) && (strongNeighborCount >= cfg.pilot.count);
+            // Dominance at this point (instant, using serving + neighbor RSCP)
+            const neighborRscpVals = neighbors.map(n => n.rscp).filter(Number.isFinite);
+            const dominanceNow = (() => {
+                if (!Number.isFinite(servingRscp)) return { available: false };
+                const all = [servingRscp, ...neighborRscpVals].sort((a,b)=>b-a);
+                if (all.length < 2) return { available: false };
+                const delta = all[0] - all[1];
+                const within3 = delta < 3;
+                return { available: true, delta, within3 };
+            })();
+            // “within 3 dB” neighbor count (instant)
+            const within3Count = neighbors.reduce((acc, n) => {
+                if (!Number.isFinite(servingRscp) || !Number.isFinite(n.rscp)) return acc;
+                return (n.rscp >= servingRscp - 3) ? acc + 1 : acc;
+            }, 0);
+            const mobilityPressure = (within3Count >= 1 || strongNeighborCount >= 1);
+            const asMobilityFlag = asFlag && mobilityPressure;
+            const pilotPollutionBase = (servingEcno !== null && servingEcno < cfg.pilot.ecno) && (strongNeighborCount >= cfg.pilot.count);
+            const pilotPollutionSuppressedByDominance = dominanceNow.available && dominanceNow.delta >= 6;
+            const pilotPollution = pilotPollutionBase && !pilotPollutionSuppressedByDominance;
             // Overshooting analysis disabled (per user request)
+            const ulCoverageSuspected =
+                (ueTx !== null && ueTx >= 21) && (servingRscp !== null && servingRscp < -85);
+            const dlCoverageSuspected =
+                (servingRscp !== null && servingRscp <= -108);
+            const dlInterferenceSuspected =
+                (servingRscp !== null && servingRscp > -85) && (servingEcno !== null && servingEcno < cfg.ecno.fair);
+            const blerCollapse =
+                (blerDl !== null && blerDl >= 80) || (blerUl !== null && blerUl >= 80);
 
             const scoreFromRscp = (rscp) => {
                 if (rscp === null) return 0;
                 if (rscp >= cfg.rscp.good) return 90;
-                if (rscp >= cfg.rscp.fair) return 70;
-                if (rscp >= cfg.rscp.poor) return 50;
-                return 30;
+                if (rscp < cfg.rscp.poor) return 35;
+                return 70;
             };
             const scoreFromEcno = (ecno) => {
                 if (ecno === null) return 0;
@@ -7293,10 +8136,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (coverage === 'Poor' || coverage === 'Bad') rootCauses.push({ label: 'Coverage', color: '#f97316' });
             if (quality === 'Poor' || quality === 'Bad') rootCauses.push({ label: 'Interference', color: '#ef4444' });
             if (pilotPollution) rootCauses.push({ label: 'Pilot Pollution', color: '#dc2626' });
-            if (asFlag) rootCauses.push({ label: 'Mobility', color: '#f59e0b' });
+            if (asMobilityFlag) rootCauses.push({ label: 'Mobility', color: '#f59e0b' });
+            if (ulCoverageSuspected) rootCauses.push({ label: 'UL Coverage', color: '#f97316' });
+            if (dlCoverageSuspected) rootCauses.push({ label: 'DL Coverage', color: '#fb923c' });
+            if (dlInterferenceSuspected) rootCauses.push({ label: 'DL Interference', color: '#ef4444' });
+            if (blerCollapse) rootCauses.push({ label: 'Radio Collapse', color: '#dc2626' });
             if (!rootCauses.length) rootCauses.push({ label: 'Stable', color: '#22c55e' });
 
-            const header = `3G DT Analysis - ${cellName}`;
+            const header = `3G DT Analysis - ${esc(cellName)}`;
             const summary = [
                 `${tr('coverage')}: <span style="color:${statusColor(coverage)}; font-weight:700;">${coverage}</span>${servingRscp !== null ? ` (RSCP ${servingRscp.toFixed(1)} dBm)` : ''}`,
                 `${tr('quality')}: <span style="color:${statusColor(quality)}; font-weight:700;">${quality}</span>${servingEcno !== null ? ` (EcNo ${servingEcno.toFixed(1)} dB)` : ''}`,
@@ -7309,38 +8156,40 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const addFinding = (text, confidence = 0.6) => {
                 findings.push({ text, confidence });
             };
+            let rscpStats = { median: null, iqr: null, slope: null };
+            let ecnoStats = { median: null, iqr: null, slope: null };
 
             if (quality === 'Poor' || quality === 'Bad') {
                 addFinding(
                     tText(
-                        `EcNo is ${servingEcno?.toFixed(1)} dB (threshold: < -15 dB) which indicates interference or load.`,
-                        `EcNo = ${servingEcno?.toFixed(1)} dB (seuil: < -15 dB) indiquant interférence ou charge.`
+                        `EcNo is ${servingEcno?.toFixed(1)} dB (below fair threshold ${cfg.ecno.fair} dB), indicating interference or load.`,
+                        `EcNo = ${servingEcno?.toFixed(1)} dB (sous le seuil moyen ${cfg.ecno.fair} dB), indiquant interférence ou charge.`
                     ),
-                    servingEcno !== null && servingEcno < -18 ? 0.85 : 0.7
+                    servingEcno !== null && servingEcno < (cfg.ecno.fair - 3) ? 0.85 : 0.7
                 );
             } else if (quality === 'Fair') {
                 addFinding(
                     tText(
-                        `EcNo is ${servingEcno?.toFixed(1)} dB (borderline range -15 to -10 dB).`,
-                        `EcNo = ${servingEcno?.toFixed(1)} dB (limite -15 à -10 dB).`
+                        `EcNo is ${servingEcno?.toFixed(1)} dB (borderline range ${cfg.ecno.fair} to ${cfg.ecno.good} dB).`,
+                        `EcNo = ${servingEcno?.toFixed(1)} dB (limite ${cfg.ecno.fair} à ${cfg.ecno.good} dB).`
                     ),
                     0.55
                 );
             }
 
-            if (coverage === 'Poor' || coverage === 'Bad') {
+            if (servingRscp !== null && servingRscp < cfg.rscp.poor) {
                 addFinding(
                     tText(
-                        `RSCP is ${servingRscp?.toFixed(1)} dBm (threshold: < -95 dBm) which suggests weak coverage or edge.`,
-                        `RSCP = ${servingRscp?.toFixed(1)} dBm (seuil: < -95 dBm) indiquant couverture faible/bord de cellule.`
+                        `RSCP is ${servingRscp.toFixed(1)} dBm (below poor threshold ${cfg.rscp.poor} dBm), suggesting weak coverage or cell-edge conditions.`,
+                        `RSCP = ${servingRscp.toFixed(1)} dBm (sous le seuil faible ${cfg.rscp.poor} dBm), indiquant couverture faible/bord de cellule.`
                     ),
-                    servingRscp !== null && servingRscp < -100 ? 0.85 : 0.7
+                    servingRscp < (cfg.rscp.poor - 5) ? 0.85 : 0.7
                 );
             } else if (coverage === 'Fair') {
                 addFinding(
                     tText(
-                        `RSCP is ${servingRscp?.toFixed(1)} dBm (borderline range -85 to -75 dBm).`,
-                        `RSCP = ${servingRscp?.toFixed(1)} dBm (limite -85 à -75 dBm).`
+                        `RSCP is ${servingRscp?.toFixed(1)} dBm (between poor threshold ${cfg.rscp.poor} dBm and good threshold ${cfg.rscp.good} dBm).`,
+                        `RSCP = ${servingRscp?.toFixed(1)} dBm (entre le seuil faible ${cfg.rscp.poor} dBm et le seuil bon ${cfg.rscp.good} dBm).`
                     ),
                     0.55
                 );
@@ -7349,8 +8198,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (interferenceFlag) {
                 addFinding(
                     tText(
-                        `RSSI is ${rssi?.toFixed(1)} dBm with EcNo ${servingEcno?.toFixed(1)} dB (high RSSI + low EcNo). This suggests interference/pilot overlap.`,
-                        `RSSI = ${rssi?.toFixed(1)} dBm avec EcNo ${servingEcno?.toFixed(1)} dB (RSSI élevé + EcNo faible). Suggestion d’interférences/chevauchement de pilotes.`
+                        `RSSI is ${rssi?.toFixed(1)} dBm with EcNo ${servingEcno?.toFixed(1)} dB (high RSSI + low EcNo), suggesting interference/load.${dominanceNow.available && dominanceNow.delta >= 6 ? ` Dominance Δ=${dominanceNow.delta.toFixed(1)} dB indicates a dominant server, so pilot overlap is less likely here.` : ''}`,
+                        `RSSI = ${rssi?.toFixed(1)} dBm avec EcNo ${servingEcno?.toFixed(1)} dB (RSSI élevé + EcNo faible), suggérant interférences/charge.${dominanceNow.available && dominanceNow.delta >= 6 ? ` Une dominance Δ=${dominanceNow.delta.toFixed(1)} dB indique un serveur dominant, le chevauchement de pilotes est donc moins probable ici.` : ''}`
                     ),
                     0.8
                 );
@@ -7366,11 +8215,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 );
             }
 
-            if (asFlag) {
+            if (asMobilityFlag) {
                 addFinding(
                     tText(
-                        `Active Set Size is ${asSize} (<= 1), indicating no soft handover support.`,
-                        `Taille de l’ensemble actif = ${asSize} (<= 1), indiquant absence de soft handover.`
+                        `Active Set Size is ${asSize} (<= 1) while close-power neighbors are present, indicating weak soft-handover support.`,
+                        `Taille de l’ensemble actif = ${asSize} (<= 1) avec des voisins proches en puissance, indiquant un support SHO limité.`
                     ),
                     0.7
                 );
@@ -7396,18 +8245,18 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 }
             }
 
-            if (asFlag && strongNeighborCount >= 1) {
+            if (pilotPollutionBase && pilotPollutionSuppressedByDominance) {
                 addFinding(
                     tText(
-                        `Mobility risk: strong neighbors detected but AS size stays at ${asSize}. Check neighbor list and SHO parameters.`,
-                        `Risque mobilité : voisins forts détectés mais AS reste à ${asSize}. Vérifier liste voisins et paramètres SHO.`
+                        `Low EcNo with strong neighbors is observed, but dominance Δ(best-2nd) ${dominanceNow.delta.toFixed(1)} dB indicates pilot overlap is unlikely at this instant.`,
+                        `EcNo faible avec voisins forts observé, mais la dominance Δ(meilleur-2ème) ${dominanceNow.delta.toFixed(1)} dB indique qu’un chevauchement pilote est peu probable à cet instant.`
                     ),
-                    0.7
+                    0.6
                 );
             }
 
             const neighborText = strongestNeighbor
-                ? `${tr('strongestNeighbor')}: ${strongestNeighbor.name || 'Unknown'} ${strongestNeighbor.type} (SC ${strongestNeighbor.sc ?? '-'} / RSCP ${strongestNeighbor.rscp?.toFixed(1) ?? '-'} / EcNo ${strongestNeighbor.ecno?.toFixed(1) ?? '-'})`
+                ? `${tr('strongestNeighbor')}: ${esc(strongestNeighbor.name || 'Unknown')} ${esc(strongestNeighbor.type)} (SC ${strongestNeighbor.sc ?? '-'} / RSCP ${strongestNeighbor.rscp?.toFixed(1) ?? '-'} / EcNo ${strongestNeighbor.ecno?.toFixed(1) ?? '-'})`
                 : tr('noNeighbors');
 
             const recommendations = [];
@@ -7435,14 +8284,41 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 addRec(tText('Improve coverage: review antenna tilt/height, consider sector split or small cell for edge areas.',
                     'Améliorer couverture : vérifier tilt/hauteur, envisager split secteur ou small cell.'), 'P2');
             }
-            if (asFlag) {
+            if (asMobilityFlag) {
                 addRec(tText('AS size is low: validate active/monitored set thresholds and ensure neighbors are properly configured.',
                     "AS faible : valider seuils active/monitored et config voisins."), 'P2');
             }
             if (strongestNeighbor && servingRscp !== null && strongestNeighbor.rscp !== null) {
-                const delta = (strongestNeighbor.rscp - servingRscp).toFixed(1);
-                addRec(tText(`Neighbor delta is ${delta} dB: if within 3 dB, consider earlier add-to-AS to stabilize mobility.`,
-                    `Delta voisin ${delta} dB : si < 3 dB, ajouter plus tôt à l’AS.`), 'P3');
+                const deltaVal = strongestNeighbor.rscp - servingRscp;
+                if (Math.abs(deltaVal) <= 3 || within3Count >= 1) {
+                    const delta = deltaVal.toFixed(1);
+                    addRec(tText(`Neighbor delta is ${delta} dB: if within 3 dB, consider earlier add-to-AS to stabilize mobility.`,
+                        `Delta voisin ${delta} dB : si < 3 dB, ajouter plus tôt à l’AS.`), 'P3');
+                }
+            }
+            if (ulCoverageSuspected) {
+                addRec(tText(
+                    'UL coverage suspected (high UE Tx + weak RSCP). Check UL path loss, uplink interference, and antenna tilt/height.',
+                    'Couverture UL suspectée (Tx UE élevé + RSCP faible). Vérifier pertes UL, interférences UL, tilt/hauteur antenne.'
+                ), 'P1');
+            }
+            if (dlCoverageSuspected) {
+                addRec(tText(
+                    'DL coverage is very weak (RSCP <= -108). Consider coverage optimization: tilt/azimuth, sector split, or site densification.',
+                    'Couverture DL très faible (RSCP <= -108). Optimiser couverture : tilt/azimut, split secteur, densification.'
+                ), 'P1');
+            }
+            if (dlInterferenceSuspected) {
+                addRec(tText(
+                    'DL interference suspected (good RSCP but poor EcNo). Check pilot overlap, CPICH power balance, and load/interference sources.',
+                    'Interférence DL suspectée (RSCP bon mais EcNo mauvais). Vérifier chevauchement pilotes, puissance CPICH, charge/bruit.'
+                ), 'P1');
+            }
+            if (blerCollapse) {
+                addRec(tText(
+                    'BLER collapse detected (>=80%). Correlate with EcNo/RSCP trend; investigate interference bursts or scheduler instability.',
+                    'Effondrement BLER détecté (>=80%). Corréler avec tendance EcNo/RSCP; analyser bursts d’interférences ou instabilité scheduling.'
+                ), 'P1');
             }
 
             const summaryText = (() => {
@@ -7452,11 +8328,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 parts.push(`${tr('coverage')} ${coverage}, ${tr('quality')} ${quality}.`);
                 if (pilotPollution) parts.push(`${tr('pilotPollution')} ${tr('suspected').toLowerCase()}.`);
                 if (interferenceFlag) parts.push(tText('Interference signs present.', "Signes d'interférences présents."));
-                if (asFlag) parts.push(`${tr('activeSet')} low.`);
+                if (asMobilityFlag) parts.push(`${tr('activeSet')} low.`);
                 if (strongestNeighbor && servingRscp !== null && strongestNeighbor.rscp !== null) {
                     const delta = (strongestNeighbor.rscp - servingRscp).toFixed(1);
-                    const snName = strongestNeighbor.name || 'Unknown';
-                    parts.push(`${tr('strongestNeighbor')}: ${snName} ${strongestNeighbor.type} (ΔRSCP ${delta} dB).`);
+                    const snName = esc(strongestNeighbor.name || 'Unknown');
+                    parts.push(`${tr('strongestNeighbor')}: ${snName} ${esc(strongestNeighbor.type)} (ΔRSCP ${delta} dB).`);
                 }
                 return parts.join(' ');
             })();
@@ -7480,11 +8356,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 .map(n => {
                     const delta = (servingRscp !== null && n.rscp !== null) ? (n.rscp - servingRscp).toFixed(1) : '-';
                     return `<tr>
-                        <td>${n.type}</td>
-                        <td>${n.name || 'Unknown'}</td>
+                        <td>${esc(n.type)}</td>
+                        <td>${esc(n.name || 'Unknown')}</td>
                         <td>${n.sc ?? '-'}</td>
-                        <td>${n.rscp ?? '-'}</td>
-                        <td>${n.ecno ?? '-'}</td>
+                        <td>${fmt(n.rscp, 1)}</td>
+                        <td>${fmt(n.ecno, 1)}</td>
                         <td>${delta}</td>
                     </tr>`;
                 }).join('');
@@ -7498,7 +8374,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 const logs = preferred ? [preferred, ...window.loadedLogs.filter(l => l !== preferred)] : window.loadedLogs;
                 let best = null;
                 logs.forEach(log => {
-                    if (!log || !log.points || log.type === 'excel' || log.type === 'shp') return;
+                    if (!log || !Array.isArray(log.points) || log.type === 'excel' || log.type === 'shp') return;
                     log.points.forEach((p, idx) => {
                         if (p.lat === undefined || p.lng === undefined) return;
                         let dist = Math.hypot(p.lat - lat, p.lng - lng);
@@ -7511,22 +8387,28 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
             const pickSeries = (pts, key) => {
                 return pts.map(p => {
-                    if (key === 'rscp') return (p.level ?? p.rscp ?? (p.parsed && p.parsed.serving ? p.parsed.serving.rscp : null));
-                    if (key === 'ecno') return (p.ecno ?? (p.parsed && p.parsed.serving ? p.parsed.serving.ecno : null));
+                    if (key === 'rscp') {
+                        return getPointNumAny(p, ['Serving RSCP', 'rscp', 'level']) ?? getPointNumAny(p, ['RSCP']);
+                    }
+                    if (key === 'ecno') {
+                        return getPointNumAny(p, ['EcNo', 'Serving EcNo', 'ecno']);
+                    }
                     return null;
                 });
             };
 
             const buildSparkline = (values, color) => {
-                const v = values.filter(x => x !== null && !isNaN(x));
+                const v = values.filter(Number.isFinite);
                 if (v.length === 0) return '<div style="color:#94a3b8; font-size:12px;">No chart data</div>';
-                const w = 240, h = 60, pad = 6;
+                const w = 240;
+                const h = 60;
+                const pad = 6;
                 const min = Math.min(...v);
                 const max = Math.max(...v);
                 const span = max - min || 1;
                 const pts = values.map((val, i) => {
-                    if (val === null || isNaN(val)) return null;
-                    const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+                    if (!Number.isFinite(val)) return null;
+                    const x = pad + (i / Math.max(1, values.length - 1)) * (w - pad * 2);
                     const y = h - pad - ((val - min) / span) * (h - pad * 2);
                     return `${x},${y}`;
                 }).filter(Boolean).join(' ');
@@ -7536,82 +8418,412 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             };
 
             let chartHtml = `<div style="color:#94a3b8; font-size:12px;">${tText('No chart data', 'Aucune donnée graphique')}</div>`;
+            let windowKpiHtml = `<div style="font-size:12px; color:#94a3b8;">${tText('Window KPIs unavailable.', 'KPIs fenêtre indisponibles.')}</div>`;
+            let outcomeHtml = '';
+            let windowModeUsed = windowCfg.mode;
+            let windowSampleCount = 0;
+            let windowDurationMs = null;
+            let windowCause = { primary: 'Unknown', secondary: [], confidence: 0.35, mobilityStatus: tText('Not indicated', 'Non indiqué'), evidence: [] };
+            let dominanceWindow = { available: false, deltaMedian: null, lt3dbRatio: null, coverageRatio: null, confidence: 'low' };
+
             const nearest = findNearestLogPoint();
             if (nearest) {
-                const start = Math.max(0, nearest.index - 25);
-                const end = Math.min(nearest.log.points.length, nearest.index + 25);
-                const slice = nearest.log.points.slice(start, end);
+                const points = nearest.log.points || [];
+                const centerTs = getPointTimeMs(nearest.point) ?? parseTimeMs(timeStr);
+                let slice = [];
+
+                if (windowCfg.mode === 'time' && Number.isFinite(centerTs)) {
+                    slice = points.filter(pt => {
+                        const ts = getPointTimeMs(pt);
+                        return Number.isFinite(ts) && Math.abs(ts - centerTs) <= windowCfg.ms;
+                    });
+                    windowModeUsed = 'time';
+                }
+
+                if (!slice.length) {
+                    const start = Math.max(0, nearest.index - windowCfg.samples);
+                    const end = Math.min(points.length, nearest.index + windowCfg.samples + 1);
+                    slice = points.slice(start, end);
+                    windowModeUsed = 'sample';
+                }
+
+                const sliceTimes = slice.map(getPointTimeMs).filter(Number.isFinite);
+                if (sliceTimes.length >= 2) windowDurationMs = Math.max(...sliceTimes) - Math.min(...sliceTimes);
+                windowSampleCount = slice.length;
+
                 const rscpSeries = pickSeries(slice, 'rscp');
                 const ecnoSeries = pickSeries(slice, 'ecno');
-                const rscpVals = rscpSeries.filter(v => v !== null && !isNaN(v));
-                const ecnoVals = ecnoSeries.filter(v => v !== null && !isNaN(v));
-                const rscpAvg = rscpVals.length ? (rscpVals.reduce((a,b)=>a+b,0) / rscpVals.length) : null;
-                const ecnoAvg = ecnoVals.length ? (ecnoVals.reduce((a,b)=>a+b,0) / ecnoVals.length) : null;
-                const rscpMin = rscpVals.length ? Math.min(...rscpVals) : null;
-                const rscpMax = rscpVals.length ? Math.max(...rscpVals) : null;
-                const ecnoMin = ecnoVals.length ? Math.min(...ecnoVals) : null;
-                const ecnoMax = ecnoVals.length ? Math.max(...ecnoVals) : null;
-                const rscpTrend = (rscpVals.length >= 2 && rscpVals[0] !== null && rscpVals[rscpVals.length - 1] !== null)
-                    ? (rscpVals[rscpVals.length - 1] - rscpVals[0])
-                    : null;
-                const ecnoTrend = (ecnoVals.length >= 2 && ecnoVals[0] !== null && ecnoVals[ecnoVals.length - 1] !== null)
-                    ? (ecnoVals[ecnoVals.length - 1] - ecnoVals[0])
-                    : null;
+                const ueTxSeries = slice.map(p => getPointNumAny(p, ['UE Tx Power', 'UE Tx', 'ue_tx']));
+                const rssiSeries = slice.map(p => getPointNumAny(p, ['RSSI', 'rssi']));
+                const blerDlSeries = slice.map(p => getPointNumAny(p, ['BLER DL', 'bler_dl']));
+                const blerUlSeries = slice.map(p => getPointNumAny(p, ['BLER UL', 'bler_ul']));
+                const blerSeries = blerDlSeries.map((v, i) => Number.isFinite(v) ? v : blerUlSeries[i]);
+                const asSeries = slice.map(p => getPointNumAny(p, ['Active Set Size', 'as_size']));
+                const servingScSeries = slice.map(p => {
+                    const val = getPointVal(p, 'Serving SC') ?? getPointVal(p, 'SC') ?? getPointVal(p, 'PSC');
+                    return hasVal(val) ? String(val) : null;
+                });
 
-                const trendLabel = (t) => {
-                    if (t === null) return 'stable';
-                    if (t > 3) return 'improving';
-                    if (t < -3) return 'degrading';
-                    return 'stable';
+                rscpStats = seriesStats(rscpSeries);
+                ecnoStats = seriesStats(ecnoSeries);
+                const txStats = {
+                    p90: quantile(ueTxSeries, 0.9),
+                    max: seriesStats(ueTxSeries).max,
+                    highRatio: ratioWhere(ueTxSeries, x => x >= 21)
+                };
+                const rssiStats = seriesStats(rssiSeries);
+                const blerFinite = blerSeries.filter(Number.isFinite);
+                const blerStats = {
+                    max: blerFinite.length ? Math.max(...blerFinite) : null,
+                    mean: blerFinite.length ? blerFinite.reduce((a, b) => a + b, 0) / blerFinite.length : null,
+                    highRatio: ratioWhere(blerSeries, x => x >= 80),
+                    dlHighRatio: ratioWhere(blerDlSeries, x => x >= 80),
+                    ulHighRatio: ratioWhere(blerUlSeries, x => x >= 80)
                 };
 
-                const interpret = [];
-                if (rscpAvg !== null && rscpAvg < -95) interpret.push(tText('Coverage is weak across the window.', 'Couverture faible sur la fenêtre.'));
-                if (ecnoAvg !== null && ecnoAvg < -15) interpret.push(tText('Quality is poor across the window (interference/load).', 'Qualité faible sur la fenêtre (interférences/charge).'));
-                if (trendLabel(rscpTrend) === 'degrading') interpret.push(tText('RSCP trend is degrading (coverage worsening).', 'Tendance RSCP en baisse (couverture se dégrade).'));
-                if (trendLabel(ecnoTrend) === 'degrading') interpret.push(tText('EcNo trend is degrading (quality worsening).', 'Tendance EcNo en baisse (qualité se dégrade).'));
-                if (!interpret.length) interpret.push(tText('Trends look stable around the point.', 'Tendances stables autour du point.'));
+                let switchCount = 0;
+                let prevSc = null;
+                servingScSeries.forEach(sc => {
+                    if (!sc) return;
+                    if (prevSc !== null && sc !== prevSc) switchCount += 1;
+                    prevSc = sc;
+                });
+                const asSizeLowRatio = ratioWhere(asSeries, x => x <= 1);
+                const pingPongRaw = (windowDurationMs !== null && windowDurationMs <= 20000 && switchCount > 3);
+
+                const dominanceDeltas = [];
+                let validServingForDominance = 0;
+                let coverageHits = 0;
+                slice.forEach((pt, idx) => {
+                    const serving = rscpSeries[idx];
+                    if (!Number.isFinite(serving)) return;
+                    validServingForDominance += 1;
+                    const neigh = extractNeighborRscpsForPoint(pt);
+                    const all = [serving, ...neigh].filter(Number.isFinite).sort((a, b) => b - a);
+                    if (all.length < 2) return;
+                    coverageHits += 1;
+                    dominanceDeltas.push(all[0] - all[1]);
+                });
+                if (dominanceDeltas.length >= 3) {
+                    dominanceWindow = {
+                        available: true,
+                        deltaMedian: median(dominanceDeltas),
+                        lt3dbRatio: ratioWhere(dominanceDeltas, x => x < 3),
+                        coverageRatio: validServingForDominance ? (coverageHits / validServingForDominance) : null,
+                        confidence: 'high'
+                    };
+                } else {
+                    dominanceWindow = {
+                        available: false,
+                        deltaMedian: null,
+                        lt3dbRatio: null,
+                        coverageRatio: null,
+                        confidence: 'low'
+                    };
+                }
+                const dominanceCompetition = dominanceWindow.available
+                    ? ((Number.isFinite(dominanceWindow.lt3dbRatio) && dominanceWindow.lt3dbRatio > 0.3)
+                        || (Number.isFinite(dominanceWindow.deltaMedian) && dominanceWindow.deltaMedian < 3))
+                    : (within3Count >= 1 || (dominanceNow.available && dominanceNow.within3));
+                const pingPong = pingPongRaw && dominanceCompetition;
+                const switchJitterLikely = pingPongRaw && !dominanceCompetition;
+
+                const isHoShoToken = (text) => {
+                    const s = String(text || '').toLowerCase();
+                    return /(handover|hand over|\bho\b|\bsho\b|event\s*a3|event\s*a5|\ba3\b|\ba5\b)/.test(s);
+                };
+                const hasHoShoEventInPoint = (pt) => {
+                    for (const src of pointSources(pt)) {
+                        for (const [k, v] of Object.entries(src)) {
+                            if (!hasVal(v)) continue;
+                            if (isHoShoToken(k) || isHoShoToken(v)) return true;
+                        }
+                    }
+                    return false;
+                };
+                const hoShoEventDetected = slice.some(hasHoShoEventInPoint);
+
+                let explicitOutcome = null;
+                let explicitCause = null;
+                const explicitEvidence = [];
+                slice.forEach((pt) => {
+                    for (const src of pointSources(pt)) {
+                        for (const [k, v] of Object.entries(src)) {
+                            if (!hasVal(v)) continue;
+                            const key = String(k || '').toLowerCase();
+                            const val = String(v || '').toLowerCase();
+                            if (!/(cad|caf|caa|cac|care|rrc|release|rlf|radio link failure|fail|drop)/.test(key + ' ' + val)) continue;
+                            explicitEvidence.push(`${k}: ${v}`);
+                            if (/(setup|reject|fail)/.test(key + ' ' + val)) {
+                                explicitOutcome = 'SETUP_FAIL';
+                                explicitCause = `${k}: ${v}`;
+                            } else if (/(drop|release|rlf|cad|caf|care)/.test(key + ' ' + val)) {
+                                if (!explicitOutcome) {
+                                    explicitOutcome = 'DROP_CALL';
+                                    explicitCause = `${k}: ${v}`;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                const tail = slice.slice(Math.max(0, slice.length - 6));
+                const tailRscp = pickSeries(tail, 'rscp').filter(Number.isFinite);
+                const tailEcno = pickSeries(tail, 'ecno').filter(Number.isFinite);
+                const tailBler = tail.map(p => getPointNumAny(p, ['BLER DL', 'bler_dl', 'BLER UL', 'bler_ul'])).filter(Number.isFinite);
+                const tailRrc = (() => {
+                    for (let i = tail.length - 1; i >= 0; i--) {
+                        const r = getPointVal(tail[i], 'RRC State');
+                        if (hasVal(r)) return String(r).toLowerCase();
+                    }
+                    return '';
+                })();
+                const tailRscpDrop = tailRscp.length >= 2 ? (tailRscp[tailRscp.length - 1] - tailRscp[0]) : null;
+                const tailEcnoDrop = tailEcno.length >= 2 ? (tailEcno[tailEcno.length - 1] - tailEcno[0]) : null;
+                const tailBlerSpike = tailBler.length ? Math.max(...tailBler) >= 80 : false;
+                const rrcIdleLike = !tailRrc || /idle|cell_fach|cell_pch|ura_pch/.test(tailRrc);
+                const trailingSamples = points.length - nearest.index - 1;
+                const truncatedAfterPoint = trailingSamples <= Math.max(3, Math.floor(windowCfg.samples / 4));
+                const suspectedDrop = !explicitOutcome
+                    && truncatedAfterPoint
+                    && ((Number.isFinite(tailEcnoDrop) && tailEcnoDrop <= -5) || (Number.isFinite(tailRscpDrop) && tailRscpDrop <= -6) || tailBlerSpike)
+                    && rrcIdleLike;
+
+                const outcome = explicitOutcome || (suspectedDrop ? 'SUSPECTED_DROP' : 'SUCCESS');
+                const hoNearEnd = tail.some(hasHoShoEventInPoint);
+                const dropAfterHoLikely = outcome !== 'SUCCESS' && hoNearEnd;
+                const mobilityRootGate = hoShoEventDetected || dominanceCompetition || dropAfterHoLikely;
+
+                const causeCandidates = [];
+                const pushCause = (label, condition, score, evidenceText) => {
+                    if (!condition) return;
+                    causeCandidates.push({ label, score, evidenceText });
+                };
+                pushCause('UL Coverage', Number.isFinite(txStats.highRatio) && txStats.highRatio > 0.4 && Number.isFinite(rscpStats.median) && rscpStats.median < -85, 0.85, `UE Tx high ratio ${pct(txStats.highRatio)} with RSCP median ${fmt(rscpStats.median, 1)} dBm.`);
+                pushCause('DL Coverage', (Number.isFinite(rscpStats.p10) && rscpStats.p10 <= -108) || (Number.isFinite(rscpStats.min) && rscpStats.min <= -110), 0.8, `RSCP P10/min is weak (${fmt(rscpStats.p10, 1)} / ${fmt(rscpStats.min, 1)} dBm).`);
+                pushCause('Interference / Load',
+                    (Number.isFinite(rscpStats.median) && rscpStats.median > -85 && Number.isFinite(ecnoStats.median) && ecnoStats.median < -15)
+                    || (Number.isFinite(blerStats.highRatio) && blerStats.highRatio > 0.2 && Number.isFinite(rscpStats.median) && rscpStats.median > -100),
+                    0.8,
+                    `EcNo median ${fmt(ecnoStats.median, 1)} dB with BLER high ratio ${pct(blerStats.highRatio)}.`
+                );
+                pushCause('Pilot Pollution',
+                    dominanceWindow.available
+                    && Number.isFinite(dominanceWindow.coverageRatio) && dominanceWindow.coverageRatio >= 0.3
+                    && Number.isFinite(dominanceWindow.deltaMedian) && dominanceWindow.deltaMedian < 2
+                    && Number.isFinite(dominanceWindow.lt3dbRatio) && dominanceWindow.lt3dbRatio > 0.7
+                    && Number.isFinite(ecnoStats.median) && ecnoStats.median < cfg.ecno.fair,
+                    0.9,
+                    `Dominance overlap detected: Δmedian ${fmt(dominanceWindow.deltaMedian, 1)} dB, <3dB ratio ${pct(dominanceWindow.lt3dbRatio)}.`
+                );
+                pushCause('Mobility',
+                    mobilityRootGate && (pingPong || (switchCount >= 3 && Number.isFinite(asSizeLowRatio) && asSizeLowRatio > 0.5 && dominanceCompetition) || dropAfterHoLikely),
+                    0.75,
+                    `Serving switch count ${switchCount}, AS<=1 ratio ${pct(asSizeLowRatio)}${pingPong ? ' (ping-pong)' : ''}${dropAfterHoLikely ? ' (drop after HO/SHO evidence)' : ''}.`
+                );
+                causeCandidates.sort((a, b) => b.score - a.score);
+                const primary = causeCandidates[0] || {
+                    label: outcome === 'SUCCESS' ? 'Stable' : 'Unknown',
+                    score: outcome === 'SUCCESS' ? 0.5 : 0.35,
+                    evidenceText: tText('No dominant fault signature in the selected window.', 'Aucune signature de défaut dominante dans la fenêtre sélectionnée.')
+                };
+                const secondary = causeCandidates.slice(1, 3).map(c => c.label);
+                const base = outcome !== 'SUCCESS' ? 0.65 : 0.45;
+                let ev = 0;
+                ev += Math.min(0.30, Math.max(0, (windowSampleCount - 6) / 24) * 0.30);
+                if (Number.isFinite(rscpStats.median) && Number.isFinite(ecnoStats.median)) ev += 0.25;
+                if (Number.isFinite(rssiStats.median) || Number.isFinite(rssi)) ev += 0.10;
+                if (Number.isFinite(txStats.p90)) ev += 0.10;
+                if (Number.isFinite(blerStats.mean) || Number.isFinite(blerStats.max)) ev += 0.10;
+                if (Number.isFinite(dominanceWindow.deltaMedian) && Number.isFinite(dominanceWindow.lt3dbRatio)) {
+                    ev += Math.min(0.15, (dominanceWindow.coverageRatio || 0) * 0.15);
+                }
+                if (explicitCause) ev += 0.05;
+                ev = Math.min(1, ev);
+                const bonusCap = outcome !== 'SUCCESS' ? 0.30 : 0.25;
+                const bonus = Math.min(bonusCap, 0.10 + ev * bonusCap);
+                const confidence = Math.min(0.95, Math.max(base, primary.score) + bonus);
+                const mobilityStatus = pingPong
+                    ? tText('Ping-pong detected', 'Ping-pong détecté')
+                    : switchJitterLikely
+                        ? tText('Serving identifier changed without dominance competition (possible alignment jitter)', 'Changements identifiant serving sans compétition de dominance (jitter d’alignement possible)')
+                        : (mobilityRootGate ? tText('Mobility pressure', 'Pression mobilité') : tText('Not indicated', 'Non indiqué'));
+                windowCause = {
+                    primary: primary.label,
+                    secondary,
+                    confidence,
+                    mobilityStatus,
+                    evidence: [primary.evidenceText, ...secondary.map(s => {
+                        const hit = causeCandidates.find(c => c.label === s);
+                        return hit ? hit.evidenceText : '';
+                    })].filter(Boolean)
+                };
+                if (explicitCause) windowCause.evidence.unshift(`Explicit marker: ${explicitCause}`);
+                else if (suspectedDrop) windowCause.evidence.unshift(tText('Heuristic suspected drop near window end (collapse + truncation).', 'Drop suspecté heuristique près de la fin de fenêtre (chute + troncature).'));
+                if (switchJitterLikely) {
+                    windowCause.evidence.unshift(
+                        tText(
+                            `Switch count is ${switchCount} but dominance is strong; treat this as serving-ID change/jitter unless HO evidence confirms mobility instability.`,
+                            `Le nombre de changements est ${switchCount} mais la dominance est forte ; traiter comme changement ID serving/jitter sauf preuve HO d’instabilité mobilité.`
+                        )
+                    );
+                }
+                if (windowCause.primary !== 'Unknown' && !rootCauses.some(rc => rc.label === windowCause.primary)) {
+                    const causeColors = {
+                        'UL Coverage': '#f97316',
+                        'DL Coverage': '#fb923c',
+                        'Interference / Load': '#ef4444',
+                        'Pilot Pollution': '#dc2626',
+                        'Mobility': '#f59e0b',
+                        'Stable': '#22c55e'
+                    };
+                    rootCauses.unshift({ label: windowCause.primary, color: causeColors[windowCause.primary] || '#64748b' });
+                }
+
+                const trendLabel = (s) => {
+                    if (!Number.isFinite(s)) return 'stable';
+                    if (s > 0.15) return 'improving';
+                    if (s < -0.15) return 'degrading';
+                    return 'stable';
+                };
 
                 chartHtml = `
                     <div style="display:flex; gap:12px; flex-wrap:wrap;">
                         <div>
-                            <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">RSCP (nearby)</div>
+                            <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">RSCP (${windowModeUsed})</div>
                             ${buildSparkline(rscpSeries, '#22c55e')}
                             <div style="font-size:11px; color:#94a3b8; margin-top:4px;">
-                                Avg: ${rscpAvg !== null ? rscpAvg.toFixed(1) : '-'} dBm, 
-                                Min/Max: ${rscpMin !== null ? rscpMin.toFixed(1) : '-'} / ${rscpMax !== null ? rscpMax.toFixed(1) : '-'},
-                                Trend: <b>${trendLabel(rscpTrend)}</b>
+                                Median: ${fmt(rscpStats.median, 1)} dBm, P10: ${fmt(rscpStats.p10, 1)}, Min: ${fmt(rscpStats.min, 1)}, Trend: <b>${trendLabel(rscpStats.slope)}</b>
                             </div>
                         </div>
                         <div>
-                            <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">EcNo (nearby)</div>
+                            <div style="font-size:11px; color:#94a3b8; margin-bottom:4px;">EcNo (${windowModeUsed})</div>
                             ${buildSparkline(ecnoSeries, '#38bdf8')}
                             <div style="font-size:11px; color:#94a3b8; margin-top:4px;">
-                                Avg: ${ecnoAvg !== null ? ecnoAvg.toFixed(1) : '-'} dB, 
-                                Min/Max: ${ecnoMin !== null ? ecnoMin.toFixed(1) : '-'} / ${ecnoMax !== null ? ecnoMax.toFixed(1) : '-'},
-                                Trend: <b>${trendLabel(ecnoTrend)}</b>
+                                Median: ${fmt(ecnoStats.median, 1)} dB, P10: ${fmt(ecnoStats.p10, 1)}, Min: ${fmt(ecnoStats.min, 1)}, Trend: <b>${trendLabel(ecnoStats.slope)}</b>
                             </div>
                         </div>
                     </div>
-                    <div style="margin-top:6px; font-size:11px; color:#94a3b8;">
-                        RSCP = coverage strength, EcNo = quality. Higher (less negative) is better.
-                    </div>
-                    <div style="margin-top:6px; font-size:11px; color:#e2e8f0;">
-                        <div><b>Quick rules</b></div>
-                        <div>• Good coverage, bad quality → interference or pilot overlap.</div>
-                        <div>• Bad coverage + bad quality → edge coverage or obstruction.</div>
-                        <div>• RSCP stable but EcNo drops → interference or load.</div>
-                        <div>• Both drop → coverage loss (distance/obstruction).</div>
-                    </div>
-                    <div style="margin-top:6px; font-size:11px; color:#e2e8f0;">
-                        ${tText('Interpretation', 'Interprétation')}: ${interpret.join(' ')}
-                    </div>
                     <div style="margin-top:6px; font-size:11px; color:#64748b;">
-                        ${tText('These mini charts show ~50 samples around the nearest log point (by position/time). Use them to spot local coverage/quality swings and whether the trend is improving or degrading.',
-                        'Ces mini-graphes montrent ~50 échantillons autour du point le plus proche (position/temps). Utilisez-les pour repérer les variations locales de couverture/qualité et la tendance (amélioration/dégradation).')}
+                        ${tText('Window', 'Fenêtre')}: ${windowModeUsed === 'time' ? `±${windowCfg.ms} ms` : `±${windowCfg.samples} samples`} | ${tText('samples', 'échantillons')}: ${windowSampleCount}
+                        ${windowDurationMs !== null ? ` | ${tText('duration', 'durée')}: ${(windowDurationMs / 1000).toFixed(1)} s` : ''}
                     </div>
                 `;
+
+                windowKpiHtml = `
+                    <div style="margin-top:10px;">
+                        <div style="font-size:12px; color:#94a3b8; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px;">${tText('Window KPIs', 'KPIs Fenêtre')}</div>
+                        <table style="width:100%; border-collapse:collapse; font-size:11px;">
+                            <tbody>
+                                <tr><td style="color:#94a3b8;">RSCP median / P10 / min</td><td>${fmt(rscpStats.median,1)} / ${fmt(rscpStats.p10,1)} / ${fmt(rscpStats.min,1)} dBm</td></tr>
+                                <tr><td style="color:#94a3b8;">EcNo median / P10 / min</td><td>${fmt(ecnoStats.median,1)} / ${fmt(ecnoStats.p10,1)} / ${fmt(ecnoStats.min,1)} dB</td></tr>
+                                <tr><td style="color:#94a3b8;">IQR RSCP / EcNo</td><td>${fmt(rscpStats.iqr,1)} / ${fmt(ecnoStats.iqr,1)}</td></tr>
+                                <tr><td style="color:#94a3b8;">Slope RSCP / EcNo</td><td>${fmt(rscpStats.slope,2)} / ${fmt(ecnoStats.slope,2)} dB/sample</td></tr>
+                                <tr><td style="color:#94a3b8;">UE Tx P90 / max / >=21dBm</td><td>${fmt(txStats.p90,1)} / ${fmt(txStats.max,1)} / ${pct(txStats.highRatio)}</td></tr>
+                                <tr><td style="color:#94a3b8;">BLER max / mean / >=80%</td><td>${fmt(blerStats.max,1)} / ${fmt(blerStats.mean,1)} / ${pct(blerStats.highRatio)}</td></tr>
+                                <tr><td style="color:#94a3b8;">AS<=1 ratio / switches</td><td>${pct(asSizeLowRatio)} / ${switchCount}${pingPong ? ' (ping-pong)' : (switchJitterLikely ? ` (${tText('switch-jitter likely', 'jitter de switch probable')})` : '')}</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                const outcomeColor = outcome === 'SUCCESS' ? '#22c55e' : (outcome === 'SUSPECTED_DROP' ? '#f59e0b' : '#ef4444');
+                outcomeHtml = `
+                    <div style="margin:8px 0 10px 0; padding:8px 10px; border:1px solid #1f2937; border-radius:8px; background:#0f172a;">
+                        <div style="font-size:12px; color:#94a3b8;">${tText('Outcome', 'Résultat')}</div>
+                        <div style="font-size:14px; font-weight:700; color:${outcomeColor};">${outcome}</div>
+                        <div style="font-size:12px; margin-top:4px; color:#e2e8f0;">
+                            ${tText('Primary condition', 'Condition principale')}: <b>${windowCause.primary}</b>
+                            ${windowCause.secondary.length ? ` | ${tText('Secondary', 'Secondaire')}: ${windowCause.secondary.join(', ')}` : ''}
+                            | ${tText('Mobility', 'Mobilité')}: ${windowCause.mobilityStatus}
+                            | ${tText('Confidence', 'Confiance')}: ${pct(windowCause.confidence)}
+                        </div>
+                    </div>
+                `;
+
+                windowCause.evidence.slice(0, 3).forEach(ev => addFinding(ev, windowCause.confidence));
+
+                const interferenceWindow =
+                    (Number.isFinite(rscpStats.median) && rscpStats.median > -85 && Number.isFinite(ecnoStats.median) && ecnoStats.median < -15)
+                    || (Number.isFinite(blerStats.highRatio) && blerStats.highRatio > 0.2 && Number.isFinite(rscpStats.median) && rscpStats.median > -100);
+                if (interferenceWindow) {
+                    addRec(
+                        tText(
+                            'Window evidence points to interference/load. Correlate with scheduler/load counters and external noise sources.',
+                            'Les preuves fenêtre indiquent interférences/charge. Corréler avec compteurs de charge/scheduler et sources de bruit externe.'
+                        ),
+                        'P1'
+                    );
+                }
             }
+            const stableLabel = (x) => {
+                if (!Number.isFinite(x)) return 'Unknown';
+                if (x < 2) return 'Stable';
+                if (x < 5) return 'Moderate';
+                return 'Unstable';
+            };
+            const rscpStability = stableLabel(rscpStats.iqr);
+            const ecnoStability = stableLabel(ecnoStats.iqr);
+
+            if (dominanceWindow.available) {
+                addFinding(
+                    tText(
+                        `Window dominance: Δmedian ${fmt(dominanceWindow.deltaMedian, 1)} dB, <3 dB ratio ${pct(dominanceWindow.lt3dbRatio)}, coverage ratio ${pct(dominanceWindow.coverageRatio)}.`,
+                        `Dominance fenêtre : Δmédian ${fmt(dominanceWindow.deltaMedian, 1)} dB, ratio <3 dB ${pct(dominanceWindow.lt3dbRatio)}, ratio couverture ${pct(dominanceWindow.coverageRatio)}.`
+                    ),
+                    0.75
+                );
+            } else if (dominanceNow.available) {
+                addFinding(
+                    tText(
+                        `Instant dominance gap Δ(best-2nd) ≈ ${dominanceNow.delta.toFixed(1)} dB (${dominanceNow.within3 ? 'low dominance / overlap' : 'dominant server'}). Window neighbor data unavailable, confidence is low.`,
+                        `Écart de dominance instantané Δ(meilleur-2ème) ≈ ${dominanceNow.delta.toFixed(1)} dB (${dominanceNow.within3 ? 'faible dominance / chevauchement' : 'serveur dominant'}). Données voisins fenêtre indisponibles, confiance faible.`
+                    ),
+                    0.55
+                );
+            } else if (cellmeasDominanceUnavailable) {
+                addFinding(
+                    tText(
+                        'CELLMEAS neighbor RSCP is unavailable for this subtype, so dominance from CELLMEAS is not computed here.',
+                        'Le RSCP voisin CELLMEAS est indisponible pour ce sous-type, donc la dominance CELLMEAS n’est pas calculée ici.'
+                    ),
+                    0.75
+                );
+            }
+
+            if (Number.isFinite(rscpStats.iqr) || Number.isFinite(ecnoStats.iqr)) {
+                addFinding(
+                    tText(
+                        `Stability (window): RSCP ${rscpStability} (IQR ${fmt(rscpStats.iqr,1)} dB), EcNo ${ecnoStability} (IQR ${fmt(ecnoStats.iqr,1)} dB).`,
+                        `Stabilité (fenêtre) : RSCP ${rscpStability} (IQR ${fmt(rscpStats.iqr,1)} dB), EcNo ${ecnoStability} (IQR ${fmt(ecnoStats.iqr,1)} dB).`
+                    ),
+                    0.6
+                );
+            }
+
+            if (Number.isFinite(rscpStats.slope) || Number.isFinite(ecnoStats.slope)) {
+                addFinding(
+                    tText(
+                        `Trend (window): RSCP ${trendArrow(rscpStats.slope)} (${fmt(rscpStats.slope,2)} dB/sample), EcNo ${trendArrow(ecnoStats.slope)} (${fmt(ecnoStats.slope,2)} dB/sample).`,
+                        `Tendance (fenêtre) : RSCP ${trendArrow(rscpStats.slope)} (${fmt(rscpStats.slope,2)} dB/échant.), EcNo ${trendArrow(ecnoStats.slope)} (${fmt(ecnoStats.slope,2)} dB/échant.).`
+                    ),
+                    0.55
+                );
+            }
+
+            const dominanceHtml = `
+                <div style="margin-top:8px; font-size:12px; color:#94a3b8;">
+                    <b>Dominance</b>:
+                    ${dominanceWindow.available
+                        ? `Δmedian ${fmt(dominanceWindow.deltaMedian,1)} dB | <3dB ratio: ${pct(dominanceWindow.lt3dbRatio)} | coverage ratio: ${pct(dominanceWindow.coverageRatio)}`
+                        : `${dominanceNow.available
+                            ? `Δ(best-2nd) ${fmt(dominanceNow.delta,1)} dB | within3dB neighbors: ${within3Count}`
+                            : (cellmeasDominanceUnavailable
+                                ? 'CELLMEAS RSCP unavailable (this subtype)'
+                                : 'Unavailable')} (instant only, low confidence)`}
+                    ${Number.isFinite(rscpStats.iqr) || Number.isFinite(ecnoStats.iqr) ? ` | <b>Stability</b>: RSCP ${rscpStability} (IQR ${fmt(rscpStats.iqr,1)}), EcNo ${ecnoStability} (IQR ${fmt(ecnoStats.iqr,1)})` : ''}
+                </div>
+            `;
 
             const existingModal = document.querySelector('.dt-analysis-modal-overlay');
             if (existingModal) existingModal.remove();
@@ -7637,14 +8849,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                             <div style="font-size:13px; margin-bottom:10px;">
                                 ${summary.map(s => `<div>${s}</div>`).join('')}
                             </div>
+                            ${outcomeHtml}
                             <div style="margin-top:8px; font-size:12px; color:#94a3b8;">
-                                ${rrcState ? `RRC State: <b style="color:#e2e8f0;">${rrcState}</b>` : ''}
+                                ${rrcState ? `RRC State: <b style="color:#e2e8f0;">${esc(rrcState)}</b>` : ''}
                                 ${ueTx !== null ? ` | UE Tx: <b style="color:#e2e8f0;">${ueTx.toFixed(1)}</b>` : ''}
                                 ${nbTx !== null ? ` | NodeB Tx: <b style="color:#e2e8f0;">${nbTx.toFixed(1)}</b>` : ''}
                                 ${tpc !== null ? ` | TPC: <b style="color:#e2e8f0;">${tpc}</b>` : ''}
                                 ${blerDl !== null ? ` | BLER DL: <b style="color:#e2e8f0;">${blerDl}</b>` : ''}
                                 ${blerUl !== null ? ` | BLER UL: <b style="color:#e2e8f0;">${blerUl}</b>` : ''}
                             </div>
+                            ${dominanceHtml}
                             ${interp.length ? `<div style="margin-top:6px; font-size:11px; color:#cbd5f5;">
                                 ${interp.map(t => {
                                     const statusColor = t.status === 'OK' ? '#22c55e' : (t.status === 'Moderate' ? '#eab308' : '#ef4444');
@@ -7671,6 +8885,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                                 <div style="font-size:12px; color:#94a3b8; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px;">${tr('trends')}</div>
                                 ${chartHtml}
                             </div>
+                            ${windowKpiHtml}
                             <div style="margin-top:10px;">
                                 <div style="font-size:12px; color:#38bdf8; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px;">${tr('findings')}</div>
                                 ${findings.length ? findings.map(f => {
@@ -7703,6 +8918,23 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                                 <option value="EN" ${cfg.lang === 'EN' ? 'selected' : ''}>EN</option>
                                 <option value="FR" ${cfg.lang === 'FR' ? 'selected' : ''}>FR</option>
                             </select>
+                        </div>
+                        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-bottom:10px;">
+                            <div>
+                                <label style="font-size:12px; color:#94a3b8;">${tText('Window mode', 'Mode fenêtre')}</label>
+                                <select id="dt-window-mode" style="width:100%; padding:6px; margin-top:4px; background:#0b1220; color:#e5e7eb; border:1px solid #334155;">
+                                    <option value="time" ${windowCfg.mode === 'time' ? 'selected' : ''}>${tText('Time-based', 'Basé temps')}</option>
+                                    <option value="sample" ${windowCfg.mode === 'sample' ? 'selected' : ''}>${tText('Sample-based', 'Basé échantillons')}</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:#94a3b8;">${tText('Window ± ms', 'Fenêtre ± ms')}</label>
+                                <input id="dt-window-ms" value="${windowCfg.ms}" style="width:100%; margin-top:4px;" />
+                            </div>
+                            <div>
+                                <label style="font-size:12px; color:#94a3b8;">${tText('Window ± samples', 'Fenêtre ± échant.')}</label>
+                                <input id="dt-window-samples" value="${windowCfg.samples}" style="width:100%; margin-top:4px;" />
+                            </div>
                         </div>
                         <div style="font-size:12px; color:#94a3b8; margin-bottom:6px;">${t.thresholds}</div>
                         <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:8px;">
@@ -7796,8 +9028,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                             ecno: parseFloat(document.getElementById('dt-pilot-ecno').value),
                             delta: parseFloat(document.getElementById('dt-pilot-delta').value),
                             count: parseInt(document.getElementById('dt-pilot-count').value, 10)
+                        },
+                        window: {
+                            mode: document.getElementById('dt-window-mode').value === 'sample' ? 'sample' : 'time',
+                            ms: parseInt(document.getElementById('dt-window-ms').value, 10),
+                            samples: parseInt(document.getElementById('dt-window-samples').value, 10)
                         }
                     };
+                    if (!Number.isFinite(nextCfg.window.ms)) nextCfg.window.ms = 5000;
+                    if (!Number.isFinite(nextCfg.window.samples)) nextCfg.window.samples = 25;
+                    nextCfg.window.ms = Math.max(1000, nextCfg.window.ms);
+                    nextCfg.window.samples = Math.max(10, Math.round(nextCfg.window.samples));
                     saveDtConfig(nextCfg);
                     settingsModal.style.display = 'none';
                     // Re-run DT analysis with updated thresholds/language
@@ -7902,13 +9143,13 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 return txt;
             };
             const readThroughputs = (pt) => {
-                const dl = pointNum(pt, 'DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput', 'Radio.Lte.ServingCellTotal.Pdsch.Throughput')
+                const dl = pointNum(pt, 'Radio.Lte.ServingCellTotal.Pdsch.Throughput', 'DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput')
                     ?? pointContainsNum(pt, 'pdsch', 'throughput')
                     ?? pointContainsNum(pt, 'throughput', 'dl');
                 const appDl = pointNum(pt, 'Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput')
                     ?? pointContainsNum(pt, 'http', 'download', 'throughput')
                     ?? pointContainsNum(pt, 'application', 'throughput', 'dl');
-                const ul = pointNum(pt, 'UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput', 'Radio.Lte.ServingCellTotal.Pusch.Throughput')
+                const ul = pointNum(pt, 'Radio.Lte.ServingCellTotal.Pusch.Throughput', 'UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput')
                     ?? pointContainsNum(pt, 'pusch', 'throughput')
                     ?? pointContainsNum(pt, 'throughput', 'ul');
                 return { dl, appDl, ul, primary: (Number.isFinite(dl) ? dl : appDl) };
@@ -7939,15 +9180,40 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const blerDl = toNum(getValFromObj(d, 'BLER DL', 'DL IBLER (%)', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl'));
             const modulation = getValFromObj(d, 'Modulation (DL/UL)', 'DL Modulation', 'UL Modulation') || '';
             const mimoCa = getValFromObj(d, 'MIMO/CA', 'MIMO', 'CA') || '';
+            const rrcStateDecodedExact = getValFromObj(d, 'RRC State (decoded exact)');
             const rrcState = getValFromObj(d, 'RRC State');
             const hoEvent = getValFromObj(d, 'HO Start/Complete');
+            const a3a5Triggers = getValFromObj(d, 'A3/A5 triggers');
+            const a3a5Thresholds = getValFromObj(d, 'A3/A5 event thresholds', 'A3/A5 thresholds');
+            const a3a5ThresholdSourceTime = getValFromObj(d, 'A3/A5 threshold source time', 'A3/A5 source time');
+            const a3a5ThresholdSourcePci = getValFromObj(d, 'A3/A5 threshold source PCI', 'A3/A5 source PCI');
+            const a3a5ThresholdContextCheck = getValFromObj(d, 'A3/A5 threshold context check', 'A3/A5 context check');
+            const hoCommand = getValFromObj(d, 'HO command');
+            const hoExecutionTime = getValFromObj(d, 'HO execution time');
+            const hoFailure = getValFromObj(d, 'HO failure');
+            const rlf = getValFromObj(d, 'RLF');
             const pciChange = getValFromObj(d, 'Cell/PCI Change (inferred)');
             const earfcnChange = getValFromObj(d, 'EARFCN/Band Change (inferred)');
+            const servingBand = getValFromObj(d, 'Band', 'Serving Band');
+            const servingBw = getValFromObj(d, 'BW', 'DL bandwidth', 'Downlink bandwidth', 'Bandwidth');
+            const ueCategory = getValFromObj(d, 'UE category', 'UE Category');
+            const mimoCapability = getValFromObj(d, 'MIMO capability', 'MIMO Capability');
+            const caCapability = getValFromObj(d, 'CA capability', 'CA Capability');
             const rrcTransition = getValFromObj(d, 'RRC State Transition');
             const bearer = getValFromObj(d, 'Bearer / EPS Bearer');
             const taJumps = getValFromObj(d, 'TA Jumps');
 
-            const tpCfg = { degraded: 3000, severe: 1500, critical: 700 };
+            const lteEpisodeCfg = getDtLteEpisodeConfig();
+            const tpEpisodeCfg = {
+                enterKbps: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.enterKbps)) ? Number(lteEpisodeCfg.enterKbps) : 5000,
+                exitKbps: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.exitKbps)) ? Number(lteEpisodeCfg.exitKbps) : 6000,
+                minDurationMs: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.minDurationMs)) ? Number(lteEpisodeCfg.minDurationMs) : 1000,
+                mergeGapMs: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.mergeGapMs)) ? Number(lteEpisodeCfg.mergeGapMs) : 1000,
+                smoothWindowMs: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.smoothWindowMs)) ? Number(lteEpisodeCfg.smoothWindowMs) : 1000,
+                nearestSearchMs: Number.isFinite(Number(lteEpisodeCfg && lteEpisodeCfg.nearestSearchMs)) ? Number(lteEpisodeCfg.nearestSearchMs) : 30000
+            };
+            if (tpEpisodeCfg.exitKbps <= tpEpisodeCfg.enterKbps) tpEpisodeCfg.exitKbps = tpEpisodeCfg.enterKbps + 1000;
+            const tpCfg = { degraded: tpEpisodeCfg.enterKbps, severe: 1500, critical: 700 };
             let tpStatus = 'No throughput sample';
             let tpColor = '#94a3b8';
             let degraded = false;
@@ -8007,35 +9273,239 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 });
             });
 
+            const percentile = (arr, p) => {
+                const a = (arr || []).filter((x) => Number.isFinite(Number(x))).map(Number).sort((x, y) => x - y);
+                if (!a.length) return null;
+                const q = Math.min(100, Math.max(0, Number(p)));
+                const idx = (q / 100) * (a.length - 1);
+                const lo = Math.floor(idx);
+                const hi = Math.ceil(idx);
+                if (lo === hi) return a[lo];
+                return a[lo] + (a[hi] - a[lo]) * (idx - lo);
+            };
+            const buildTpSeries = (points) => {
+                const rows = [];
+                (points || []).forEach((pt, i) => {
+                    const t = parseTs(pt && pt.time) ?? toNum(pt && pt.timestamp);
+                    if (!Number.isFinite(t)) return;
+                    const dlRadio = pointNum(pt || {},
+                        'Radio.Lte.ServingCellTotal.Pdsch.Throughput',
+                        'DL throughput',
+                        'Radio.Lte.ServingCell[8].Pdsch.Throughput'
+                    ) ?? pointContainsNum(pt || {}, 'pdsch', 'throughput')
+                        ?? pointContainsNum(pt || {}, 'throughput', 'dl');
+                    if (!Number.isFinite(dlRadio)) return;
+                    const tp = readThroughputs(pt || {});
+                    rows.push({
+                        t,
+                        time: String((pt && pt.time) || new Date(t).toISOString()),
+                        index: i,
+                        point: pt,
+                        dlKbps: Number(dlRadio),
+                        appDlKbps: Number.isFinite(tp.appDl) ? Number(tp.appDl) : null,
+                        ulKbps: Number.isFinite(tp.ul) ? Number(tp.ul) : null
+                    });
+                });
+                rows.sort((a, b) => a.t - b.t || a.index - b.index);
+                return rows;
+            };
+            const withRollingMedian = (rows, winMs) => {
+                if (!Array.isArray(rows) || !rows.length) return [];
+                const out = rows.map((r) => ({ ...r, smoothKbps: r.dlKbps }));
+                const w = Math.max(1, Number(winMs) || 1000);
+                let left = 0;
+                for (let i = 0; i < out.length; i++) {
+                    while (left < i && (out[i].t - out[left].t) > w) left++;
+                    const vals = [];
+                    for (let j = left; j <= i; j++) vals.push(out[j].dlKbps);
+                    const med = percentile(vals, 50);
+                    out[i].smoothKbps = Number.isFinite(med) ? Number(med) : out[i].dlKbps;
+                }
+                return out;
+            };
+            const finalizeEpisode = (ep, rows) => {
+                if (!ep || !Array.isArray(rows) || !rows.length) return null;
+                const a = Math.max(0, ep.startIndex);
+                const b = Math.min(rows.length - 1, ep.endIndex);
+                if (b < a) return null;
+                const seg = rows.slice(a, b + 1);
+                const rawVals = seg.map((r) => r.dlKbps).filter((x) => Number.isFinite(x));
+                const first = seg[0];
+                const last = seg[seg.length - 1];
+                const avg = rawVals.length ? (rawVals.reduce((s, v) => s + v, 0) / rawVals.length) : null;
+                return {
+                    startIndex: a,
+                    endIndex: b,
+                    startMs: first.t,
+                    endMs: last.t,
+                    startTime: first.time,
+                    endTime: last.time,
+                    durationMs: Math.max(0, last.t - first.t),
+                    sampleCount: seg.length,
+                    minTpKbps: rawVals.length ? Math.min(...rawVals) : null,
+                    avgTpKbps: Number.isFinite(avg) ? avg : null,
+                    p10TpKbps: percentile(rawVals, 10),
+                    p50TpKbps: percentile(rawVals, 50)
+                };
+            };
+            const detectThroughputEpisodes = (rowsIn, cfg) => {
+                const rows = withRollingMedian(rowsIn, cfg.smoothWindowMs).map((r) => ({ ...r, state: 'NORMAL' }));
+                if (!rows.length) return { episodes: [], rows: [] };
+                const rawEpisodes = [];
+                let state = 'NORMAL';
+                let startIndex = -1;
+                rows.forEach((r, i) => {
+                    const v = Number(r.smoothKbps);
+                    if (!Number.isFinite(v)) return;
+                    if (state === 'NORMAL') {
+                        if (v < cfg.enterKbps) {
+                            state = 'DEGRADED';
+                            startIndex = i;
+                            rows[i].state = 'DEGRADED';
+                        } else {
+                            rows[i].state = 'NORMAL';
+                        }
+                    } else if (state === 'DEGRADED') {
+                        rows[i].state = 'DEGRADED';
+                        if (v > cfg.exitKbps) {
+                            rawEpisodes.push({ startIndex, endIndex: i });
+                            state = 'NORMAL';
+                            startIndex = -1;
+                        }
+                    }
+                });
+                if (state === 'DEGRADED' && startIndex >= 0) {
+                    rawEpisodes.push({ startIndex, endIndex: rows.length - 1 });
+                }
+
+                const cleaned = rawEpisodes
+                    .map((ep) => finalizeEpisode(ep, rows))
+                    .filter((ep) => ep && ep.durationMs >= cfg.minDurationMs);
+                if (!cleaned.length) return { episodes: [], rows };
+
+                const merged = [];
+                cleaned.forEach((ep) => {
+                    const last = merged[merged.length - 1];
+                    if (last && (ep.startMs - last.endMs) <= cfg.mergeGapMs) {
+                        last.endIndex = ep.endIndex;
+                        const rebuilt = finalizeEpisode(last, rows);
+                        if (rebuilt) Object.assign(last, rebuilt);
+                    } else {
+                        merged.push({ ...ep });
+                    }
+                });
+                return { episodes: merged, rows };
+            };
+            const pickEpisodeForClick = (episodes, clickMs, maxDistMs) => {
+                if (!Array.isArray(episodes) || !episodes.length || !Number.isFinite(clickMs)) return null;
+                const inside = episodes.find((ep) => clickMs >= ep.startMs && clickMs <= ep.endMs);
+                if (inside) return { episode: inside, mode: 'inside', distanceMs: 0 };
+                let best = null;
+                episodes.forEach((ep) => {
+                    const dist = clickMs < ep.startMs ? (ep.startMs - clickMs) : (clickMs - ep.endMs);
+                    if (!best || dist < best.distanceMs) best = { episode: ep, mode: 'nearest', distanceMs: dist };
+                });
+                if (!best) return null;
+                return best.distanceMs <= maxDistMs ? best : null;
+            };
+            const makeStats = (vals) => {
+                const arr = (vals || []).filter((v) => Number.isFinite(Number(v))).map(Number);
+                if (!arr.length) return { count: 0, avg: null, p50: null };
+                return {
+                    count: arr.length,
+                    avg: arr.reduce((s, v) => s + v, 0) / arr.length,
+                    p50: percentile(arr, 50)
+                };
+            };
+            const isEventPresent = (v) => {
+                if (!hasVal(v)) return false;
+                const s = String(v || '').trim().toLowerCase();
+                if (!s || s === 'n/a' || s === '-' || s === 'no' || s === 'none' || s === 'false' || s === '0') return false;
+                return true;
+            };
+            const summarizeWindow = (points) => {
+                const sorted = (points || []).slice().sort((a, b) => (parseTs(a.time) || 0) - (parseTs(b.time) || 0));
+                let servingChanges = 0;
+                let prevServingKey = null;
+                sorted.forEach((pt) => {
+                    const enb = decodeEnbCell(pointVal(pt, 'eNodeB ID-Cell ID', 'Cellid', 'Cell ID'));
+                    const pci = pointNum(pt, 'Physical cell ID', 'Radio.Lte.ServingCell[8].Pci', 'pci') ?? pointContainsNum(pt, 'pci');
+                    const freq = pointNum(pt, 'Downlink EARFCN', 'Radio.Lte.ServingCell[8].Downlink.Earfcn', 'freq') ?? pointContainsNum(pt, 'earfcn');
+                    const key = (enb && enb !== 'N/A')
+                        ? `ENB:${enb}`
+                        : ((Number.isFinite(pci) || Number.isFinite(freq)) ? `RF:${Number.isFinite(pci) ? pci : 'NA'}/${Number.isFinite(freq) ? freq : 'NA'}` : null);
+                    if (!key) return;
+                    if (prevServingKey !== null && key !== prevServingKey) servingChanges += 1;
+                    prevServingKey = key;
+                });
+
+                const hoCount = sorted.reduce((acc, pt) => acc + (isEventPresent(pointVal(pt, 'HO Start/Complete')) ? 1 : 0), 0);
+                const pciChangeCount = sorted.reduce((acc, pt) => acc + (isEventPresent(pointVal(pt, 'Cell/PCI Change (inferred)')) ? 1 : 0), 0);
+                const earfcnChangeCount = sorted.reduce((acc, pt) => acc + (isEventPresent(pointVal(pt, 'EARFCN/Band Change (inferred)')) ? 1 : 0), 0);
+                const rrcTransitionCount = sorted.reduce((acc, pt) => acc + (isEventPresent(pointVal(pt, 'RRC State Transition')) ? 1 : 0), 0);
+                const taJumpCount = sorted.reduce((acc, pt) => acc + (isEventPresent(pointVal(pt, 'TA Jumps')) ? 1 : 0), 0);
+
+                const cqiVals = sorted.map((pt) => pointNum(pt, 'CQI (DL)', 'CQI', 'Radio.Lte.ServingCellTotal.Cqi') ?? pointContainsNum(pt, 'cqi'));
+                const dlMcsVals = sorted.map((pt) => pointNum(pt, 'DL MCS', 'Radio.Lte.ServingCellTotal.DlMcs') ?? pointContainsNum(pt, 'dl', 'mcs') ?? pointContainsNum(pt, 'pdsch', 'mcs'));
+                const blerVals = sorted.map((pt) => pointNum(pt, 'BLER DL', 'Radio.Lte.ServingCellTotal.BlerDl', 'DL IBLER (%)') ?? pointContainsNum(pt, 'bler', 'dl') ?? pointContainsNum(pt, 'ibler'));
+                const prbVals = sorted.map((pt) =>
+                    pointNum(pt,
+                        'DL PRB Usage',
+                        'PRB Load',
+                        'Radio.Lte.ServingCellTotal.DlPrb.Usage',
+                        'Radio.Lte.ServingCellTotal.Prb.Usage'
+                    ) ?? pointContainsNum(pt, 'prb', 'usage') ?? pointContainsNum(pt, 'prb')
+                );
+
+                return {
+                    servingChanges,
+                    hoCount,
+                    pciChangeCount,
+                    earfcnChangeCount,
+                    rrcTransitionCount,
+                    taJumpCount,
+                    cqi: makeStats(cqiVals),
+                    dlMcs: makeStats(dlMcsVals),
+                    blerDl: makeStats(blerVals),
+                    prb: makeStats(prbVals)
+                };
+            };
+
             const windowData = (() => {
                 if (!activeLog || !Array.isArray(activeLog.points) || selectedIndex < 0) return null;
-                let idx = selectedIndex;
-                const points = activeLog.points;
-                const isDegradedAt = (i) => {
-                    if (i < 0 || i >= points.length) return false;
-                    const tp = readThroughputs(points[i]).primary;
-                    return Number.isFinite(tp) && tp < tpCfg.degraded;
+                const tpSeries = buildTpSeries(activeLog.points);
+                if (!tpSeries.length) return null;
+                const detected = detectThroughputEpisodes(tpSeries, tpEpisodeCfg);
+                const episodes = (detected && Array.isArray(detected.episodes)) ? detected.episodes : [];
+                if (!episodes.length) return null;
+
+                const selectedPointTs = parseTs(selectedTime) ?? (activeLog.points[selectedIndex] ? parseTs(activeLog.points[selectedIndex].time) : null);
+                if (!Number.isFinite(selectedPointTs)) return null;
+                const picked = pickEpisodeForClick(episodes, selectedPointTs, tpEpisodeCfg.nearestSearchMs);
+                if (!picked || !picked.episode) return null;
+                const ep = picked.episode;
+
+                const rows = (activeLog.points || [])
+                    .filter((pt) => {
+                        const t = parseTs(pt && pt.time) ?? toNum(pt && pt.timestamp);
+                        return Number.isFinite(t) && t >= ep.startMs && t <= ep.endMs;
+                    })
+                    .sort((a, b) => (parseTs(a.time) || 0) - (parseTs(b.time) || 0));
+
+                return {
+                    points: rows,
+                    episode: ep,
+                    episodes,
+                    pickMode: picked.mode,
+                    distanceMs: picked.distanceMs,
+                    cfg: tpEpisodeCfg,
+                    summary: summarizeWindow(rows),
+                    tpRows: (detected && Array.isArray(detected.rows)) ? detected.rows : []
                 };
-                if (!isDegradedAt(idx)) {
-                    let best = null;
-                    for (let dScan = 1; dScan <= 60; dScan++) {
-                        const l = idx - dScan;
-                        const r = idx + dScan;
-                        if (l >= 0 && isDegradedAt(l)) { best = l; break; }
-                        if (r < points.length && isDegradedAt(r)) { best = r; break; }
-                    }
-                    if (best !== null) idx = best;
-                }
-                if (!isDegradedAt(idx)) return null;
-                let start = idx;
-                let end = idx;
-                while (start > 0 && isDegradedAt(start - 1)) start--;
-                while (end + 1 < points.length && isDegradedAt(end + 1)) end++;
-                return { start, end, points: points.slice(start, end + 1), idx };
             })();
 
             if (windowData && activeLog && activeLog.trpRunId && typeof window.trpFetchSeries === 'function') {
-                const labelTargets = new Set(['Serving cell name', 'DL throughput', 'UL throughput', 'Application throughput DL', 'Physical cell ID', 'Downlink EARFCN', 'RSRP', 'RSRQ', 'SINR', 'Cellid', 'Cell ID']);
+                const labelTargets = new Set(['Serving cell name', 'DL throughput', 'UL throughput', 'Application throughput DL', 'Physical cell ID', 'Downlink EARFCN', 'Band', 'BW', 'RSRP', 'RSRQ', 'SINR', 'Cellid', 'Cell ID']);
                 const labelMap = (activeLog.trpMetricLabels && typeof activeLog.trpMetricLabels === 'object') ? activeLog.trpMetricLabels : {};
                 const wantedMetrics = Array.from(new Set(Object.entries(labelMap)
                     .filter(([, friendly]) => labelTargets.has(String(friendly || '')))
@@ -8065,15 +9535,52 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 const tsStart = parseTs(first.time);
                 const tsEnd = parseTs(last.time);
                 const durSec = (Number.isFinite(tsStart) && Number.isFinite(tsEnd)) ? Math.max(0, ((tsEnd - tsStart) / 1000)) : null;
+                const ep = windowData.episode || {};
+                const nearestNote = (windowData.pickMode === 'nearest')
+                    ? `<div style="font-size:11px;color:#fde68a;margin-bottom:6px;">Selected point is outside a degraded episode. Using nearest episode (distance ${(Number(windowData.distanceMs || 0) / 1000).toFixed(1)} s).</div>`
+                    : '';
+                const firstLat = toNum(first.lat ?? first.latitude);
+                const firstLng = toNum(first.lng ?? first.longitude ?? first.lon);
+                const lastLat = toNum(last.lat ?? last.latitude);
+                const lastLng = toNum(last.lng ?? last.longitude ?? last.lon);
+                const summary = windowData.summary || {};
+                const fmtMetric = (v, d = 1) => Number.isFinite(Number(v)) ? Number(v).toFixed(d) : 'N/A';
+                const tpRowsSorted = Array.isArray(windowData.tpRows) ? windowData.tpRows : [];
+                const getTpRowForPoint = (pt) => {
+                    if (!pt || !tpRowsSorted.length) return null;
+                    const direct = tpRowsSorted.find((r) => r && r.point === pt);
+                    if (direct) return direct;
+                    const t = parseTs(pt.time) ?? toNum(pt.timestamp);
+                    if (!Number.isFinite(t)) return null;
+                    let lo = 0;
+                    let hi = tpRowsSorted.length;
+                    while (lo < hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (tpRowsSorted[mid].t < t) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    let best = (lo < tpRowsSorted.length) ? tpRowsSorted[lo] : null;
+                    if (lo > 0) {
+                        const prev = tpRowsSorted[lo - 1];
+                        if (!best || Math.abs(prev.t - t) <= Math.abs(best.t - t)) best = prev;
+                    }
+                    if (!best || Math.abs(best.t - t) > 1600) return null;
+                    return best;
+                };
                 const rowsMax = 220;
                 const rows = windowData.points.slice(0, rowsMax).map((pt) => {
                     const t = String(pt.time || '');
                     const tp = readThroughputs(pt);
+                    const tpRow = getTpRowForPoint(pt);
                     const pci = pointNum(pt, 'Physical cell ID', 'Radio.Lte.ServingCell[8].Pci', 'pci', 'sc') ?? pointContainsNum(pt, 'physical', 'cell', 'id') ?? pointContainsNum(pt, 'pci');
                     const freq = pointNum(pt, 'Downlink EARFCN', 'Radio.Lte.ServingCell[8].Downlink.Earfcn', 'freq') ?? pointContainsNum(pt, 'earfcn');
                     const rsrpP = pointNum(pt, 'RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'level') ?? pointContainsNum(pt, 'rsrp');
                     const rsrqP = pointNum(pt, 'RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'qual') ?? pointContainsNum(pt, 'rsrq');
                     const sinrP = pointNum(pt, 'SINR', 'RS-SINR', 'RSSINR', 'Radio.Lte.ServingCell[8].Sinr') ?? pointContainsNum(pt, 'sinr');
+                    const rawDl = (tpRow && Number.isFinite(Number(tpRow.dlKbps))) ? Number(tpRow.dlKbps) : tp.dl;
+                    const smoothDl = (tpRow && Number.isFinite(Number(tpRow.smoothKbps))) ? Number(tpRow.smoothKbps) : null;
+                    const rowState = (tpRow && tpRow.state) ? String(tpRow.state) : 'N/A';
+                    const rowStateColor = rowState === 'DEGRADED' ? '#f97316' : (rowState === 'NORMAL' ? '#22c55e' : '#94a3b8');
                     let servingName = pointVal(pt, 'Serving cell name', 'Cell Name', 'Cell Identifier') || 'Unknown';
                     let enb = decodeEnbCell(pointVal(pt, 'eNodeB ID-Cell ID', 'Cellid', 'Cell ID'));
                     if ((servingName === 'Unknown' || enb === 'N/A') && window.resolveSmartSite) {
@@ -8092,7 +9599,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                         `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(sinrP))}</td>` +
                         `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(freq))}</td>` +
                         `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.appDl))}</td>` +
-                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.dl))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(rawDl))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(smoothDl))}</td>` +
+                        `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;"><span style="color:${rowStateColor};font-weight:700;">${esc(rowState)}</span></td>` +
                         `<td style="padding:4px 6px;border-bottom:1px solid #1f2937;color:#cbd5e1;">${esc(fmt(tp.ul))}</td>` +
                         `</tr>`;
                 }).join('');
@@ -8100,11 +9609,37 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     ? `<div style="font-size:11px;color:#94a3b8;margin-top:4px;">Showing first ${rowsMax} rows of ${windowData.points.length} samples.</div>`
                     : '';
                 windowBlockHtml =
+                    nearestNote +
                     `<div style="font-size:12px;color:#cbd5e1;margin-bottom:6px;">` +
                     `Start: <b style="color:#e5e7eb;">${esc(String(first.time || 'N/A'))}</b> | ` +
                     `End: <b style="color:#e5e7eb;">${esc(String(last.time || 'N/A'))}</b> | ` +
                     `Duration: <b style="color:#e5e7eb;">${durSec === null ? 'N/A' : `${durSec.toFixed(1)} s`}</b> | ` +
-                    `Threshold: <b style="color:#e5e7eb;">${tpCfg.degraded}</b>` +
+                    `Enter/Exit: <b style="color:#e5e7eb;">${windowData.cfg.enterKbps} / ${windowData.cfg.exitKbps} kbps</b> | ` +
+                    `min/merge/smooth: <b style="color:#e5e7eb;">${windowData.cfg.minDurationMs} / ${windowData.cfg.mergeGapMs} / ${windowData.cfg.smoothWindowMs} ms</b>` +
+                    `</div>` +
+                    `<div style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">` +
+                    `Window stats: min=<b style="color:#e5e7eb;">${esc(fmt(ep.minTpKbps))}</b> kbps, ` +
+                    `avg=<b style="color:#e5e7eb;">${esc(fmt(ep.avgTpKbps))}</b> kbps, ` +
+                    `p10=<b style="color:#e5e7eb;">${esc(fmt(ep.p10TpKbps))}</b> kbps, ` +
+                    `p50=<b style="color:#e5e7eb;">${esc(fmt(ep.p50TpKbps))}</b> kbps` +
+                    `</div>` +
+                    `<div style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">` +
+                    `GPS span: <b style="color:#e5e7eb;">${esc(Number.isFinite(firstLat) ? firstLat.toFixed(6) : 'N/A')}, ${esc(Number.isFinite(firstLng) ? firstLng.toFixed(6) : 'N/A')}</b> → ` +
+                    `<b style="color:#e5e7eb;">${esc(Number.isFinite(lastLat) ? lastLat.toFixed(6) : 'N/A')}, ${esc(Number.isFinite(lastLng) ? lastLng.toFixed(6) : 'N/A')}</b>` +
+                    `</div>` +
+                    `<div style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">` +
+                    `Events summary: serving changes=<b style="color:#e5e7eb;">${summary.servingChanges ?? 0}</b>, ` +
+                    `HO=<b style="color:#e5e7eb;">${summary.hoCount ?? 0}</b>, ` +
+                    `PCI change=<b style="color:#e5e7eb;">${summary.pciChangeCount ?? 0}</b>, ` +
+                    `EARFCN change=<b style="color:#e5e7eb;">${summary.earfcnChangeCount ?? 0}</b>, ` +
+                    `RRC transition=<b style="color:#e5e7eb;">${summary.rrcTransitionCount ?? 0}</b>, ` +
+                    `TA jumps=<b style="color:#e5e7eb;">${summary.taJumpCount ?? 0}</b>` +
+                    `</div>` +
+                    `<div style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">` +
+                    `KPI summary: CQI avg/p50=<b style="color:#e5e7eb;">${fmtMetric(summary?.cqi?.avg)} / ${fmtMetric(summary?.cqi?.p50)}</b>, ` +
+                    `DL MCS avg/p50=<b style="color:#e5e7eb;">${fmtMetric(summary?.dlMcs?.avg)} / ${fmtMetric(summary?.dlMcs?.p50)}</b>, ` +
+                    `BLER DL avg/p50=<b style="color:#e5e7eb;">${fmtMetric(summary?.blerDl?.avg)} / ${fmtMetric(summary?.blerDl?.p50)}</b> %, ` +
+                    `PRB avg/p50=<b style="color:#e5e7eb;">${fmtMetric(summary?.prb?.avg)} / ${fmtMetric(summary?.prb?.p50)}</b> %` +
                     `</div>` +
                     `<div style="max-height:260px; overflow:auto; border:1px solid #1f2937; border-radius:8px;">` +
                     `<table style="width:100%; border-collapse:collapse; font-size:11px;">` +
@@ -8112,17 +9647,23 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     `<tr style="color:#93c5fd; text-align:left;">` +
                     `<th style="padding:6px;">Time</th><th style="padding:6px;">Serving Cell</th><th style="padding:6px;">eNodeB-Cell</th><th style="padding:6px;">PCI/Freq</th>` +
                     `<th style="padding:6px;">RSRP</th><th style="padding:6px;">RSRQ</th><th style="padding:6px;">SINR</th><th style="padding:6px;">Freq</th>` +
-                    `<th style="padding:6px;">App DL TP</th><th style="padding:6px;">DL TP</th><th style="padding:6px;">UL TP</th>` +
+                    `<th style="padding:6px;">App DL TP</th><th style="padding:6px;">Raw DL TP</th><th style="padding:6px;">Smooth DL TP</th><th style="padding:6px;">State</th><th style="padding:6px;">UL TP</th>` +
                     `</tr></thead><tbody>${rows}</tbody></table></div>${truncNote}`;
             }
 
             const snapshotRows = [
                 ['DL throughput', fmt(dlTp)], ['Application throughput DL', fmt(appDlTp)], ['UL throughput', fmt(ulTp)],
                 ['RSRP', fmt(rsrp, ' dBm')], ['RSRQ', fmt(rsrq, ' dB')], ['SINR', fmt(sinr, ' dB')],
+                ['Band', fmt(servingBand)], ['BW', fmt(servingBw)],
+                ['UE category', fmt(ueCategory)], ['MIMO capability', fmt(mimoCapability)], ['CA capability', fmt(caCapability)],
                 ['BLER DL', fmt(blerDl, ' %')], ['CQI (DL)', fmt(cqi)], ['DL MCS', fmt(dlMcs)], ['Rank/Layers', fmt(rank)],
-                ['Modulation (DL/UL)', fmt(modulation)], ['MIMO/CA', fmt(mimoCa)], ['RRC State', fmt(rrcState)],
+                ['Modulation (DL/UL)', fmt(modulation)], ['MIMO/CA', fmt(mimoCa)], ['RRC State (decoded exact)', fmt(rrcStateDecodedExact)], ['RRC State', fmt(rrcState)],
                 ['HO Start/Complete', fmt(hoEvent)], ['Cell/PCI Change', fmt(pciChange)], ['EARFCN/Band Change', fmt(earfcnChange)],
-                ['RRC State Transition', fmt(rrcTransition)], ['Bearer / EPS Bearer', fmt(bearer)], ['TA Jumps', fmt(taJumps)]
+                ['A3/A5 triggers', fmt(a3a5Triggers)], ['A3/A5 event thresholds', fmt(a3a5Thresholds)],
+                ['A3/A5 threshold source time', fmt(a3a5ThresholdSourceTime)], ['A3/A5 threshold source PCI', fmt(a3a5ThresholdSourcePci)], ['A3/A5 threshold context check', fmt(a3a5ThresholdContextCheck)],
+                ['HO command', fmt(hoCommand)], ['HO execution time', fmt(hoExecutionTime)],
+                ['HO failure', fmt(hoFailure)], ['RLF', fmt(rlf)], ['RRC State Transition', fmt(rrcTransition)],
+                ['Bearer / EPS Bearer', fmt(bearer)], ['TA Jumps', fmt(taJumps)]
             ];
             const snapshotHtml = snapshotRows.map(([k, v]) => `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1f2937;padding:3px 0;font-size:12px;"><span style="color:#94a3b8;">${esc(k)}</span><span style="color:#e5e7eb;font-weight:600;">${esc(v)}</span></div>`).join('');
             const causesHtml = causes.length
@@ -8226,14 +9767,48 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         return best.v;
     }
 
+    function pointDetailsExactSeriesValue(series, targetMs) {
+        if (!Array.isArray(series) || !series.length || !Number.isFinite(targetMs)) return undefined;
+        if (!(series.__pointDetailsExactIndex instanceof Map)) {
+            const idx = new Map();
+            series.forEach((row) => {
+                const t = pointDetailsTsMs(row && row.time);
+                if (!Number.isFinite(t)) return;
+                const num = Number(row && row.value_num);
+                const hasNum = Number.isFinite(num);
+                const text = row && (row.value_text ?? row.value_str ?? row.value);
+                const val = hasNum ? num : (text !== undefined ? text : undefined);
+                if (!pointDetailsHasUsableValue(val)) return;
+                // Keep first decoded sample for the exact timestamp.
+                if (!idx.has(t)) idx.set(t, val);
+            });
+            series.__pointDetailsExactIndex = idx;
+        }
+        const idx = series.__pointDetailsExactIndex;
+        if (!(idx instanceof Map)) return undefined;
+        const v = idx.get(targetMs);
+        if (typeof v === 'number' && Number.isFinite(v) && Math.abs(v - Math.round(v)) < 1e-6) {
+            return Math.round(v);
+        }
+        return v;
+    }
+
     function getPointDetailsHydrationMetrics(log) {
         if (!log) return [];
         if (Array.isArray(log.__pointDetailsHydrationMetrics)) return log.__pointDetailsHydrationMetrics;
 
         const out = new Set();
-        const fromCatalog = (log.trpCatalog && Array.isArray(log.trpCatalog.metricsFlat))
-            ? log.trpCatalog.metricsFlat.map(m => String(m && m.name || '')).filter(Boolean)
+        const catalogFlat = (log.trpCatalog && Array.isArray(log.trpCatalog.metricsFlat))
+            ? log.trpCatalog.metricsFlat
             : [];
+        const sampleCountByName = {};
+        const fromCatalog = (catalogFlat || []).map((m) => {
+            const name = String(m && m.name || '').trim();
+            if (!name) return '';
+            const sc = Number(m && m.stats && m.stats.sample_count);
+            if (Number.isFinite(sc)) sampleCountByName[name] = sc;
+            return name;
+        }).filter(Boolean);
         const fromSidebar = (log.trpAllMetricNames || []).map(n => String(n || '')).filter(Boolean);
         const all = fromCatalog.length ? fromCatalog : fromSidebar;
         if (!all.length) return [];
@@ -8242,6 +9817,26 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'Application throughput DL',
             'DL throughput',
             'UL throughput',
+            'RTT',
+            'Packet loss',
+            'Packet Loss',
+            'Retransmissions',
+            'Retransmission',
+            'HARQ',
+            'Bearer active',
+            'Bearer / EPS Bearer',
+            'DRX',
+            'DRX (DTX)',
+            'Tx power',
+            'Estimated RB usage',
+            'Allocated RBs',
+            'TBS',
+            '#layers',
+            'Layers',
+            'Number of layers',
+            'DL PRB Usage',
+            'PRB Load',
+            'Average DL RB Quantity',
             'Cell ID',
             'Cellid',
             'Tracking area code',
@@ -8249,10 +9844,37 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'DL MCS',
             'UL MCS',
             'PMI',
+            'Rank (RI)',
             'BLER DL',
+            'BLER UL',
             'Modulation (DL/UL)',
             'Rank/Layers (feedback proxy)',
+            'RRC State (decoded exact)',
             'RRC State',
+            'A3/A5 triggers',
+            'A3/A5 event thresholds',
+            'A3/A5 threshold source time',
+            'A3/A5 threshold source PCI',
+            'A3/A5 threshold context check',
+            'HO command',
+            'HO execution time',
+            'HO failure',
+            'RLF',
+            'RLF root-cause details',
+            'Reestablishment timeline',
+            'RLF reason breakdown',
+            'RRC Re-establishment',
+            'CA Status',
+            'CA SCell Add/Remove',
+            'Code Rate',
+            'Data Session Start/Stop',
+            'VoLTE Call Start/End',
+            'PDCP Discard / Reordering',
+            'UE category',
+            'MIMO capability',
+            'CA capability',
+            'Band',
+            'BW',
             'Timing Advance',
             'SINR',
             'RSRP',
@@ -8269,12 +9891,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
         const scoreMetricName = (name) => {
             const low = String(name || '').toLowerCase();
+            const sampleCount = Number(sampleCountByName[name] || 0);
             let s = 0;
             if (low.includes('radio.lte.servingcell')) s += 70;
             if (low.includes('servingcelltotal')) s += 60;
             if (low.includes('data.http')) s += 40;
             if (low.includes('neighbor')) s -= 120;
             if (low.includes('lock') || low.includes('override') || low.includes('controlfunction')) s -= 60;
+            // Strongly prefer metrics that actually have decoded samples.
+            if (sampleCount > 0) s += 1000 + Math.min(200, Math.log10(sampleCount + 1) * 80);
+            else if (fromCatalog.length) s -= 120;
             return s;
         };
         const addBest = (matcher) => {
@@ -8283,10 +9909,27 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             rows.sort((a, b) => scoreMetricName(b) - scoreMetricName(a));
             out.add(rows[0]);
         };
+        const addAll = (matcher) => {
+            all.forEach((n) => {
+                if (matcher(String(n || '').toLowerCase())) out.add(n);
+            });
+        };
 
         addBest((n) => /data\.http\..*(download|downlink).*(throughput)/.test(n) || /(download|downlink).*(throughput)/.test(n));
         addBest((n) => /radio\.lte\.servingcell.*pdsch.*throughput/.test(n) || /(pdsch.*throughput|throughput.*(dl|downlink))/.test(n));
         addBest((n) => /radio\.lte\.servingcell.*pusch.*throughput/.test(n) || /(pusch.*throughput|throughput.*(ul|uplink|upload))/.test(n));
+        addBest((n) => /(round.*trip.*time|roundtrip.*(time|delay)|\brtt\b|latency|ping.*(time|delay|rtt)|tcp.*rtt|delay)/.test(n));
+        addBest((n) => /(packet.*loss|loss.*packet|ip.*loss|loss.*rate|\bplr\b|lost.*packet)/.test(n));
+        addBest((n) => /(retrans|re-?trans|retx|harq.*(retrans|retx|nack)|rlc.*(retrans|retx)|nack)/.test(n));
+        addBest((n) => /\bharq\b/.test(n));
+        addBest((n) => /(eps.*bearer|bearer.*eps|erab|drb|srb)/.test(n));
+        addBest((n) => /\bdrx\b/.test(n));
+        addBest((n) => /(ue.*tx.*power|pusch.*tx.*power|uplink.*tx.*power)/.test(n));
+        addBest((n) => /(tx.*power|power.*tx)/.test(n));
+        addBest((n) => /(dl.*(prb|rb).*(usage|used|load|quantity)|prb.*load|average.*dl.*rb.*quantity)/.test(n));
+        addBest((n) => /(allocated.*(prb|rb)|prb.*allocated|rb.*allocated|alloc.*(prb|rb))/i.test(n));
+        addBest((n) => /(transport.*block.*size|\btbs\b|pdsch.*tbs|pusch.*tbs)/i.test(n));
+        addBest((n) => /(#\s*layers|number.*layers|num.*layers|\.layers\b|\blayers?\b)/i.test(n));
         addBest((n) => /(cellidentity.*complete|cellidentity|ecgi)/.test(n));
         addBest((n) => /(\.cell\.id| cell id|\.cellid$)/.test(n) && !n.includes('cellidentity'));
         addBest((n) => /(tracking.*area.*code|\.tac$|\btac\b)/.test(n));
@@ -8299,7 +9942,19 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         addBest((n) => /(dl.*modulation|pdsch.*modulation|modulation.*dl)/.test(n));
         addBest((n) => /(ul.*modulation|pusch.*modulation|modulation.*ul)/.test(n));
         addBest((n) => /(rank.*indicator|\bri\b|layers?|rank\d|rank\.|mimo.*rank)/.test(n));
-        addBest((n) => /(rrc.*state)/.test(n));
+        // Keep all rank feedback counters so RI can be inferred when explicit RI is absent.
+        addAll((n) => /radio\.lte\.servingcell(?:total)?(?:\[\d+\])?\.rank[1-8]\.feedbackcount/.test(n) || /\.rank[1-8]\.feedbackcount/.test(n));
+        addBest((n) => /(rrc.*state|rrc.*mode|connection.*state|rrcstate)/.test(n));
+        addBest((n) => /(^|[^a-z0-9])(a3|a5)([^a-z0-9]|$)|measurement.*report.*a[35]|event.*a[35]/.test(n));
+        addBest((n) => /(handover|^ho).*(command|cmd)|mobilitycontrolinfo|rrcconnectionreconfiguration(?!complete)/.test(n));
+        addBest((n) => /(handover|^ho).*(execution.*time|exec.*time|duration|latency)/.test(n));
+        addBest((n) => /(handover|^ho).*(fail|failure|reject|abort|cancel)|\bhof\b/.test(n));
+        addBest((n) => /\brlf\b|radio.*link.*failure|out.*of.*sync|reestablish|t310|n310/.test(n));
+        addBest((n) => /(ue.*category|ue.*cat)/i.test(n));
+        addBest((n) => /(mimo.*capabil|capabil.*mimo)/i.test(n));
+        addBest((n) => /(carrier.*aggregation.*capabil|ca.*capabil|capabil.*carrier.*aggregation)/i.test(n));
+        addBest((n) => /(serving.*band|lte.*band|freq.*band|(^|[^a-z0-9])band([^a-z0-9]|$))/i.test(n) && !/bandwidth/i.test(n));
+        addBest((n) => /(downlink.*bandwidth|dl.*bandwidth|channel.*bandwidth|(^|[^a-z0-9])bandwidth([^a-z0-9]|$)|\bbw\b)/i.test(n));
         addBest((n) => /(timing.*advance|timingadvance)/.test(n));
         addBest((n) => /(rs-?sinr|rssinr|\bsinr\b)/.test(n));
         addBest((n) => /\brsrp\b/.test(n));
@@ -8317,6 +9972,25 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const t = Number.isFinite(Number(point.timestamp)) ? Number(point.timestamp) : pointDetailsTsMs(point.time);
             if (!Number.isFinite(t)) return false;
 
+            // Backfill run-level TRP info (UE category/MIMO/CA...) for already-loaded runs.
+            if ((!log.trpInfo || !Object.keys(log.trpInfo).length) && !log.__trpSidebarInfoLoaded && typeof window.trpFetchSidebar === 'function') {
+                try {
+                    const sidebar = await window.trpFetchSidebar(log.trpRunId);
+                    const info = (sidebar && sidebar.info && typeof sidebar.info === 'object') ? sidebar.info : null;
+                    if (info && Object.keys(info).length) {
+                        log.trpInfo = info;
+                        point.__trpRunId = log.trpRunId;
+                        point.__trpInfo = info;
+                        if (!window.__trpRunInfoById || typeof window.__trpRunInfoById !== 'object') window.__trpRunInfoById = {};
+                        window.__trpRunInfoById[String(log.trpRunId)] = info;
+                    }
+                } catch (_e) {
+                    // no-op
+                } finally {
+                    log.__trpSidebarInfoLoaded = true;
+                }
+            }
+
             const metrics = getPointDetailsHydrationMetrics(log);
             if (!metrics.length) return false;
 
@@ -8327,7 +10001,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const pairs = await Promise.all(missing.map(async (m) => {
                 try {
                     const series = await window.trpFetchSeries(log.trpRunId, m);
-                    const val = pointDetailsNearestSeriesValue(series, t, 2200);
+                    const low = String(m || '').toLowerCase();
+                    // Sparse KPIs (RTT/loss/retrans family) are often reported less frequently than radio KPIs.
+                    // Use a wider nearest window so point details can still hydrate these values when available.
+                    let tolMs = 2200;
+                    if (/(roundtrip|round trip|\brtt\b|latency|packet.*loss|loss.*rate|\bplr\b|retrans|retx|harq|nack)/i.test(low)) {
+                        tolMs = 30000;
+                    }
+                    const val = pointDetailsNearestSeriesValue(series, t, tolMs);
                     return { metric: m, value: val };
                 } catch (_e) {
                     return { metric: m, value: undefined };
@@ -8347,10 +10028,1806 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     changed = true;
                 }
             });
+
+            // Direct decoded RRC state at the exact clicked timestamp (no nearest tolerance).
+            // This field is intentionally strict: if no exact sample exists, keep it as N/A.
+            const rrcMetricName = metrics.find((m) => /(rrc.*state|rrc.*mode|connection.*state|rrcstate)/i.test(String(m || '').toLowerCase()));
+            if (rrcMetricName) {
+                try {
+                    const rrcSeries = await window.trpFetchSeries(log.trpRunId, rrcMetricName);
+                    const exactRrc = pointDetailsExactSeriesValue(rrcSeries, t);
+                    if (pointDetailsHasUsableValue(exactRrc)) {
+                        if (!pointDetailsHasUsableValue(point['RRC State (decoded exact)']) || String(point['RRC State (decoded exact)']) !== String(exactRrc)) {
+                            point['RRC State (decoded exact)'] = exactRrc;
+                            changed = true;
+                        }
+                        if (!pointDetailsHasUsableValue(point.__decoded_rrc_state_exact) || String(point.__decoded_rrc_state_exact) !== String(exactRrc)) {
+                            point.__decoded_rrc_state_exact = exactRrc;
+                            changed = true;
+                        }
+                        if (String(point.__rrcStateExactSource || '') !== String(rrcMetricName)) {
+                            point.__rrcStateExactSource = String(rrcMetricName);
+                            changed = true;
+                        }
+                    }
+                } catch (_e) {
+                    // no-op
+                }
+            }
+
+            // Capability labels may not exist as sampled series; fill directly from run info.
+            const info = (log.trpInfo && typeof log.trpInfo === 'object') ? log.trpInfo : (point.__trpInfo && typeof point.__trpInfo === 'object' ? point.__trpInfo : null);
+            if (info) {
+                const capVals = [
+                    ['UE category', info.ue_category ?? info.ue_category_inferred],
+                    ['MIMO capability', info.mimo_capability ?? info.mimo_capability_inferred],
+                    ['CA capability', info.ca_capability ?? info.ca_capability_inferred]
+                ];
+                capVals.forEach(([label, val]) => {
+                    if (!pointDetailsHasUsableValue(val)) return;
+                    if (!pointDetailsHasUsableValue(point[label]) || String(point[label]) !== String(val)) {
+                        point[label] = val;
+                        changed = true;
+                    }
+                });
+            }
+
+            // L1/L2 scheduler internals at click time (strict direct values from backend endpoint).
+            if (typeof window.trpFetchL1L2AtTime === 'function') {
+                try {
+                    const timeIso = (typeof point.time === 'string' && point.time.includes('T'))
+                        ? point.time
+                        : new Date(t).toISOString();
+                    const l1l2 = await window.trpFetchL1L2AtTime(log.trpRunId, timeIso, { windowMs: 3000 });
+                    const fields = Array.isArray(l1l2 && l1l2.fields) ? l1l2.fields : [];
+                    const byField = new Map(fields.map((f) => [String(f && f.field || ''), f]));
+                    const normalizeDirect = (v) => {
+                        const n = Number(v);
+                        if (!Number.isFinite(n)) return v;
+                        if (Math.abs(n - Math.round(n)) < 1e-6) return Math.round(n);
+                        return Number(n.toFixed(2));
+                    };
+                    const applyDirectField = (fieldId, label) => {
+                        const row = byField.get(String(fieldId || ''));
+                        if (!row || !pointDetailsHasUsableValue(row.value)) return;
+                        const value = normalizeDirect(row.value);
+                        if (!pointDetailsHasUsableValue(point[label]) || String(point[label]) !== String(value)) {
+                            point[label] = value;
+                            changed = true;
+                        }
+                        const metricName = String(row.metric || '').trim();
+                        if (metricName) {
+                            if (!pointDetailsHasUsableValue(point[metricName]) || String(point[metricName]) !== String(value)) {
+                                point[metricName] = value;
+                                changed = true;
+                            }
+                        }
+                    };
+
+                    applyDirectField('allocated_rb_dl', 'Allocated RBs');
+                    applyDirectField('allocated_rb_ul', 'Allocated RBs UL');
+                    applyDirectField('tbs_dl', 'TBS');
+                    applyDirectField('tbs_ul', 'TBS UL');
+                    applyDirectField('harq_process', 'HARQ process-level');
+                    applyDirectField('harq_retx', 'HARQ');
+                    applyDirectField('mac_retx', 'MAC retransmissions');
+                    applyDirectField('rlc_retx', 'RLC retransmissions');
+
+                    const perTtiRows = fields.filter((f) => Boolean(f && f.perTtiRequired));
+                    if (perTtiRows.length) {
+                        const allPerTtiExact = perTtiRows.every((f) => Boolean(f && f.perTtiExact));
+                        const perTtiValue = allPerTtiExact ? 'Yes' : 'No';
+                        if (!pointDetailsHasUsableValue(point['L1/L2 per-TTI exact']) || String(point['L1/L2 per-TTI exact']) !== perTtiValue) {
+                            point['L1/L2 per-TTI exact'] = perTtiValue;
+                            point.__l1l2_per_tti_exact = perTtiValue;
+                            changed = true;
+                        }
+                    }
+
+                    const limitations = Array.isArray(l1l2 && l1l2.availability && l1l2.availability.limitations)
+                        ? l1l2.availability.limitations
+                        : [];
+                    if (limitations.length) {
+                        const note = String(limitations[0] || '').trim();
+                        if (pointDetailsHasUsableValue(note) && (!pointDetailsHasUsableValue(point['L1/L2 decode note']) || String(point['L1/L2 decode note']) !== note)) {
+                            point['L1/L2 decode note'] = note;
+                            point.__l1l2_decode_note = note;
+                            changed = true;
+                        }
+                    }
+                } catch (_e) {
+                    // Endpoint unavailable or no data: keep existing point values.
+                }
+            }
             return changed;
         } catch (_e) {
             return false;
         }
+    }
+
+    function getDtLteEpisodeConfig() {
+        const defaults = {
+            enterKbps: 5000,
+            exitKbps: 6000,
+            minDurationMs: 1000,
+            mergeGapMs: 1000,
+            smoothWindowMs: 1000,
+            nearestSearchMs: 30000
+        };
+        try {
+            const raw = JSON.parse(localStorage.getItem('dtLteEpisodeConfig') || '{}');
+            return {
+                enterKbps: Number.isFinite(Number(raw.enterKbps)) ? Number(raw.enterKbps) : defaults.enterKbps,
+                exitKbps: Number.isFinite(Number(raw.exitKbps)) ? Number(raw.exitKbps) : defaults.exitKbps,
+                minDurationMs: Number.isFinite(Number(raw.minDurationMs)) ? Number(raw.minDurationMs) : defaults.minDurationMs,
+                mergeGapMs: Number.isFinite(Number(raw.mergeGapMs)) ? Number(raw.mergeGapMs) : defaults.mergeGapMs,
+                smoothWindowMs: Number.isFinite(Number(raw.smoothWindowMs)) ? Number(raw.smoothWindowMs) : defaults.smoothWindowMs,
+                nearestSearchMs: Number.isFinite(Number(raw.nearestSearchMs)) ? Number(raw.nearestSearchMs) : defaults.nearestSearchMs
+            };
+        } catch {
+            return defaults;
+        }
+    }
+
+    function saveDtLteEpisodeConfig(nextCfg) {
+        localStorage.setItem('dtLteEpisodeConfig', JSON.stringify(nextCfg || {}));
+    }
+
+    function normalizeDtLteEpisodeConfig(cfg) {
+        const defaults = {
+            enterKbps: 5000,
+            exitKbps: 6000,
+            minDurationMs: 1000,
+            mergeGapMs: 1000,
+            smoothWindowMs: 1000,
+            nearestSearchMs: 30000
+        };
+        const raw = cfg || {};
+        const out = {
+            enterKbps: Number.isFinite(Number(raw.enterKbps)) ? Math.max(1, Number(raw.enterKbps)) : defaults.enterKbps,
+            exitKbps: Number.isFinite(Number(raw.exitKbps)) ? Math.max(1, Number(raw.exitKbps)) : defaults.exitKbps,
+            minDurationMs: Number.isFinite(Number(raw.minDurationMs)) ? Math.max(0, Number(raw.minDurationMs)) : defaults.minDurationMs,
+            mergeGapMs: Number.isFinite(Number(raw.mergeGapMs)) ? Math.max(0, Number(raw.mergeGapMs)) : defaults.mergeGapMs,
+            smoothWindowMs: Number.isFinite(Number(raw.smoothWindowMs)) ? Math.max(1, Number(raw.smoothWindowMs)) : defaults.smoothWindowMs,
+            nearestSearchMs: Number.isFinite(Number(raw.nearestSearchMs)) ? Math.max(0, Number(raw.nearestSearchMs)) : defaults.nearestSearchMs
+        };
+        if (out.exitKbps <= out.enterKbps) out.exitKbps = out.enterKbps + 1000;
+        return out;
+    }
+
+    function dtLteEpisodeNum(v) {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function dtLteEpisodeNorm(v) {
+        return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    function dtLteEpisodeMetricValue(point, aliases = [], tokenGroups = []) {
+        const sources = [point, point && point.properties, point && point.parsed, point && point.parsed && point.parsed.serving];
+        const aliasNorm = aliases.map(dtLteEpisodeNorm).filter(Boolean);
+        for (const src of sources) {
+            if (!src || typeof src !== 'object') continue;
+            const keys = Object.keys(src);
+            for (const key of keys) {
+                const nk = dtLteEpisodeNorm(key);
+                if (aliasNorm.includes(nk)) return src[key];
+            }
+        }
+        for (const src of sources) {
+            if (!src || typeof src !== 'object') continue;
+            for (const [key, value] of Object.entries(src)) {
+                if (value === undefined || value === null || typeof value === 'object') continue;
+                const nk = dtLteEpisodeNorm(key);
+                const hit = (tokenGroups || []).some((tokens) => {
+                    const t = (tokens || []).map(dtLteEpisodeNorm).filter(Boolean);
+                    return t.length > 0 && t.every((tok) => nk.includes(tok));
+                });
+                if (hit) return value;
+            }
+        }
+        return undefined;
+    }
+
+    function dtLteEpisodeReadThroughputs(point) {
+        const dl = dtLteEpisodeNum(dtLteEpisodeMetricValue(point,
+            ['Radio.Lte.ServingCellTotal.Pdsch.Throughput', 'DL throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput'],
+            [['pdsch', 'throughput'], ['throughput', 'dl']]
+        ));
+        const appDl = dtLteEpisodeNum(dtLteEpisodeMetricValue(point,
+            ['Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput'],
+            [['http', 'download', 'throughput'], ['application', 'throughput', 'dl']]
+        ));
+        const ul = dtLteEpisodeNum(dtLteEpisodeMetricValue(point,
+            ['Radio.Lte.ServingCellTotal.Pusch.Throughput', 'UL throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput'],
+            [['pusch', 'throughput'], ['throughput', 'ul']]
+        ));
+        return { dl, appDl, ul };
+    }
+
+    function buildDtLteTpSeries(points) {
+        const rows = [];
+        (points || []).forEach((pt, i) => {
+            const t = Number.isFinite(Number(pt && pt.timestamp)) ? Number(pt.timestamp) : pointDetailsTsMs(pt && pt.time);
+            if (!Number.isFinite(t)) return;
+            const tp = dtLteEpisodeReadThroughputs(pt || {});
+            const dlRadio = Number.isFinite(tp.dl) ? tp.dl : null;
+            if (!Number.isFinite(dlRadio)) return;
+            rows.push({
+                t,
+                time: String((pt && pt.time) || new Date(t).toISOString()),
+                index: i,
+                point: pt,
+                dlKbps: Number(dlRadio),
+                appDlKbps: Number.isFinite(tp.appDl) ? Number(tp.appDl) : null,
+                ulKbps: Number.isFinite(tp.ul) ? Number(tp.ul) : null
+            });
+        });
+        rows.sort((a, b) => a.t - b.t || a.index - b.index);
+        return rows;
+    }
+
+    function dtLteEpisodePercentile(arr, p) {
+        const vals = (arr || []).filter((x) => Number.isFinite(Number(x))).map(Number).sort((a, b) => a - b);
+        if (!vals.length) return null;
+        const pos = (vals.length - 1) * (Number(p) / 100);
+        const base = Math.floor(pos);
+        const rest = pos - base;
+        if (vals[base + 1] !== undefined) return vals[base] + rest * (vals[base + 1] - vals[base]);
+        return vals[base];
+    }
+
+    function withDtLteRollingMedian(rows, winMs) {
+        if (!Array.isArray(rows) || !rows.length) return [];
+        const out = rows.map((r) => ({ ...r, smoothKbps: r.dlKbps }));
+        const w = Math.max(1, Number(winMs) || 1000);
+        let left = 0;
+        for (let i = 0; i < out.length; i++) {
+            while (left < i && (out[i].t - out[left].t) > w) left++;
+            const vals = [];
+            for (let j = left; j <= i; j++) vals.push(out[j].dlKbps);
+            const med = dtLteEpisodePercentile(vals, 50);
+            out[i].smoothKbps = Number.isFinite(med) ? Number(med) : out[i].dlKbps;
+        }
+        return out;
+    }
+
+    function finalizeDtLteEpisode(ep, rows) {
+        if (!ep || !Array.isArray(rows) || !rows.length) return null;
+        const a = Math.max(0, ep.startIndex);
+        const b = Math.min(rows.length - 1, ep.endIndex);
+        if (b < a) return null;
+        const seg = rows.slice(a, b + 1);
+        const rawVals = seg.map((r) => r.dlKbps).filter((x) => Number.isFinite(x));
+        const first = seg[0];
+        const last = seg[seg.length - 1];
+        const avg = rawVals.length ? (rawVals.reduce((s, v) => s + v, 0) / rawVals.length) : null;
+        return {
+            startIndex: a,
+            endIndex: b,
+            startMs: first.t,
+            endMs: last.t,
+            startTime: first.time,
+            endTime: last.time,
+            durationMs: Math.max(0, last.t - first.t),
+            sampleCount: seg.length,
+            minTpKbps: rawVals.length ? Math.min(...rawVals) : null,
+            avgTpKbps: Number.isFinite(avg) ? avg : null,
+            p10TpKbps: dtLteEpisodePercentile(rawVals, 10),
+            p50TpKbps: dtLteEpisodePercentile(rawVals, 50)
+        };
+    }
+
+    function detectDtLteThroughputEpisodes(rowsIn, cfgIn) {
+        const cfg = normalizeDtLteEpisodeConfig(cfgIn || getDtLteEpisodeConfig());
+        const rows = withDtLteRollingMedian(rowsIn, cfg.smoothWindowMs).map((r) => ({ ...r, state: 'NORMAL' }));
+        if (!rows.length) return { episodes: [], rows, cfg };
+
+        const rawEpisodes = [];
+        let state = 'NORMAL';
+        let startIndex = -1;
+        rows.forEach((r, i) => {
+            const v = Number(r.smoothKbps);
+            if (!Number.isFinite(v)) return;
+            if (state === 'NORMAL') {
+                if (v < cfg.enterKbps) {
+                    state = 'DEGRADED';
+                    startIndex = i;
+                    rows[i].state = 'DEGRADED';
+                } else {
+                    rows[i].state = 'NORMAL';
+                }
+            } else {
+                rows[i].state = 'DEGRADED';
+                if (v > cfg.exitKbps) {
+                    rawEpisodes.push({ startIndex, endIndex: i });
+                    state = 'NORMAL';
+                    startIndex = -1;
+                }
+            }
+        });
+        if (state === 'DEGRADED' && startIndex >= 0) {
+            rawEpisodes.push({ startIndex, endIndex: rows.length - 1 });
+        }
+
+        const cleaned = rawEpisodes
+            .map((ep) => finalizeDtLteEpisode(ep, rows))
+            .filter((ep) => ep && ep.durationMs >= cfg.minDurationMs);
+        if (!cleaned.length) return { episodes: [], rows, cfg };
+
+        const merged = [];
+        cleaned.forEach((ep) => {
+            const last = merged[merged.length - 1];
+            if (last && (ep.startMs - last.endMs) <= cfg.mergeGapMs) {
+                last.endIndex = ep.endIndex;
+                const rebuilt = finalizeDtLteEpisode(last, rows);
+                if (rebuilt) Object.assign(last, rebuilt);
+            } else {
+                merged.push({ ...ep });
+            }
+        });
+        return { episodes: merged, rows, cfg };
+    }
+
+    function drawThroughputDegradationShapesOnMap(log, detected) {
+        const renderer = window.mapRenderer;
+        if (!renderer || !renderer.map || typeof L === 'undefined') return { renderedEpisodes: 0, totalEpisodes: 0 };
+        const overlayId = '__throughput_degradation_episodes__';
+        renderer.clearLayer(overlayId);
+
+        const rows = (detected && Array.isArray(detected.rows)) ? detected.rows : [];
+        const episodes = (detected && Array.isArray(detected.episodes)) ? detected.episodes : [];
+        const episodeRows = [];
+        if (!rows.length || !episodes.length) return { renderedEpisodes: 0, totalEpisodes: episodes.length, eligibleEpisodes: 0, episodeRows };
+        const cfg = (detected && detected.cfg) ? detected.cfg : normalizeDtLteEpisodeConfig(getDtLteEpisodeConfig());
+        const degradedThreshold = Number.isFinite(Number(cfg.enterKbps)) ? Number(cfg.enterKbps) : 5000;
+        const minDegradedRawPoints = 6;
+        const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+        const selectSeverityColor = (ratio) => {
+            if (ratio >= 0.72) return '#7f1d1d';
+            if (ratio >= 0.46) return '#b91c1c';
+            if (ratio >= 0.24) return '#dc2626';
+            return '#ef4444';
+        };
+        const buildFlagIcon = (color, text) => L.divIcon({
+            className: 'episode-flag-icon',
+            html: `<div style="display:flex;align-items:center;gap:3px; transform:translate(-2px,-14px);"><span style="font-size:16px; line-height:1; color:${color}; text-shadow:0 0 2px rgba(0,0,0,0.9);">⚑</span><span style="font-size:9px; color:#e5e7eb; background:rgba(2,6,23,0.88); border:1px solid ${color}; border-radius:8px; padding:0 4px;">${text}</span></div>`,
+            iconSize: [48, 20],
+            iconAnchor: [8, 18]
+        });
+
+        const layerGroup = L.layerGroup();
+        const allLatLngs = [];
+        let renderedEpisodes = 0;
+        let eligibleEpisodes = 0;
+
+        episodes.forEach((ep, idx) => {
+            const label = `E${idx + 1}`;
+            const a = Math.max(0, Number(ep.startIndex) || 0);
+            const b = Math.min(rows.length - 1, Number(ep.endIndex) || 0);
+            if (b < a) {
+                episodeRows.push({
+                    index: idx,
+                    label,
+                    startTime: ep && ep.startTime ? ep.startTime : 'N/A',
+                    endTime: ep && ep.endTime ? ep.endTime : 'N/A',
+                    durationMs: Number(ep && ep.durationMs) || 0,
+                    sampleCount: Number(ep && ep.sampleCount) || 0,
+                    minTpKbps: Number.isFinite(Number(ep && ep.minTpKbps)) ? Number(ep.minTpKbps) : null,
+                    avgTpKbps: Number.isFinite(Number(ep && ep.avgTpKbps)) ? Number(ep.avgTpKbps) : null,
+                    p10TpKbps: Number.isFinite(Number(ep && ep.p10TpKbps)) ? Number(ep.p10TpKbps) : null,
+                    p50TpKbps: Number.isFinite(Number(ep && ep.p50TpKbps)) ? Number(ep.p50TpKbps) : null,
+                    rawDegradedCount: 0,
+                    eligibleByRaw: false,
+                    hasGeo: false,
+                    drawn: false,
+                    startCoord: null,
+                    endCoord: null,
+                    bounds: null
+                });
+                return;
+            }
+            const segRows = rows.slice(a, b + 1);
+            const degradedRawCount = segRows.reduce((acc, r) => {
+                const rawTp = Number(r && r.dlKbps);
+                return acc + ((Number.isFinite(rawTp) && rawTp < degradedThreshold) ? 1 : 0);
+            }, 0);
+            const eligibleByRaw = degradedRawCount >= minDegradedRawPoints;
+            const latLngs = segRows
+                .map((r) => {
+                    const p = r && r.point;
+                    const lat = Number(p && (p.lat ?? p.latitude));
+                    const lng = Number(p && (p.lng ?? p.longitude ?? p.lon));
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+                    return L.latLng(lat, lng);
+                })
+                .filter(Boolean);
+            const bounds = L.latLngBounds(latLngs);
+            const hasGeo = Boolean(bounds && bounds.isValid());
+            const rowSummary = {
+                index: idx,
+                label,
+                startTime: ep && ep.startTime ? ep.startTime : 'N/A',
+                endTime: ep && ep.endTime ? ep.endTime : 'N/A',
+                durationMs: Number(ep && ep.durationMs) || 0,
+                sampleCount: Number(ep && ep.sampleCount) || segRows.length,
+                minTpKbps: Number.isFinite(Number(ep && ep.minTpKbps)) ? Number(ep.minTpKbps) : null,
+                avgTpKbps: Number.isFinite(Number(ep && ep.avgTpKbps)) ? Number(ep.avgTpKbps) : null,
+                p10TpKbps: Number.isFinite(Number(ep && ep.p10TpKbps)) ? Number(ep.p10TpKbps) : null,
+                p50TpKbps: Number.isFinite(Number(ep && ep.p50TpKbps)) ? Number(ep.p50TpKbps) : null,
+                rawDegradedCount: degradedRawCount,
+                eligibleByRaw,
+                hasGeo,
+                drawn: false,
+                startCoord: latLngs[0] ? { lat: Number(latLngs[0].lat), lng: Number(latLngs[0].lng) } : null,
+                endCoord: latLngs[latLngs.length - 1] ? { lat: Number(latLngs[latLngs.length - 1].lat), lng: Number(latLngs[latLngs.length - 1].lng) } : null,
+                bounds: hasGeo ? {
+                    south: Number(bounds.getSouth()),
+                    west: Number(bounds.getWest()),
+                    north: Number(bounds.getNorth()),
+                    east: Number(bounds.getEast())
+                } : null
+            };
+            episodeRows.push(rowSummary);
+            if (!eligibleByRaw || !hasGeo) return;
+
+            eligibleEpisodes += 1;
+
+            renderedEpisodes += 1;
+            rowSummary.drawn = true;
+            latLngs.forEach((ll) => allLatLngs.push(ll));
+            const minTp = Number(ep.minTpKbps);
+            const severity = Number.isFinite(minTp)
+                ? clamp01((degradedThreshold - minTp) / Math.max(1, degradedThreshold))
+                : clamp01((degradedRawCount - minDegradedRawPoints) / Math.max(1, minDegradedRawPoints));
+            const severityColor = selectSeverityColor(severity);
+
+            const tip = `Episode ${idx + 1}<br>${ep.startTime || 'N/A'} → ${ep.endTime || 'N/A'}<br>min=${Number.isFinite(ep.minTpKbps) ? ep.minTpKbps.toFixed(0) : 'N/A'} kbps<br>raw degraded points=${degradedRawCount}<br>severity=${Math.round(severity * 100)}%`;
+
+            if (hasGeo) {
+                const padded = bounds.pad(0.2);
+                L.rectangle(padded, {
+                    color: severityColor,
+                    weight: 2,
+                    opacity: 0.9,
+                    fillColor: severityColor,
+                    fillOpacity: 0.08,
+                    dashArray: '6,4',
+                    pane: 'connectionsPane',
+                    renderer: renderer.connectionsRenderer,
+                    interactive: false
+                }).bindTooltip(tip).addTo(layerGroup);
+            }
+
+            if (hasGeo) {
+                const firstPt = latLngs[0];
+                const lastPt = latLngs[latLngs.length - 1];
+                if (firstPt) {
+                    L.marker(firstPt, {
+                        icon: buildFlagIcon('#22c55e', 'Start'),
+                        pane: 'connectionsPane',
+                        interactive: false
+                    }).bindTooltip(`${label} Start`).addTo(layerGroup);
+                }
+                if (lastPt) {
+                    L.marker(lastPt, {
+                        icon: buildFlagIcon('#ef4444', 'End'),
+                        pane: 'connectionsPane',
+                        interactive: false
+                    }).bindTooltip(`${label} End`).addTo(layerGroup);
+                }
+
+                L.marker(bounds.getCenter(), {
+                    icon: L.divIcon({
+                        className: 'episode-label',
+                        html: `<div style="background:rgba(127,29,29,0.88); color:#fecaca; border:1px solid ${severityColor}; border-radius:12px; padding:2px 7px; font-size:10px; font-weight:700;">E${idx + 1} • ${Number.isFinite(minTp) ? Math.round(minTp) : 'N/A'}</div>`,
+                        iconSize: [72, 20],
+                        iconAnchor: [36, 10]
+                    }),
+                    pane: 'connectionsPane',
+                    interactive: false
+                }).addTo(layerGroup);
+            }
+        });
+
+        if (!renderedEpisodes) return { renderedEpisodes: 0, totalEpisodes: episodes.length, eligibleEpisodes, episodeRows };
+        layerGroup.addTo(renderer.map);
+        renderer.logLayers[overlayId] = layerGroup;
+
+        try {
+            const bounds = L.latLngBounds(allLatLngs);
+            if (bounds && bounds.isValid()) renderer.map.fitBounds(bounds.pad(0.08), { padding: [24, 24] });
+        } catch (_e) {}
+
+        window.__throughputDegradationOverlayMeta = {
+            overlayId,
+            logId: log && log.id,
+            renderedEpisodes,
+            totalEpisodes: episodes.length,
+            eligibleEpisodes,
+            episodeRows,
+            at: Date.now()
+        };
+        return { renderedEpisodes, totalEpisodes: episodes.length, eligibleEpisodes, episodeRows };
+    }
+
+    const THROUGHPUT_EPISODES_PANEL_ZINDEX = '120000';
+
+    function setThroughputEpisodesSplitMode(enabled) {
+        const panel = document.getElementById('throughputEpisodesPanel');
+        if (!panel) return;
+        const state = window.__throughputEpisodePanelState || (window.__throughputEpisodePanelState = {});
+        const mapEl = document.getElementById('map');
+        const centerPane = document.getElementById('center-pane');
+        const header = panel.querySelector('.throughput-episodes-header');
+        const gearBtn = document.getElementById('throughputEpisodesLayoutBtn');
+
+        if (enabled) {
+            if (!state._mapInlineBackup && mapEl) {
+                state._mapInlineBackup = {
+                    flex: mapEl.style.flex || '',
+                    height: mapEl.style.height || '',
+                    minHeight: mapEl.style.minHeight || '',
+                    maxHeight: mapEl.style.maxHeight || '',
+                    zIndex: mapEl.style.zIndex || '',
+                    position: mapEl.style.position || ''
+                };
+            }
+            if (!state._panelInlineBackup) {
+                state._panelInlineBackup = {
+                    position: panel.style.position || '',
+                    top: panel.style.top || '',
+                    right: panel.style.right || '',
+                    bottom: panel.style.bottom || '',
+                    left: panel.style.left || '',
+                    width: panel.style.width || '',
+                    maxWidth: panel.style.maxWidth || '',
+                    height: panel.style.height || '',
+                    maxHeight: panel.style.maxHeight || '',
+                    borderRadius: panel.style.borderRadius || '',
+                    zIndex: panel.style.zIndex || ''
+                };
+            }
+            if (centerPane && panel.parentElement !== centerPane) centerPane.appendChild(panel);
+            panel.style.position = 'absolute';
+            panel.style.left = '0';
+            panel.style.right = '0';
+            panel.style.bottom = '0';
+            panel.style.top = 'auto';
+            panel.style.width = 'auto';
+            panel.style.maxWidth = 'none';
+            panel.style.height = '48%';
+            panel.style.maxHeight = 'none';
+            panel.style.borderRadius = '10px 10px 0 0';
+            panel.style.zIndex = THROUGHPUT_EPISODES_PANEL_ZINDEX;
+
+            if (mapEl) {
+                mapEl.style.flex = 'none';
+                mapEl.style.height = '52%';
+                mapEl.style.minHeight = '180px';
+                mapEl.style.maxHeight = 'none';
+                mapEl.style.position = 'relative';
+                mapEl.style.zIndex = '1';
+            }
+
+            if (header) {
+                header.onmousedown = null; // disable floating drag while split
+                header.style.cursor = 'default';
+            }
+            if (gearBtn) {
+                gearBtn.textContent = '⛶';
+                gearBtn.title = 'Exit split layout';
+                gearBtn.style.background = '#1d4ed8';
+            }
+        } else {
+            const mapPrev = state._mapInlineBackup || {};
+            const panelPrev = state._panelInlineBackup || {};
+            if (mapEl) {
+                mapEl.style.flex = mapPrev.flex || '';
+                mapEl.style.height = mapPrev.height || '';
+                mapEl.style.minHeight = mapPrev.minHeight || '';
+                mapEl.style.maxHeight = mapPrev.maxHeight || '';
+                mapEl.style.zIndex = mapPrev.zIndex || '';
+                mapEl.style.position = mapPrev.position || '';
+            }
+            if (panel.parentElement !== document.body) document.body.appendChild(panel);
+            panel.style.position = panelPrev.position || 'fixed';
+            panel.style.top = panelPrev.top || '84px';
+            panel.style.right = panelPrev.right || '16px';
+            panel.style.bottom = panelPrev.bottom || '';
+            panel.style.left = panelPrev.left || '';
+            panel.style.width = panelPrev.width || '980px';
+            panel.style.maxWidth = panelPrev.maxWidth || '88vw';
+            panel.style.height = panelPrev.height || '';
+            panel.style.maxHeight = panelPrev.maxHeight || '74vh';
+            panel.style.borderRadius = panelPrev.borderRadius || '12px';
+            panel.style.zIndex = panelPrev.zIndex || THROUGHPUT_EPISODES_PANEL_ZINDEX;
+            if (header && typeof window.makeElementDraggable === 'function') {
+                window.makeElementDraggable(header, panel);
+                header.style.cursor = 'grab';
+            }
+            if (gearBtn) {
+                gearBtn.textContent = '⚙️';
+                gearBtn.title = 'Split map/table';
+                gearBtn.style.background = '#1f2937';
+            }
+        }
+        state.splitMode = !!enabled;
+        setTimeout(() => {
+            try {
+                if (window.mapRenderer && window.mapRenderer.map) window.mapRenderer.map.invalidateSize();
+            } catch (_e) {}
+        }, 80);
+    }
+
+    function closeThroughputEpisodesTable() {
+        const existing = document.getElementById('throughputEpisodesPanel');
+        if (existing && window.__throughputEpisodePanelState && window.__throughputEpisodePanelState.splitMode) {
+            setThroughputEpisodesSplitMode(false);
+        }
+        if (existing) existing.remove();
+        window.__throughputEpisodePanelState = null;
+    }
+
+    window.zoomToThroughputEpisode = (rowIndex) => {
+        try {
+            const state = window.__throughputEpisodePanelState;
+            const map = window.mapRenderer && window.mapRenderer.map;
+            if (!state || !Array.isArray(state.rows)) return;
+            const row = state.rows.find((r) => Number(r && r.index) === Number(rowIndex));
+            if (!row) return;
+            if (map && row.bounds) {
+                map.fitBounds([[row.bounds.south, row.bounds.west], [row.bounds.north, row.bounds.east]], { padding: [24, 24] });
+            }
+
+            const table = document.getElementById('throughputEpisodesTable');
+            if (table) {
+                table.querySelectorAll('tr[data-episode-idx]').forEach((tr) => {
+                    tr.style.background = '#0b1220';
+                });
+                const hit = table.querySelector(`tr[data-episode-idx="${String(row.index)}"]`);
+                if (hit) hit.style.background = 'rgba(59,130,246,0.22)';
+            }
+        } catch (_e) {}
+    };
+
+    function openThroughputEpisodesTable(log, drawRes, cfg) {
+        const rows = (drawRes && Array.isArray(drawRes.episodeRows)) ? drawRes.episodeRows : [];
+        if (!rows.length) {
+            closeThroughputEpisodesTable();
+            return;
+        }
+        closeThroughputEpisodesTable();
+
+        const esc = (v) => String(v ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+        const fmt = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v).toFixed(d) : 'N/A';
+        const durSec = (ms) => Number.isFinite(Number(ms)) ? (Number(ms) / 1000).toFixed(1) : 'N/A';
+        const enterKbps = Number.isFinite(Number(cfg && cfg.enterKbps)) ? Number(cfg.enterKbps) : 5000;
+        const rowByIndex = new Map(rows.map((r) => [Number(r && r.index), r]));
+
+        const rowsHtml = rows.map((r) => {
+            const clickable = true;
+            const status = r && r.drawn ? 'Drawn' : (r && r.eligibleByRaw ? 'Eligible' : 'Filtered');
+            const statusColor = r && r.drawn ? '#22c55e' : (r && r.eligibleByRaw ? '#f59e0b' : '#ef4444');
+            return `<tr data-episode-idx="${esc(r.index)}" style="background:#0b1220;${clickable ? 'cursor:pointer;' : ''}${r && !r.bounds ? 'opacity:0.85;' : ''}">` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(r.label)}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(r.startTime)}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(r.endTime)}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(durSec(r.durationMs))}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(fmt(r.minTpKbps, 0))}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(fmt(r.avgTpKbps, 0))}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;">${esc(fmt(r.rawDegradedCount, 0))}</td>` +
+                `<td style="padding:6px;border-bottom:1px solid #1f2937;color:${statusColor};font-weight:700;">${status}</td>` +
+                `</tr>`;
+        }).join('');
+
+        const html =
+            `<div id="throughputEpisodesPanel" style="position:fixed; top:84px; right:16px; width:980px; max-width:88vw; max-height:74vh; background:#0b1220; border:1px solid #2b3f63; border-radius:12px; display:flex; flex-direction:column; overflow:hidden; z-index:${THROUGHPUT_EPISODES_PANEL_ZINDEX}; box-shadow:0 12px 32px rgba(2,6,23,0.55);">` +
+            `    <div class="throughput-episodes-header" style="padding:10px 12px;background:#111c2f;border-bottom:1px solid #2b3f63;display:flex;justify-content:space-between;align-items:center;cursor:grab;">` +
+            `      <div style="color:#dbeafe;font-weight:700;">Throughput Degradation Episodes - ${esc(log && log.name ? log.name : 'Run')}</div>` +
+            `      <div style="display:flex;gap:8px;align-items:center;">` +
+            `        <div style="font-size:12px;color:#93c5fd;">enter &lt; ${esc(enterKbps)} kbps, min raw degraded points = 6</div>` +
+            `        <button id="throughputEpisodesLayoutBtn" title="Split map/table" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:4px 8px;cursor:pointer;">⚙️</button>` +
+            `        <button id="throughputEpisodesCloseBtn" style="background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:4px 8px;cursor:pointer;">Close</button>` +
+            `      </div>` +
+            `    </div>` +
+            `    <div style="padding:10px;display:flex;flex-direction:column;gap:8px;overflow:hidden;max-height:calc(74vh - 52px);">` +
+            `      <div style="flex:1 1 auto;overflow:auto;min-height:170px;">` +
+            `      <table id="throughputEpisodesTable" style="width:100%;border-collapse:collapse;font-size:12px;color:#e5e7eb;">` +
+            `        <thead style="position:sticky;top:0;background:#0f172a;z-index:1;">` +
+            `          <tr style="text-align:left;color:#93c5fd;">` +
+            `            <th style="padding:6px;">Episode</th>` +
+            `            <th style="padding:6px;">Start</th>` +
+            `            <th style="padding:6px;">End</th>` +
+            `            <th style="padding:6px;">Duration (s)</th>` +
+            `            <th style="padding:6px;">Min DL TP</th>` +
+            `            <th style="padding:6px;">Avg DL TP</th>` +
+            `            <th style="padding:6px;">Raw&lt;Enter</th>` +
+            `            <th style="padding:6px;">Status</th>` +
+            `          </tr>` +
+            `        </thead>` +
+            `        <tbody>${rowsHtml}</tbody>` +
+            `      </table>` +
+            `      </div>` +
+            `      <div id="throughputEpisodeDetails" style="flex:0 0 auto; border:1px solid #26344f; border-radius:8px; background:#0f172a; padding:8px 10px; color:#dbeafe; font-size:12px;">Click an episode row to show details.</div>` +
+            `    </div>` +
+            `</div>`;
+
+        const div = document.createElement('div');
+        div.innerHTML = html;
+        const panel = div.firstElementChild;
+        document.body.appendChild(panel);
+        if (panel && typeof window.makeElementDraggable === 'function') {
+            const hdr = panel.querySelector('.throughput-episodes-header');
+            if (hdr) window.makeElementDraggable(hdr, panel);
+        }
+        const closeBtn = document.getElementById('throughputEpisodesCloseBtn');
+        if (closeBtn) closeBtn.onclick = () => closeThroughputEpisodesTable();
+        const layoutBtn = document.getElementById('throughputEpisodesLayoutBtn');
+        if (layoutBtn) {
+            layoutBtn.onclick = () => {
+                const splitNow = !(window.__throughputEpisodePanelState && window.__throughputEpisodePanelState.splitMode);
+                setThroughputEpisodesSplitMode(splitNow);
+            };
+        }
+
+        const table = document.getElementById('throughputEpisodesTable');
+        const detailsHost = document.getElementById('throughputEpisodeDetails');
+        const renderEpisodeDetails = (row) => {
+            if (!detailsHost) return;
+            if (!row) {
+                detailsHost.innerHTML = 'Click an episode row to show details.';
+                return;
+            }
+            const status = row.drawn ? 'Drawn on map' : (row.eligibleByRaw ? 'Eligible (not drawn)' : 'Filtered');
+            const startCoord = row.startCoord ? `${fmt(row.startCoord.lat, 6)}, ${fmt(row.startCoord.lng, 6)}` : 'N/A';
+            const endCoord = row.endCoord ? `${fmt(row.endCoord.lat, 6)}, ${fmt(row.endCoord.lng, 6)}` : 'N/A';
+            const box = row.bounds ? `${fmt(row.bounds.south, 6)}, ${fmt(row.bounds.west, 6)} -> ${fmt(row.bounds.north, 6)}, ${fmt(row.bounds.east, 6)}` : 'N/A';
+            detailsHost.innerHTML =
+                `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">` +
+                `  <div style="font-weight:700;color:#93c5fd;">${esc(row.label)} details</div>` +
+                `  <div style="font-size:11px;color:#94a3b8;">${esc(status)}</div>` +
+                `</div>` +
+                `<div style="margin-top:6px;display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:6px 10px;">` +
+                `  <div><span style="color:#94a3b8;">Start</span><br>${esc(row.startTime || 'N/A')}</div>` +
+                `  <div><span style="color:#94a3b8;">End</span><br>${esc(row.endTime || 'N/A')}</div>` +
+                `  <div><span style="color:#94a3b8;">Duration</span><br>${esc(durSec(row.durationMs))} s</div>` +
+                `  <div><span style="color:#94a3b8;">Samples</span><br>${esc(fmt(row.sampleCount, 0))}</div>` +
+                `  <div><span style="color:#94a3b8;">Min DL TP</span><br>${esc(fmt(row.minTpKbps, 0))} kbps</div>` +
+                `  <div><span style="color:#94a3b8;">Avg DL TP</span><br>${esc(fmt(row.avgTpKbps, 0))} kbps</div>` +
+                `  <div><span style="color:#94a3b8;">P10</span><br>${esc(fmt(row.p10TpKbps, 0))} kbps</div>` +
+                `  <div><span style="color:#94a3b8;">P50</span><br>${esc(fmt(row.p50TpKbps, 0))} kbps</div>` +
+                `  <div><span style="color:#94a3b8;">Raw &lt; Enter</span><br>${esc(fmt(row.rawDegradedCount, 0))} (enter=${esc(fmt(enterKbps, 0))})</div>` +
+                `  <div><span style="color:#94a3b8;">Start GPS</span><br>${esc(startCoord)}</div>` +
+                `  <div><span style="color:#94a3b8;">End GPS</span><br>${esc(endCoord)}</div>` +
+                `  <div><span style="color:#94a3b8;">Bounds</span><br>${esc(box)}</div>` +
+                `</div>`;
+        };
+        if (table) {
+            table.querySelectorAll('tr[data-episode-idx]').forEach((tr) => {
+                tr.addEventListener('click', () => {
+                    const idx = Number(tr.getAttribute('data-episode-idx'));
+                    window.zoomToThroughputEpisode(idx);
+                    renderEpisodeDetails(rowByIndex.get(idx));
+                });
+            });
+        }
+        if (rows.length) renderEpisodeDetails(rows[0]);
+
+        window.__throughputEpisodePanelState = {
+            logId: log && log.id,
+            rows,
+            splitMode: false
+        };
+    }
+
+    window.clearThroughputDegradationEpisodes = () => {
+        const renderer = window.mapRenderer;
+        if (!renderer) return;
+        renderer.clearLayer('__throughput_degradation_episodes__');
+        window.__throughputDegradationOverlayMeta = null;
+        closeThroughputEpisodesTable();
+    };
+
+    function findPointLogFromStashData(stash) {
+        const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+        const selectedLat = dtLteEpisodeNum(stash && (stash.lat ?? stash.latitude));
+        const selectedLng = dtLteEpisodeNum(stash && (stash.lng ?? stash.longitude ?? stash.lon));
+        const selectedTime = String((stash && (stash.time || stash.Time || stash.timestamp)) || '').trim();
+        const samePoint = (pt) => {
+            if (!pt) return false;
+            const lat = dtLteEpisodeNum(pt.lat ?? pt.latitude);
+            const lng = dtLteEpisodeNum(pt.lng ?? pt.longitude ?? pt.lon);
+            const t = String(pt.time || '').trim();
+            const latOk = Number.isFinite(selectedLat) && Number.isFinite(lat) ? Math.abs(lat - selectedLat) < 1e-7 : true;
+            const lngOk = Number.isFinite(selectedLng) && Number.isFinite(lng) ? Math.abs(lng - selectedLng) < 1e-7 : true;
+            const timeOk = selectedTime ? t === selectedTime : true;
+            return latOk && lngOk && timeOk;
+        };
+        const inLog = (log) => log && Array.isArray(log.points) && log.points.some(samePoint);
+        let activeLog = window.__activePointLog;
+        if (!inLog(activeLog)) activeLog = logs.find(inLog) || activeLog;
+        if ((!activeLog || !Array.isArray(activeLog.points)) && logs.length === 1) activeLog = logs[0];
+        return activeLog && Array.isArray(activeLog.points) ? activeLog : null;
+    }
+
+    window.showThroughputDegradationEpisodes = (btn, logCandidate = null) => {
+        try {
+            const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : [];
+            let activeLog = null;
+            if (logCandidate && typeof logCandidate === 'object' && Array.isArray(logCandidate.points)) {
+                activeLog = logCandidate;
+            } else if (logCandidate !== null && logCandidate !== undefined && logCandidate !== '') {
+                activeLog = logs.find((l) => l && String(l.id) === String(logCandidate)) || null;
+            }
+            if (!activeLog) {
+                let script = null;
+                if (btn) {
+                    const container = btn.closest('.log-view-container, .panel, .card, .modal, #infoPanelContent') || btn.parentNode;
+                    script = container && container.querySelector ? container.querySelector('#point-data-stash') : null;
+                }
+                if (!script) script = document.getElementById('point-data-stash');
+                if (!script) {
+                    console.warn('[Throughput Degradation] Unable to determine which log to analyze.');
+                    return { ok: false, reason: 'no_log_context' };
+                }
+                const stash = JSON.parse(script.textContent || '{}');
+                activeLog = findPointLogFromStashData(stash);
+            }
+            if (!activeLog || !Array.isArray(activeLog.points) || !activeLog.points.length) {
+                console.warn('[Throughput Degradation] Unable to find active LTE log for detection.');
+                return { ok: false, reason: 'no_active_log' };
+            }
+
+            // Toggle behavior: clicking again on the same log hides the current episode overlay.
+            const overlayMeta = window.__throughputDegradationOverlayMeta;
+            if (overlayMeta && String(overlayMeta.logId) === String(activeLog.id)) {
+                window.clearThroughputDegradationEpisodes();
+                console.info('[Throughput Degradation] overlay hidden.');
+                return { ok: true, toggled: 'hidden', logId: activeLog.id };
+            }
+
+            const cfg = normalizeDtLteEpisodeConfig(getDtLteEpisodeConfig());
+            const tpSeries = buildDtLteTpSeries(activeLog.points);
+            if (!tpSeries.length) {
+                window.clearThroughputDegradationEpisodes();
+                console.info('[Throughput Degradation] No Radio.Lte.ServingCellTotal.Pdsch.Throughput samples found for this log.');
+                return { ok: false, reason: 'no_pdsch_samples' };
+            }
+
+            const detected = detectDtLteThroughputEpisodes(tpSeries, cfg);
+            const episodes = (detected && Array.isArray(detected.episodes)) ? detected.episodes : [];
+            if (!episodes.length) {
+                window.clearThroughputDegradationEpisodes();
+                console.info('[Throughput Degradation] No degraded episodes detected with current settings.');
+                return { ok: false, reason: 'no_episodes' };
+            }
+
+            const drawRes = drawThroughputDegradationShapesOnMap(activeLog, detected);
+            openThroughputEpisodesTable(activeLog, drawRes, cfg);
+            if (!drawRes.renderedEpisodes) {
+                if (Number(drawRes.eligibleEpisodes || 0) === 0) {
+                    console.info(`[Throughput Degradation] Detected ${episodes.length} episode(s), but none have at least 6 degraded raw DL TP points.`);
+                } else {
+                    console.info(`[Throughput Degradation] Detected ${episodes.length} episode(s), but none have valid GPS coordinates to draw.`);
+                }
+                return { ok: false, reason: 'no_renderable_episodes', episodes: episodes.length, eligible: Number(drawRes.eligibleEpisodes || 0) };
+            }
+
+            const eligible = Number(drawRes.eligibleEpisodes || 0);
+            const belowMinCount = Math.max(0, episodes.length - eligible);
+            const withoutGpsCount = Math.max(0, eligible - drawRes.renderedEpisodes);
+            const notes = [];
+            if (belowMinCount > 0) notes.push(`${belowMinCount} skipped (<6 degraded raw points)`);
+            if (withoutGpsCount > 0) notes.push(`${withoutGpsCount} without GPS shape`);
+            const noteStr = notes.length ? ` (${notes.join(', ')})` : '';
+            console.info(`[Throughput Degradation] detected ${episodes.length} episode(s), drew ${drawRes.renderedEpisodes} red shape(s)${noteStr}.`);
+            return { ok: true, episodes: episodes.length, drawn: drawRes.renderedEpisodes, eligible };
+        } catch (e) {
+            console.error('Throughput Degradation error:', e);
+            return { ok: false, reason: 'error', error: String(e && e.message || e) };
+        }
+    };
+
+    window.openDtLteEpisodeSettings = (opts = {}) => {
+        const cfg = getDtLteEpisodeConfig();
+        const onSave = (opts && typeof opts.onSave === 'function') ? opts.onSave : null;
+        const existing = document.getElementById('dtLteGlobalSettingsOverlay');
+        if (existing) existing.remove();
+
+        const html =
+            `<div id="dtLteGlobalSettingsOverlay" style="position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; z-index:10010;" onclick="if(event.target===this) this.remove()">` +
+            `  <div style="background:#111827; color:#e5e7eb; padding:16px; border-radius:10px; width:560px; max-width:92vw; border:1px solid #374151;">` +
+            `    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">` +
+            `      <div style="font-weight:700;">DT LTE Episode Settings</div>` +
+            `      <button id="dtLteGlobalSettingsClose" style="background:#1f2937; color:#fff; border:none; padding:4px 8px; cursor:pointer;">×</button>` +
+            `    </div>` +
+            `    <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;">` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Enter degraded (kbps)</div><input id="dtLteGlobalEnter" value="${cfg.enterKbps}" style="width:100%; margin-top:4px;" /></div>` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Exit degraded (kbps)</div><input id="dtLteGlobalExit" value="${cfg.exitKbps}" style="width:100%; margin-top:4px;" /></div>` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Min duration (ms)</div><input id="dtLteGlobalMin" value="${cfg.minDurationMs}" style="width:100%; margin-top:4px;" /></div>` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Merge gap (ms)</div><input id="dtLteGlobalMerge" value="${cfg.mergeGapMs}" style="width:100%; margin-top:4px;" /></div>` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Smoothing window (ms)</div><input id="dtLteGlobalSmooth" value="${cfg.smoothWindowMs}" style="width:100%; margin-top:4px;" /></div>` +
+            `      <div><div style="font-size:11px; color:#94a3b8;">Nearest search (ms)</div><input id="dtLteGlobalNearest" value="${cfg.nearestSearchMs}" style="width:100%; margin-top:4px;" /></div>` +
+            `    </div>` +
+            `    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:12px;">` +
+            `      <button id="dtLteGlobalSettingsCancel" style="background:#374151; color:#e5e7eb; border:none; padding:6px 10px; cursor:pointer;">Cancel</button>` +
+            `      <button id="dtLteGlobalSettingsSave" style="background:#2563eb; color:#fff; border:none; padding:6px 10px; cursor:pointer;">Save</button>` +
+            `    </div>` +
+            `  </div>` +
+            `</div>`;
+
+        const div = document.createElement('div');
+        div.innerHTML = html;
+        const overlay = div.firstElementChild;
+        document.body.appendChild(overlay);
+
+        const close = () => overlay.remove();
+        const numOr = (id, fallback) => {
+            const n = parseFloat(document.getElementById(id)?.value);
+            return Number.isFinite(n) ? n : fallback;
+        };
+        const intOr = (id, fallback) => {
+            const n = parseInt(document.getElementById(id)?.value, 10);
+            return Number.isFinite(n) ? n : fallback;
+        };
+
+        const closeBtn = document.getElementById('dtLteGlobalSettingsClose');
+        const cancelBtn = document.getElementById('dtLteGlobalSettingsCancel');
+        const saveBtn = document.getElementById('dtLteGlobalSettingsSave');
+        if (closeBtn) closeBtn.onclick = close;
+        if (cancelBtn) cancelBtn.onclick = close;
+        if (saveBtn) {
+            saveBtn.onclick = () => {
+                const nextCfg = {
+                    enterKbps: Math.max(1, numOr('dtLteGlobalEnter', cfg.enterKbps)),
+                    exitKbps: Math.max(1, numOr('dtLteGlobalExit', cfg.exitKbps)),
+                    minDurationMs: Math.max(0, intOr('dtLteGlobalMin', cfg.minDurationMs)),
+                    mergeGapMs: Math.max(0, intOr('dtLteGlobalMerge', cfg.mergeGapMs)),
+                    smoothWindowMs: Math.max(1, intOr('dtLteGlobalSmooth', cfg.smoothWindowMs)),
+                    nearestSearchMs: Math.max(0, intOr('dtLteGlobalNearest', cfg.nearestSearchMs))
+                };
+                if (nextCfg.exitKbps <= nextCfg.enterKbps) nextCfg.exitKbps = nextCfg.enterKbps + 1000;
+                saveDtLteEpisodeConfig(nextCfg);
+                close();
+                if (onSave) onSave(nextCfg);
+            };
+        }
+    };
+
+    function pointDetailsIsLtePoint(point, log) {
+        const tech = String((log && log.tech) || (point && (point.Tech || point.tech)) || '').toUpperCase();
+        if (tech.includes('LTE')) return true;
+        const hasLteKey = (obj) => {
+            if (!obj || typeof obj !== 'object') return false;
+            return Object.keys(obj).some((k) => String(k || '').toLowerCase().includes('radio.lte.'));
+        };
+        return hasLteKey(point) || hasLteKey(point && point.properties);
+    }
+
+    function upsertPointDetailsLteSettingsButton(headerDom, show, onClick) {
+        if (!headerDom) return;
+        let btn = document.getElementById('dtLtePointSettingsBtn');
+        if (!show) {
+            if (btn) btn.remove();
+            return;
+        }
+        const closeBtn = headerDom.querySelector('.info-panel-close');
+        if (!btn) {
+            btn = document.createElement('span');
+            btn.id = 'dtLtePointSettingsBtn';
+            btn.className = 'toggle-view-btn';
+            btn.innerHTML = '⚙️ DT LTE';
+            btn.title = 'DT LTE Episode Settings';
+            if (closeBtn) headerDom.insertBefore(btn, closeBtn);
+            else headerDom.appendChild(btn);
+        }
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            if (typeof onClick === 'function') onClick();
+        };
+    }
+
+    const doc = (s) => String(s || '').trim();
+    const POINT_DETAILS_METRIC_INFO = {
+        'UE category': doc(`1) Capability / feature context
+Layer: UE capability (RRC / device capability)
+Meaning: LTE UE Category defines upper bounds:
+- max DL/UL peak rate (under ideal conditions)
+- max supported bandwidth, modulation, MIMO layers, CA count
+How "est" is done: If UE Capability Information is not decoded, infer from:
+- maximum DL layers ever achieved (rank)
+- whether CA appears (2CC/3CC...)
+- peak TBS/throughput observed with bandwidth
+Interpretation gotchas:
+- Category can look lower if CA/4x4 is never enabled or radio is never ideal.
+- Peak throughput is also limited by core/backhaul/server, so do not infer category from app throughput alone.`),
+        'E category': doc(`1) Capability / feature context
+Layer: UE capability (RRC / device capability)
+Meaning: LTE UE Category defines upper bounds:
+- max DL/UL peak rate (under ideal conditions)
+- max supported bandwidth, modulation, MIMO layers, CA count
+How "est" is done: If UE Capability Information is not decoded, infer from:
+- maximum DL layers ever achieved (rank)
+- whether CA appears (2CC/3CC...)
+- peak TBS/throughput observed with bandwidth
+Interpretation gotchas:
+- Category can look lower if CA/4x4 is never enabled or radio is never ideal.
+- Peak throughput is also limited by core/backhaul/server, so do not infer category from app throughput alone.`),
+        'MIMO capability': doc(`1) Capability / feature context
+Layer: UE capability + PHY
+Meaning: Maximum spatial streams UE can support (for example DL 2x2 or 4x4).
+Estimation signals:
+- observed rank never exceeds 1 (may be UE cap, network config, or channel correlation)
+- persistent max rank 2 in strong SINR often indicates 2x2 capability
+Interpretation: Capability is not equal to current use. Active use depends on eNB band support, channel richness, scheduler policy, and load.`),
+        'CA capability': doc(`1) Capability / feature context
+Layer: RRC negotiation (UE supports combos, network decides activation)
+Meaning: Number of component carriers and supported band combinations (intra/inter-band).
+How measured:
+- decoded exact from RRC signaling when available
+- observed from simultaneous scheduling on PCell + SCells
+Interpretation:
+- CA inactive can be normal due to policy/load/coverage.
+- CA may be supported but disabled by thermal, battery, or network restrictions.`),
+        'CA Status': doc(`1) Capability / feature context
+Layer: runtime carrier aggregation state
+Meaning: whether CA is currently active (SCells configured/used) or inactive.
+How obtained:
+- direct from CA status KPI/event when available
+- inferred from observed SCell presence around the clicked time
+Why it matters: distinguishes capability from actual in-session CA usage.`),
+        'CA SCell Add/Remove': doc(`1) Capability / feature context
+Layer: RRC mobility/CA control
+Meaning: add/remove/deactivate operations for SCells around the clicked point.
+How obtained:
+- decoded/inferred RRC events containing SCell add/remove actions
+- fallback summary from nearby event names
+Why it matters: dynamic CA reconfiguration strongly impacts instantaneous throughput and stability.`),
+        'MIMO/CA': doc(`1) Capability / feature context
+Meaning: Combined feature-state indicator:
+- CA active? (>= 2 CC)
+- MIMO active? (rank/layers > 1)
+Use: quick feature regime segmentation for KPI attribution.`),
+
+        'RTT': doc(`2) Latency & loss (and why proxies matter)
+Layer: IP/transport/app (not radio layer)
+Meaning: Round-trip delay in ms.
+Components:
+- radio scheduling delay (UL grant, DRX wake-up)
+- HARQ/RLC retransmission delay
+- EPC path + backhaul + internet + server delay
+Interpretation tips:
+- RTT spikes often correlate with RLC retransmissions or RRC transitions.
+- Good radio does not guarantee low RTT if core/backhaul is congested.`),
+        'Packet loss (proxy)': doc(`2) Latency & loss (and why proxies matter)
+Layer: IP/transport measurement point
+Meaning: packets not arriving or timing out.
+Why proxy: LTE can recover below IP via HARQ/RLC, so IP loss may stay low until buffers overflow.
+Interpretation:
+- loss + high RTT often indicates congestion/bufferbloat or severe radio errors
+- loss with stable RTT can indicate policing, path issues, or server-side drops.`),
+        'Retransmissions (proxy)': doc(`2) Latency & loss (and why proxies matter)
+Meaning: estimated retransmission pressure. This can represent:
+1) TCP retransmissions
+2) RLC retransmissions
+3) HARQ retransmissions
+Why proxy/est: exact HARQ/RLC counters are not always decoded.
+Inference clues:
+- BLER spikes and throughput collapse
+- repeated sequence/duplication patterns
+- stalls aligned with CQI/MCS drops
+Impact: retransmissions increase latency and reduce goodput.`),
+
+        'Bearer active': doc(`3) Bearers, activity, and power saving
+Layer: PDCP/RLC/MAC activity view
+Meaning: user-plane data is actively flowing (not just connected idle).
+How estimated: scheduling grants present, non-zero TBS, non-idle traffic.
+Use: avoid mixing connected-idle and active transfer samples in KPI averages.`),
+        'Bearer / EPS Bearer': doc(`3) Bearers, activity, and power saving
+Layer: EPC bearer context (LTE)
+Meaning: default/dedicated bearer existence and QoS behavior.
+What is inferred: additional bearer presence and likely QCI behavior when full EPC signaling is unavailable.
+Why it matters: QoS class affects prioritization, latency, and scheduling under load.`),
+        'Data Session Start/Stop': doc(`3) Bearers, activity, and power saving
+Layer: session/event timeline
+Meaning: nearest data-session start and stop markers around the clicked point.
+How obtained:
+- direct session events/KPIs if present
+- inferred from nearby event patterns (PDN/bearer/data connect/disconnect)
+Why it matters: explains whether low throughput is inside an active transfer or at session boundary.`),
+        'VoLTE Call Start/End': doc(`3) Bearers, activity, and power saving
+Layer: IMS/VoLTE service signaling
+Meaning: nearest VoLTE call start/end context around the clicked point.
+How obtained:
+- direct IMS/VoLTE events when present
+- inferred from SIP/IMS/VoLTE event names nearby
+Why it matters: voice sessions can change scheduler priority and perceived data performance.`),
+        'DRX (DTX)': doc(`3) Bearers, activity, and power saving
+Layer: MAC/PHY behavior controlled by RRC config
+Meaning:
+- DRX: UE sleeps/wakes periodically for control monitoring
+- DTX: UE pauses UL transmission when no data
+How estimated: periodic activity gaps consistent with DRX cycles.
+Interpretation: DRX improves battery but can add wake-up latency and spiky RTT for burst traffic.`),
+
+        'Tx power': doc(`4) UL power & geometry
+Layer: PHY UL
+Meaning: UE UL transmit power in dBm.
+Driven by pathloss, power control commands, UL bandwidth/RBs, and power headroom.
+Interpretation patterns:
+- high Tx power + low UL MCS suggests UL coverage edge/interference
+- near-max power with rising retransmissions suggests UL stress/failure risk.`),
+        'Timing Advance': doc(`4) UL power & geometry
+Layer: MAC control
+Meaning: UL timing offset so UE uplink arrives aligned at eNB.
+Interpretation:
+- usually increases with distance
+- can shift after HO or propagation changes
+Use with Tx power: both high usually indicate edge-like geometry.`),
+        'TA Jumps': doc(`4) UL power & geometry
+Meaning: sudden TA changes above threshold.
+Often indicates:
+- HO/cell change
+- fast movement
+- timing instability/multipath
+Useful for correlating transient UL errors and short throughput dips.`),
+
+        'Estimated RB usage': doc(`5) Scheduling resources (RBs)
+Layer: derived metric
+Meaning: likely RB share consumed by UE.
+How derived: back-calculated from throughput, spectral efficiency, layers, and overhead assumptions.
+Interpretation: strong for trends/correlation, weak for exact absolute per-TTI truth.`),
+        'Allocated RBs': doc(`5) Scheduling resources (RBs)
+Layer: MAC scheduler
+Meaning: actual DL RB grants.
+Interpretation:
+- low RBs during high load suggests congestion or prioritization limits
+- low RBs during low load suggests radio is likely not the bottleneck.`),
+        'Allocated RBs (raw)': doc(`5) Scheduling resources (RBs)
+Layer: MAC scheduler raw counter
+Meaning: direct value as read from source KPI without per-TTI normalization.
+Why it matters: raw counters can be aggregated over multiple TTIs and may exceed instantaneous RB cap.`),
+        'Allocated RBs sanity': doc(`5) Scheduling resources (RBs)
+Layer: validation/normalization check
+Meaning: automatic consistency check against theoretical RB cap per TTI.
+What it does:
+- flags impossible per-TTI values
+- indicates inferred aggregation window when raw value is cumulative
+Why it matters: prevents misinterpretation of large raw RB counters (for example 200 in 10 MHz single-CC).`),
+        'Allocated RBs UL': doc(`5) Scheduling resources (RBs)
+Layer: MAC scheduler
+Meaning: actual UL RB grants.
+Why it matters: core indicator for upload throughput and UL latency-sensitive behavior.`),
+        'Allocated RBs (est)': doc(`5) Scheduling resources (RBs)
+Meaning: inferred RB allocation when full scheduling decode is unavailable.
+Interpretation: treat as approximate scheduling share, not exact grant truth.`),
+
+        'TBS': doc(`6) Transport Block Size (payload per TTI)
+Layer: PHY/MAC transport format
+Meaning: number of bits sent in one DL transport block per scheduling interval.
+Depends on RBs, MCS, layers, overhead, and retransmission state.
+Interpretation:
+- TBS naturally swings with fast adaptation
+- persistently low TBS with good CQI usually points to low RB allocation or policy limits.`),
+        'TBS UL': doc(`6) Transport Block Size (payload per TTI)
+Layer: PHY/MAC transport format
+Meaning: number of bits sent in one UL transport block per scheduling interval.`),
+
+        'CQI (DL)': doc(`7) Link adaptation indicators (quality -> MCS -> throughput)
+Layer: UE feedback
+Meaning: DL channel quality indicator (typically 0..15).
+Interpretation:
+- stable high CQI but low throughput suggests RB-limited/core-limited regime
+- fluctuating CQI suggests mobility, fading, or interference
+Caveat: CQI can be biased by reporting mode and vendor strategy.`),
+        'DL MCS': doc(`7) Link adaptation indicators (quality -> MCS -> throughput)
+Layer: scheduler decision
+Meaning: selected DL modulation and coding robustness.
+Interpretation:
+- low MCS + high BLER: radio-limited and failing
+- low MCS + low BLER: conservative adaptation policy
+- low RB + high MCS: congestion/scheduler-limited regime.`),
+        'UL MCS': doc(`7) Link adaptation indicators (quality -> MCS -> throughput)
+Layer: scheduler decision
+Meaning: selected UL modulation and coding.
+Why it matters: drives UL throughput/robustness and reflects UL SINR, Tx power, and interference.`),
+        'Code Rate': doc(`7) Link adaptation indicators (quality -> MCS -> throughput)
+Layer: link adaptation efficiency
+Meaning: effective coding ratio used for data transport robustness vs spectral efficiency.
+How obtained:
+- direct DL/UL code-rate KPIs when available
+- otherwise estimated from MCS as a coarse proxy
+Why it matters: lower code rate is more robust but reduces payload efficiency for the same RB allocation.`),
+        'Modulation (DL/UL)': doc(`7) Link adaptation indicators (quality -> MCS -> throughput)
+Meaning: modulation order (QPSK, 16QAM, 64QAM, 256QAM).
+Interpretation: explains why similar RB allocations can yield very different throughput.`),
+
+        '#layers': doc(`8) MIMO specifics (layers, PMI, rank)
+Layer: PHY/MIMO
+Meaning: number of spatial streams used at a moment.
+Interpretation:
+- layers=1 with strong SINR may indicate poor spatial separation, disabled higher-order MIMO, or network policy.`),
+        'PMI': doc(`8) MIMO specifics (layers, PMI, rank)
+Layer: UE feedback
+Meaning: precoder matrix indicator selected from codebook.
+Interpretation: unstable PMI may indicate fast channel changes; persistent mismatch can reduce SINR and throughput.`),
+        'Rank/Layers (feedback proxy)': doc(`8) MIMO specifics (layers, PMI, rank)
+Meaning: proxy for RI/rank preference.
+Why proxy: true RI may be partially available; this value is inferred from observed feedback/scheduling patterns.
+Interpretation: if rank indicates >1 but throughput does not improve, UE is often RB-limited or retransmission-limited.`),
+
+        'HARQ process-level': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Layer: PHY/MAC
+Meaning: per-HARQ-process new transmission/retransmission and ACK/NACK behavior.
+Interpretation:
+- frequent NACK across many processes indicates interference/coverage stress
+- NACK bursts near HO indicate mobility transition effects.`),
+        'MAC retransmissions': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Meaning: retransmission activity summarized at MAC layer (often HARQ-driven).
+Interpretation: early warning before RLC retransmissions increase.`),
+        'RLC retransmissions': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Layer: RLC AM
+Meaning: retransmissions triggered when lower-layer recovery is insufficient.
+Impact: increases delay and can stall TCP/app throughput.`),
+        'PDCP Discard / Reordering': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Layer: PDCP reliability/ordering
+Meaning:
+- PDCP discard: PDCP PDUs dropped due to timer/queue constraints
+- PDCP reordering: out-of-order handling before in-sequence delivery
+Why it matters: sustained discard/reordering pressure indicates instability/jitter and can hurt user experience.`),
+        'HARQ (proxy)': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Meaning: inferred HARQ retransmission behavior when direct ACK/NACK decode is unavailable.
+Interpretation: use as qualitative indicator unless validated against decoded HARQ counters.`),
+        'BLER DL': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Meaning: DL transport block error rate (often first-transmission BLER).
+Interpretation:
+- directly tied to HARQ load and efficiency
+- moderate BLER can be normal operating point
+- persistently high BLER is harmful and usually throughput-limiting.`),
+        'BLER UL': doc(`9) Retransmission layers: HARQ vs MAC vs RLC
+Meaning: UL transport block error rate (often first-transmission BLER on uplink).
+Interpretation:
+- elevated UL BLER usually indicates UL coverage/interference/power-control issues
+- sustained high UL BLER degrades upload quality, RTT stability, and session reliability.`),
+
+        'RRC State (decoded exact)': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: exact LTE RRC state from decoded signaling (primarily RRC_IDLE or RRC_CONNECTED).
+Why it matters: data readiness, mobility handling, and latency behavior differ strongly by state.`),
+        'RRC Re-establishment': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: reestablishment procedure markers (request/complete/reject) around the clicked time.
+How obtained:
+- decoded RRC reestablishment message names when present
+- fallback inferred from nearby event context
+Why it matters: indicates temporary radio failure/recovery and helps explain abrupt throughput interruptions.`),
+        'RRC State': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: inferred RRC state when exact signaling is missing.
+Heuristics typically use scheduling grants, C-RNTI activity, paging/reselection patterns.
+Use caution around inactivity timers and short bursts.`),
+        'HO Start/Complete': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: estimated HO start/complete timing.
+Use: correlate mobility with throughput gaps, RTT spikes, and TA jumps.`),
+        'A3/A5 triggers': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded HO trigger logic:
+- A3: neighbor better than serving by offset
+- A5: serving below threshold1 and neighbor above threshold2
+Why it matters: explains HO cause (coverage/quality/load policy behavior).`),
+        'A3/A5 event thresholds': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: configured offsets/thresholds/hysteresis/TTT for A3/A5 logic.
+Why it matters: key mobility tuning lever:
+- too aggressive => ping-pong
+- too conservative => late HO and higher RLF risk.`),
+        'A3/A5 threshold source time': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: estimated time when the threshold/config source was applicable.
+Why it matters: correct temporal attribution to the right config snapshot.`),
+        'A3/A5 threshold source PCI': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: PCI of the cell whose threshold/config was referenced.
+Why it matters: confirms which cell configuration drove trigger analysis.`),
+        'A3/A5 threshold context check': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: attribution consistency check (serving cell, frequency, measObject, timing).
+Why it matters: avoids blaming the wrong PCI/config when contexts change quickly.`),
+        'HO command': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded HO command message with target/reconfiguration details.
+Why it matters: confirms command issuance and target assignment.`),
+        'HO execution time': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: elapsed time from HO command to completion/key HO milestones.
+Why it matters: quantifies interruption and highlights slow transition problems.`),
+        'HO failure': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: HO did not complete successfully.
+Typical causes: weak target, bad neighbor relation, threshold mis-tuning, border fading/interference, load rejection.`),
+
+        'RLF': doc(`11) RLF and recovery
+Meaning: inferred radio link failure occurrence when exact signaling is not available.
+Common clues: long outage, abrupt serving loss, detach/reattach or reestablishment patterns.`),
+        'RLF root-cause details': doc(`11) RLF and recovery
+Meaning: decoded reason codes/counters explaining why RLF occurred.
+Why it matters: separates coverage holes, interference bursts, mobility tuning issues, and UL-vs-DL failure domains.`),
+        'Reestablishment timeline': doc(`11) RLF and recovery
+Meaning: step-by-step timeline of RRC reestablishment/recovery attempt.
+Interpretation: longer timelines imply more severe recovery conditions.`),
+        'RLF reason breakdown': doc(`11) RLF and recovery
+Meaning: categorized RLF cause distribution for KPI reporting and targeted optimization.`)
+    };
+
+    const POINT_DETAILS_DEFAULT_QOS_PROFILE = {
+        defaultValue: 'Use radio plan baseline and vendor-specific target for this KPI.',
+        good: {
+            condition: 'Within planned operating target.',
+            qosImpact: 'Stable user experience and low service risk.',
+            throughputImpact: 'No meaningful throughput limitation from this KPI.'
+        },
+        moderate: {
+            condition: 'Borderline / transient degradation.',
+            qosImpact: 'Intermittent quality issues may appear.',
+            throughputImpact: 'Noticeable throughput variability or partial limitation.'
+        },
+        poor: {
+            condition: 'Outside engineering target.',
+            qosImpact: 'High risk of degraded sessions, latency spikes, or drops.',
+            throughputImpact: 'Strong throughput degradation likely.'
+        }
+    };
+
+    const POINT_DETAILS_METRIC_QOS_PROFILES = {
+        'Application throughput DL': {
+            defaultValue: 'Default target >= 5000 kbps for non-congested LTE sessions.',
+            good: { condition: '>= 10000 kbps', qosImpact: 'Smooth app response and fast downloads.', throughputImpact: 'High DL user goodput.' },
+            moderate: { condition: '5000 to 10000 kbps', qosImpact: 'Usable but variable app performance.', throughputImpact: 'Medium DL throughput with occasional stalls.' },
+            poor: { condition: '< 5000 kbps', qosImpact: 'Visible slowdown and poor UX for heavy apps.', throughputImpact: 'Throughput bottleneck (degraded state).' }
+        },
+        'DL throughput': {
+            defaultValue: 'Default target >= 5000 kbps for healthy LTE DL transfer.',
+            good: { condition: '>= 10000 kbps', qosImpact: 'Good media and data experience.', throughputImpact: 'High DL transfer capacity.' },
+            moderate: { condition: '5000 to 10000 kbps', qosImpact: 'Acceptable but not robust under load.', throughputImpact: 'Moderate DL capacity.' },
+            poor: { condition: '< 5000 kbps', qosImpact: 'Frequent user complaints in data-heavy usage.', throughputImpact: 'Degraded DL throughput.' }
+        },
+        'UL throughput': {
+            defaultValue: 'Default healthy UL usually >= 1000 kbps (service-dependent).',
+            good: { condition: '>= 1000 kbps', qosImpact: 'Good upload/interactive responsiveness.', throughputImpact: 'UL not throughput-limiting.' },
+            moderate: { condition: '300 to 1000 kbps', qosImpact: 'Upload delays in moderate traffic.', throughputImpact: 'Moderate UL limitation.' },
+            poor: { condition: '< 300 kbps', qosImpact: 'Poor upload and call interactivity risk.', throughputImpact: 'Strong UL bottleneck.' }
+        },
+        'RTT': {
+            defaultValue: 'Default LTE interactive target <= 40 ms (path-dependent).',
+            good: { condition: '<= 40 ms', qosImpact: 'Responsive apps, stable voice/video interaction.', throughputImpact: 'TCP ramp-up efficient; low delay penalty.' },
+            moderate: { condition: '40 to 80 ms', qosImpact: 'Mild lag in interactive traffic.', throughputImpact: 'Some transport inefficiency.' },
+            poor: { condition: '> 80 ms', qosImpact: 'Noticeable lag, poor real-time experience.', throughputImpact: 'TCP efficiency drops; effective throughput reduced.' }
+        },
+        'Packet loss (proxy)': {
+            defaultValue: 'Default target < 1% for stable service quality.',
+            good: { condition: '< 1%', qosImpact: 'Good session stability.', throughputImpact: 'Minimal loss-related throughput impact.' },
+            moderate: { condition: '1% to 3%', qosImpact: 'Intermittent media artifacts/retries.', throughputImpact: 'Throughput reduction due to recovery overhead.' },
+            poor: { condition: '> 3%', qosImpact: 'High disruption risk (voice/video/data).', throughputImpact: 'Severe goodput collapse likely.' }
+        },
+        'Retransmissions (proxy)': {
+            defaultValue: 'Default target is low and stable retransmission pressure.',
+            good: { condition: '< 5% equivalent retrans pressure', qosImpact: 'Stable quality and delay.', throughputImpact: 'Low recovery overhead.' },
+            moderate: { condition: '5% to 15%', qosImpact: 'Jitter and occasional stalls.', throughputImpact: 'Noticeable efficiency loss.' },
+            poor: { condition: '> 15%', qosImpact: 'High instability and service degradation.', throughputImpact: 'Heavy throughput penalty from repeated retransmissions.' }
+        },
+        'RSRP': {
+            defaultValue: 'Default LTE coverage planning target around >= -100 dBm.',
+            good: { condition: '>= -90 dBm', qosImpact: 'Strong coverage; robust service.', throughputImpact: 'Supports high MCS/layers potential.' },
+            moderate: { condition: '-100 to -90 dBm', qosImpact: 'Acceptable but vulnerable at load/mobility.', throughputImpact: 'Moderate throughput potential.' },
+            poor: { condition: '< -100 dBm', qosImpact: 'Coverage-edge risk, drops/retries likely.', throughputImpact: 'Low throughput ceiling and instability.' }
+        },
+        'RSRQ': {
+            defaultValue: 'Default quality target around >= -12 dB.',
+            good: { condition: '>= -10 dB', qosImpact: 'Low interference and stable quality.', throughputImpact: 'Efficient scheduling and coding.' },
+            moderate: { condition: '-14 to -10 dB', qosImpact: 'Quality variability under load.', throughputImpact: 'Medium efficiency/throughput.' },
+            poor: { condition: '< -14 dB', qosImpact: 'Interference/congestion symptoms likely.', throughputImpact: 'Lower MCS, more retrans, reduced throughput.' }
+        },
+        'SINR': {
+            defaultValue: 'Default LTE target for healthy DL often >= 5 dB, better >= 13 dB.',
+            good: { condition: '>= 13 dB', qosImpact: 'High radio quality and stability.', throughputImpact: 'High spectral efficiency, better peak throughput.' },
+            moderate: { condition: '5 to 13 dB', qosImpact: 'Acceptable but sensitive to fading/interference.', throughputImpact: 'Moderate MCS and throughput.' },
+            poor: { condition: '< 5 dB', qosImpact: 'Unstable radio link and higher error risk.', throughputImpact: 'Low MCS/high retransmissions; poor throughput.' }
+        },
+        'CQI (DL)': {
+            defaultValue: 'Default healthy CQI generally >= 10 (range 0..15).',
+            good: { condition: '>= 10', qosImpact: 'Good perceived quality and stability.', throughputImpact: 'Higher MCS likely; strong throughput potential.' },
+            moderate: { condition: '7 to 9', qosImpact: 'Usable with periodic degradation.', throughputImpact: 'Moderate DL throughput.' },
+            poor: { condition: '< 7', qosImpact: 'Frequent service degradation risk.', throughputImpact: 'Limited DL spectral efficiency.' }
+        },
+        'DL MCS': {
+            defaultValue: 'Default healthy DL MCS should not stay persistently low.',
+            good: { condition: '>= 16 (context/band dependent)', qosImpact: 'Good robustness/efficiency balance.', throughputImpact: 'High payload per RB.' },
+            moderate: { condition: '8 to 15', qosImpact: 'Fair quality under moderate conditions.', throughputImpact: 'Moderate DL efficiency.' },
+            poor: { condition: '< 8', qosImpact: 'Radio robustness mode with degraded UX.', throughputImpact: 'Low throughput per RB.' }
+        },
+        'UL MCS': {
+            defaultValue: 'Default healthy UL MCS should remain in medium/high zone.',
+            good: { condition: '>= 16 (context dependent)', qosImpact: 'Reliable UL behavior.', throughputImpact: 'Good UL efficiency.' },
+            moderate: { condition: '8 to 15', qosImpact: 'Intermittent UL degradation.', throughputImpact: 'Moderate UL throughput.' },
+            poor: { condition: '< 8', qosImpact: 'UL link stress likely.', throughputImpact: 'UL throughput strongly limited.' }
+        },
+        'Code Rate': {
+            defaultValue: 'Default effective coding often around 0.5-0.9 depending on channel/load.',
+            good: { condition: '>= 0.70 (or >= 70%)', qosImpact: 'Good efficiency with manageable error rate.', throughputImpact: 'High payload efficiency.' },
+            moderate: { condition: '0.45 to 0.70 (45-70%)', qosImpact: 'Balanced but variable robustness.', throughputImpact: 'Moderate throughput efficiency.' },
+            poor: { condition: '< 0.45 (45%)', qosImpact: 'Robustness mode due to weak link.', throughputImpact: 'Throughput reduced for same RB allocation.' }
+        },
+        'Rank (RI)': {
+            defaultValue: 'Default single-layer (RI=1) is common; RI>=2 expected in good MIMO conditions.',
+            good: { condition: 'RI >= 2 when radio supports MIMO gain', qosImpact: 'Stable high-capacity behavior.', throughputImpact: 'Higher multi-layer throughput.' },
+            moderate: { condition: 'RI oscillates between 1 and 2', qosImpact: 'Variable radio condition.', throughputImpact: 'Inconsistent throughput gain.' },
+            poor: { condition: 'RI persistently = 1 in strong signal areas', qosImpact: 'Potential MIMO underutilization.', throughputImpact: 'Lost capacity versus multi-layer mode.' }
+        },
+        'Rank/Layers (feedback proxy)': {
+            defaultValue: 'Default layer usage follows channel quality and MIMO support.',
+            good: { condition: '>= 2 layers in good conditions', qosImpact: 'Better stability under load.', throughputImpact: 'Higher peak/average throughput.' },
+            moderate: { condition: 'Alternating 1-2 layers', qosImpact: 'Some variability.', throughputImpact: 'Moderate throughput with fluctuations.' },
+            poor: { condition: 'Mostly 1 layer during good RF windows', qosImpact: 'Capacity not fully utilized.', throughputImpact: 'Lower throughput ceiling.' }
+        },
+        'Allocated RBs': {
+            defaultValue: 'Default grant level should scale with demand and radio quality.',
+            good: { condition: 'Sufficient RB grants for active transfer (e.g. > 15 RB in 10 MHz)', qosImpact: 'Stable user experience under demand.', throughputImpact: 'Scheduler not the primary bottleneck.' },
+            moderate: { condition: 'Partial grants under demand (e.g. 6-15 RB in 10 MHz)', qosImpact: 'Occasional slowdown.', throughputImpact: 'Moderate scheduling limitation.' },
+            poor: { condition: 'Low grants under active demand (e.g. < 6 RB in 10 MHz)', qosImpact: 'Frequent slowdown and queueing.', throughputImpact: 'Strong scheduler/congestion bottleneck.' }
+        },
+        'Allocated RBs UL': {
+            defaultValue: 'Default UL grants should support active upload demand.',
+            good: { condition: 'UL grants scale with demand', qosImpact: 'Reliable UL/app interactivity.', throughputImpact: 'UL not heavily grant-limited.' },
+            moderate: { condition: 'Intermittent UL grant shortage', qosImpact: 'Upload jitter/spikes.', throughputImpact: 'Moderate UL limitation.' },
+            poor: { condition: 'Persistent low UL grants during activity', qosImpact: 'Poor upload quality.', throughputImpact: 'Strong UL throughput cap.' }
+        },
+        'Estimated RB usage': {
+            defaultValue: 'Default estimated usage should align with traffic demand profile.',
+            good: { condition: 'Usage consistent with demand and quality context', qosImpact: 'Predictable service behavior.', throughputImpact: 'No hidden mismatch between demand and radio use.' },
+            moderate: { condition: 'Usage intermittently misaligned with demand', qosImpact: 'Variable responsiveness.', throughputImpact: 'Intermittent throughput inefficiency.' },
+            poor: { condition: 'Low usage during high demand or saturation with low throughput', qosImpact: 'Service degradation likely.', throughputImpact: 'Resource or efficiency bottleneck likely.' }
+        },
+        'BLER DL': {
+            defaultValue: 'Default operational BLER target is often around 10% (vendor/policy dependent).',
+            good: { condition: '< 10%', qosImpact: 'Stable quality and low recovery delay.', throughputImpact: 'Low HARQ overhead; efficient throughput.' },
+            moderate: { condition: '10% to 20%', qosImpact: 'Some quality instability.', throughputImpact: 'Moderate retransmission penalty.' },
+            poor: { condition: '> 20%', qosImpact: 'High instability/drop risk.', throughputImpact: 'Heavy throughput degradation from retransmissions.' }
+        },
+        'BLER UL': {
+            defaultValue: 'Default operational UL BLER target is often around <= 10% (vendor/policy dependent).',
+            good: { condition: '< 10%', qosImpact: 'Stable UL quality and lower delay variance.', throughputImpact: 'UL throughput remains efficient.' },
+            moderate: { condition: '10% to 20%', qosImpact: 'Intermittent UL instability and jitter.', throughputImpact: 'Moderate UL retransmission overhead.' },
+            poor: { condition: '> 20%', qosImpact: 'High UL failure risk and service degradation.', throughputImpact: 'Severe UL throughput reduction and latency impact.' }
+        },
+        'HARQ (proxy)': {
+            defaultValue: 'Default healthy HARQ pressure should stay low and stable.',
+            good: { condition: 'Low NACK/retrans pressure', qosImpact: 'Stable latency and quality.', throughputImpact: 'Minimal HARQ penalty.' },
+            moderate: { condition: 'Intermittent HARQ stress', qosImpact: 'Occasional jitter/stalls.', throughputImpact: 'Moderate throughput loss.' },
+            poor: { condition: 'Persistent HARQ stress', qosImpact: 'Frequent quality degradation.', throughputImpact: 'Strong throughput penalty.' }
+        },
+        'Tx power': {
+            defaultValue: 'Default UL Tx power should remain below sustained near-max operation.',
+            good: { condition: '< 15 dBm (typical urban)', qosImpact: 'Comfortable UL margin.', throughputImpact: 'UL can keep efficient MCS.' },
+            moderate: { condition: '15 to 20 dBm', qosImpact: 'Possible edge/interference stress.', throughputImpact: 'UL efficiency may drop intermittently.' },
+            poor: { condition: '> 20 dBm sustained', qosImpact: 'Coverage-edge behavior likely.', throughputImpact: 'UL throughput and reliability degrade.' }
+        },
+        'Timing Advance': {
+            defaultValue: 'Default TA should be stable; abrupt jumps are more critical than absolute value.',
+            good: { condition: 'Stable TA with small variation', qosImpact: 'Consistent mobility behavior.', throughputImpact: 'No major UL timing-related penalty.' },
+            moderate: { condition: 'Moderate TA variation', qosImpact: 'Possible transient instability.', throughputImpact: 'Intermittent UL efficiency loss.' },
+            poor: { condition: 'Large/frequent TA jumps', qosImpact: 'Mobility instability and drop risk.', throughputImpact: 'Transient throughput dips likely.' }
+        },
+        'RRC State': {
+            defaultValue: 'Default for active data should be CONNECTED.',
+            good: { condition: 'CONNECTED during active traffic', qosImpact: 'Stable data continuity.', throughputImpact: 'Throughput flow maintained.' },
+            moderate: { condition: 'Frequent CONNECTED/IDLE transitions', qosImpact: 'Intermittent responsiveness issues.', throughputImpact: 'Session-level throughput variability.' },
+            poor: { condition: 'IDLE/INACTIVE while traffic is expected', qosImpact: 'High service disruption risk.', throughputImpact: 'Severe effective throughput impact.' }
+        },
+        'RRC Re-establishment': {
+            defaultValue: 'Default healthy behavior is no re-establishment events.',
+            good: { condition: 'No re-establishment in active window', qosImpact: 'Stable connectivity.', throughputImpact: 'No recovery interruption cost.' },
+            moderate: { condition: 'Occasional successful re-establishment', qosImpact: 'Short disruptions possible.', throughputImpact: 'Temporary throughput dips.' },
+            poor: { condition: 'Frequent re-establishment / rejects', qosImpact: 'High instability/drop risk.', throughputImpact: 'Major throughput interruptions.' }
+        },
+        'HO execution time': {
+            defaultValue: 'Default HO execution target is short and stable.',
+            good: { condition: '< 80 ms', qosImpact: 'Minimal mobility interruption.', throughputImpact: 'Negligible HO-related throughput loss.' },
+            moderate: { condition: '80 to 150 ms', qosImpact: 'Minor session impact.', throughputImpact: 'Small throughput dip around HO.' },
+            poor: { condition: '> 150 ms', qosImpact: 'Visible service interruption risk.', throughputImpact: 'Significant throughput interruption.' }
+        },
+        'CA Status': {
+            defaultValue: 'Default for CA-capable UE under load is CA Active when conditions allow.',
+            good: { condition: 'Active (>=1 SCell) when traffic demand exists', qosImpact: 'Better capacity headroom.', throughputImpact: 'Higher peak/average throughput potential.' },
+            moderate: { condition: 'Capable but intermittently inactive', qosImpact: 'Variable performance.', throughputImpact: 'Throughput gain from CA is inconsistent.' },
+            poor: { condition: 'Inactive under high demand despite capability', qosImpact: 'Potential capacity limitation.', throughputImpact: 'Missed CA throughput gains.' }
+        },
+        'CA SCell Add/Remove': {
+            defaultValue: 'Default CA control should be stable with limited add/remove churn.',
+            good: { condition: 'Stable SCell configuration', qosImpact: 'Consistent service behavior.', throughputImpact: 'Stable CA throughput gain.' },
+            moderate: { condition: 'Occasional add/remove transitions', qosImpact: 'Mild variability.', throughputImpact: 'Intermittent CA gain fluctuation.' },
+            poor: { condition: 'Frequent add/remove flapping', qosImpact: 'Instability under mobility/load.', throughputImpact: 'Unstable throughput and lower effective gain.' }
+        },
+        'Data Session Start/Stop': {
+            defaultValue: 'Default active transfer should not repeatedly restart in short intervals.',
+            good: { condition: 'Session start/stop aligns with user behavior', qosImpact: 'Normal service continuity.', throughputImpact: 'Throughput reflects real transfer demand.' },
+            moderate: { condition: 'Occasional short start/stop cycles', qosImpact: 'Some continuity interruptions.', throughputImpact: 'Partial loss of sustained throughput.' },
+            poor: { condition: 'Frequent start/stop churn without user intent', qosImpact: 'High perceived instability.', throughputImpact: 'Strong effective throughput degradation.' }
+        },
+        'VoLTE Call Start/End': {
+            defaultValue: 'Default VoLTE call flow should have clean start and clean end with no abnormal release.',
+            good: { condition: 'Normal start/end signaling', qosImpact: 'Stable voice QoS.', throughputImpact: 'Low side-impact on data throughput.' },
+            moderate: { condition: 'Delayed setup or occasional abnormal release', qosImpact: 'Intermittent voice quality issues.', throughputImpact: 'Moderate side impact on data scheduling.' },
+            poor: { condition: 'Frequent call drops/failed setup', qosImpact: 'Poor voice QoS and user dissatisfaction.', throughputImpact: 'Data and control-plane contention may worsen throughput.' }
+        },
+        'PDCP Discard / Reordering': {
+            defaultValue: 'Default target is near-zero discard with controlled reordering.',
+            good: { condition: 'Discard ~0 and low reordering pressure', qosImpact: 'Smooth packet delivery.', throughputImpact: 'No significant PDCP-layer throughput penalty.' },
+            moderate: { condition: 'Intermittent discard/reordering spikes', qosImpact: 'Jitter and occasional quality dips.', throughputImpact: 'Moderate effective throughput impact.' },
+            poor: { condition: 'Sustained high discard/reordering', qosImpact: 'Severe instability and user impact.', throughputImpact: 'Large reduction in effective goodput.' }
+        }
+    };
+
+    function normalizeMetricKeyForQosProfile(metric) {
+        const key = String(metric || '').trim();
+        if (!key) return '';
+        if (key === 'Packet loss') return 'Packet loss (proxy)';
+        if (key === 'Retransmissions') return 'Retransmissions (proxy)';
+        if (key === 'RRC State (decoded exact)') return 'RRC State';
+        return key;
+    }
+
+    function getPointDetailsMetricQosProfile(metric) {
+        const key = normalizeMetricKeyForQosProfile(metric);
+        if (Object.prototype.hasOwnProperty.call(POINT_DETAILS_METRIC_QOS_PROFILES, key)) {
+            return POINT_DETAILS_METRIC_QOS_PROFILES[key];
+        }
+        return POINT_DETAILS_DEFAULT_QOS_PROFILE;
+    }
+
+    function getPointDetailsMetricInfoPayload(row) {
+        const baseMetric = String((row && row.baseLabel) || (row && row.label) || '').trim();
+        const body = POINT_DETAILS_METRIC_INFO[baseMetric] || 'No configured description for this metric in the provided catalog.';
+        return {
+            metric: String((row && row.label) || baseMetric || 'Metric'),
+            baseMetric,
+            body: String(body),
+            qosProfile: getPointDetailsMetricQosProfile(baseMetric)
+        };
+    }
+
+    function formatPointMetricQosProfileHtml(rawProfile) {
+        const p = (rawProfile && typeof rawProfile === 'object') ? rawProfile : POINT_DETAILS_DEFAULT_QOS_PROFILE;
+        const sectionTitle = '<div style="font-size:15px; font-weight:800; color:#f8fafc; margin:14px 0 8px;">12) Default Values And Quality Interpretation</div>';
+        const defaultValue = '<div style="margin:0 0 10px; line-height:1.62;"><span style="font-weight:800; color:#f8fafc;">Default value:</span> <span style="color:#dbeafe;">' + escapeHtml(String(p.defaultValue || POINT_DETAILS_DEFAULT_QOS_PROFILE.defaultValue)) + '</span></div>';
+
+        const bandCard = (title, color, band) => {
+            const b = (band && typeof band === 'object') ? band : {};
+            return (
+                '<div style="border:1px solid #334155; border-left:4px solid ' + color + '; border-radius:10px; background:rgba(15,23,42,0.6); padding:10px 12px; margin:8px 0;">' +
+                '  <div style="font-size:13px; font-weight:800; color:' + color + '; margin-bottom:6px;">' + escapeHtml(title) + '</div>' +
+                '  <div style="margin:2px 0; line-height:1.58;"><span style="font-weight:700; color:#f8fafc;">Range/condition:</span> <span style="color:#dbeafe;">' + escapeHtml(String(b.condition || 'N/A')) + '</span></div>' +
+                '  <div style="margin:2px 0; line-height:1.58;"><span style="font-weight:700; color:#f8fafc;">QoS impact:</span> <span style="color:#dbeafe;">' + escapeHtml(String(b.qosImpact || 'N/A')) + '</span></div>' +
+                '  <div style="margin:2px 0; line-height:1.58;"><span style="font-weight:700; color:#f8fafc;">Throughput impact:</span> <span style="color:#dbeafe;">' + escapeHtml(String(b.throughputImpact || 'N/A')) + '</span></div>' +
+                '</div>'
+            );
+        };
+
+        const legend =
+            '<div style="font-size:11px; color:#93c5fd; margin-top:8px; line-height:1.5;">' +
+            'Interpret with context (bandwidth, load, mobility, service type, and device capability). Thresholds are engineering defaults for fast triage.' +
+            '</div>';
+
+        return sectionTitle +
+            defaultValue +
+            bandCard('Good', '#22c55e', p.good) +
+            bandCard('Moderate', '#f59e0b', p.moderate) +
+            bandCard('Poor', '#ef4444', p.poor) +
+            legend;
+    }
+
+    function formatPointMetricInfoBodyHtml(rawBody) {
+        const lines = String(rawBody || '').split(/\r?\n/);
+        const html = [];
+        for (const lineRaw of lines) {
+            const line = String(lineRaw || '').trim();
+            if (!line) {
+                html.push('<div style="height:9px;"></div>');
+                continue;
+            }
+            if (/^\d+\)\s+/.test(line)) {
+                html.push(
+                    '<div style="font-size:15px; font-weight:800; color:#f8fafc; margin:8px 0 6px;">' +
+                    escapeHtml(line) +
+                    '</div>'
+                );
+                continue;
+            }
+            if (/^[-*]\s+/.test(line)) {
+                const bulletText = line.replace(/^[-*]\s+/, '');
+                html.push(
+                    '<div style="display:flex; gap:8px; align-items:flex-start; margin:4px 0 4px 2px;">' +
+                    '<span style="color:#38bdf8; font-weight:800; line-height:1.5;">•</span>' +
+                    '<span style="color:#dbeafe; line-height:1.6;">' + escapeHtml(bulletText) + '</span>' +
+                    '</div>'
+                );
+                continue;
+            }
+            const kv = line.match(/^([^:]{2,}):\s*(.+)$/);
+            if (kv) {
+                html.push(
+                    '<div style="margin:4px 0; line-height:1.62;">' +
+                    '<span style="font-weight:800; color:#f8fafc;">' + escapeHtml(kv[1] + ':') + '</span> ' +
+                    '<span style="color:#dbeafe;">' + escapeHtml(kv[2]) + '</span>' +
+                    '</div>'
+                );
+                continue;
+            }
+            html.push('<div style="color:#dbeafe; line-height:1.62; margin:4px 0;">' + escapeHtml(line) + '</div>');
+        }
+        return html.join('');
+    }
+
+    function showPointMetricInfoPopup(payload) {
+        const existing = document.getElementById('pointMetricInfoOverlay');
+        if (existing) existing.remove();
+        const info = payload && typeof payload === 'object' ? payload : {};
+        const title = escapeHtml(info.metric || info.baseMetric || 'Metric info');
+        const bodyHtml = formatPointMetricInfoBodyHtml(info.body || 'No details available.');
+        const qosProfileHtml = formatPointMetricQosProfileHtml(info.qosProfile);
+
+        const overlayWrap = document.createElement('div');
+        overlayWrap.innerHTML =
+            '<div id="pointMetricInfoOverlay" style="position:fixed; inset:0; background:linear-gradient(180deg, rgba(2,6,23,0.72) 0%, rgba(2,6,23,0.86) 100%); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; padding:18px; z-index:10040;" onclick="if(event.target===this) this.remove()">' +
+            '  <div id="pointMetricInfoDialog" style="width:920px; height:min(78vh, 760px); max-width:96vw; background:#0b1220; border:1px solid #334155; border-radius:14px; color:#e2e8f0; box-shadow:0 28px 60px rgba(2,6,23,0.58); overflow:hidden; display:flex; flex-direction:column; resize:both; min-width:520px; min-height:300px;">' +
+            '    <div id="pointMetricInfoHeader" style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid #334155; background:linear-gradient(90deg, rgba(30,41,59,0.8) 0%, rgba(15,23,42,0.4) 100%); cursor:grab; user-select:none;">' +
+            '      <div style="font-size:16px; font-weight:800; color:#f8fafc; letter-spacing:0.2px;">' + title + '</div>' +
+            '      <button id="pointMetricInfoCloseBtn" type="button" style="background:#1e293b; color:#e2e8f0; border:1px solid #475569; border-radius:999px; width:32px; height:32px; line-height:28px; font-size:18px; padding:0; cursor:pointer;">×</button>' +
+            '    </div>' +
+            '    <div style="padding:14px 16px 16px; flex:1 1 auto; min-height:0; overflow:auto; background:linear-gradient(180deg, rgba(15,23,42,0.62) 0%, rgba(2,6,23,0.45) 100%);">' +
+            '      <div style="font-size:14px; color:#dbeafe;">' + bodyHtml + qosProfileHtml + '</div>' +
+            '    </div>' +
+            '  </div>' +
+            '</div>';
+        const overlay = overlayWrap.firstElementChild;
+        if (!overlay) return;
+        document.body.appendChild(overlay);
+        const closeBtn = document.getElementById('pointMetricInfoCloseBtn');
+        if (closeBtn) closeBtn.onclick = () => overlay.remove();
+        makePointMetricInfoPopupInteractive(overlay);
+    }
+
+    function makePointMetricInfoPopupInteractive(overlay) {
+        const dialog = document.getElementById('pointMetricInfoDialog');
+        const header = document.getElementById('pointMetricInfoHeader');
+        const closeBtn = document.getElementById('pointMetricInfoCloseBtn');
+        if (!dialog || !header) return;
+        dialog.style.overflow = 'hidden';
+        const storageKey = 'pointMetricInfoPopupState';
+        const parseNum = (v) => {
+            const n = Number.parseFloat(String(v));
+            return Number.isFinite(n) ? n : null;
+        };
+        const persistState = () => {
+            const state = {
+                width: parseNum(dialog.style.width || dialog.offsetWidth),
+                height: parseNum(dialog.style.height || dialog.offsetHeight),
+                dragX: parseNum(dialog.dataset.dragX || '0') || 0,
+                dragY: parseNum(dialog.dataset.dragY || '0') || 0
+            };
+            try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch (_e) {}
+        };
+        const applyState = (state) => {
+            if (!state || typeof state !== 'object') return;
+            const width = parseNum(state.width);
+            const height = parseNum(state.height);
+            const dragX = parseNum(state.dragX) || 0;
+            const dragY = parseNum(state.dragY) || 0;
+            if (width && width >= 520) dialog.style.width = `${width}px`;
+            if (height && height >= 300) dialog.style.height = `${height}px`;
+            dialog.dataset.dragX = String(dragX);
+            dialog.dataset.dragY = String(dragY);
+            dialog.style.transform = `translate(${dragX}px, ${dragY}px)`;
+        };
+        try {
+            const saved = sessionStorage.getItem(storageKey);
+            if (saved) applyState(JSON.parse(saved));
+        } catch (_e) {}
+
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let baseX = Number.parseFloat(dialog.dataset.dragX || '0') || 0;
+        let baseY = Number.parseFloat(dialog.dataset.dragY || '0') || 0;
+
+        const stopDrag = () => {
+            if (!dragging) return;
+            dragging = false;
+            header.style.cursor = 'grab';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', stopDrag);
+            persistState();
+        };
+
+        const onMove = (event) => {
+            if (!dragging) return;
+            const nextX = baseX + (event.clientX - startX);
+            const nextY = baseY + (event.clientY - startY);
+            dialog.dataset.dragX = String(nextX);
+            dialog.dataset.dragY = String(nextY);
+            dialog.style.transform = `translate(${nextX}px, ${nextY}px)`;
+        };
+
+        header.onmousedown = (event) => {
+            if (event.button !== 0) return;
+            if (event.target && event.target.id === 'pointMetricInfoCloseBtn') return;
+            dragging = true;
+            startX = event.clientX;
+            startY = event.clientY;
+            baseX = Number.parseFloat(dialog.dataset.dragX || '0') || 0;
+            baseY = Number.parseFloat(dialog.dataset.dragY || '0') || 0;
+            header.style.cursor = 'grabbing';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', stopDrag);
+            event.preventDefault();
+        };
+
+        header.ondblclick = (event) => {
+            event.preventDefault();
+            dialog.style.width = '920px';
+            dialog.style.height = `${Math.min(Math.round(window.innerHeight * 0.78), 760)}px`;
+            dialog.dataset.dragX = '0';
+            dialog.dataset.dragY = '0';
+            dialog.style.transform = 'translate(0px, 0px)';
+            persistState();
+        };
+
+        if (typeof ResizeObserver === 'function') {
+            const ro = new ResizeObserver(() => persistState());
+            ro.observe(dialog);
+            overlay.__metricInfoResizeObserver = ro;
+        } else {
+            dialog.addEventListener('mouseup', persistState);
+        }
+
+        const cleanup = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', stopDrag);
+            if (overlay.__metricInfoResizeObserver) {
+                try { overlay.__metricInfoResizeObserver.disconnect(); } catch (_e) {}
+                overlay.__metricInfoResizeObserver = null;
+            } else {
+                dialog.removeEventListener('mouseup', persistState);
+            }
+            persistState();
+        };
+        if (closeBtn) {
+            const oldClose = closeBtn.onclick;
+            closeBtn.onclick = () => {
+                cleanup();
+                if (typeof oldClose === 'function') oldClose();
+                else overlay.remove();
+            };
+        }
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) cleanup();
+        });
+    }
+
+    function bindPointDetailsMetricInfoBadges(contentEl) {
+        if (!contentEl || contentEl.dataset.metricInfoBound === '1') return;
+        contentEl.dataset.metricInfoBound = '1';
+        contentEl.addEventListener('click', (event) => {
+            const badge = event && event.target && typeof event.target.closest === 'function'
+                ? event.target.closest('.metric-info-badge')
+                : null;
+            if (!badge) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const packed = String(badge.getAttribute('data-metric-info') || '');
+            let payload = null;
+            try {
+                payload = JSON.parse(decodeURIComponent(packed));
+            } catch (_e) {
+                payload = { metric: badge.getAttribute('data-metric-label') || 'Metric', body: 'Unable to parse metric details.' };
+            }
+            showPointMetricInfoPopup(payload);
+        });
     }
 
     // Global function to update the Floating Info Panel (Single Point)
@@ -8361,6 +11838,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const headerDom = document.getElementById('infoPanelHeader'); // GET HEADER
 
             if (!panel || !content) return;
+            bindPointDetailsMetricInfoBadges(content);
             window.__activePointLog = getOwningLogForPoint(p, contextLog || window.__activePointLog);
 
             if (panel.style.display !== 'block') panel.style.display = 'block';
@@ -8387,6 +11865,13 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 if (closeBtn) headerDom.insertBefore(toggleBtn, closeBtn);
                 else headerDom.appendChild(toggleBtn);
             }
+
+            const showLteSettings = pointDetailsIsLtePoint(p, window.__activePointLog);
+            upsertPointDetailsLteSettingsButton(headerDom, showLteSettings, () => {
+                window.openDtLteEpisodeSettings({
+                    onSave: () => window.updateFloatingInfoPanel(p, logColor, contextLog || window.__activePointLog)
+                });
+            });
 
             // 3. Select Generator based on Mode
             const mode = window.pointDetailsMode || 'log'; // Default to log if undefined
@@ -8432,6 +11917,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     // NEW: Multi-Layer Info Panel
     // --- NEW: Toggle Logic ---
     window.pointDetailsMode = 'log'; // 'simple' or 'log'
+    window.__pointDetailsNeighborSourceFilter = String(window.__pointDetailsNeighborSourceFilter || 'all').toLowerCase() === 'decoded_configured'
+        ? 'decoded_configured'
+        : 'all';
 
     window.togglePointDetailsMode = () => {
         window.pointDetailsMode = window.pointDetailsMode === 'simple' ? 'log' : 'simple';
@@ -8447,6 +11935,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     window.updateFloatingInfoPanelMulti(window.lastMultiHits);
                 }
             } catch (e) { console.error(e); }
+        }
+    };
+    window.togglePointDetailsNeighborSourceFilter = (event) => {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+        const cur = String(window.__pointDetailsNeighborSourceFilter || 'all').toLowerCase();
+        window.__pointDetailsNeighborSourceFilter = (cur === 'decoded_configured') ? 'all' : 'decoded_configured';
+        if (window.lastMultiHits && typeof window.updateFloatingInfoPanelMulti === 'function') {
+            window.updateFloatingInfoPanelMulti(window.lastMultiHits);
         }
     };
 
@@ -8479,11 +11975,48 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         return logs.find(inLog) || null;
     }
 
-    function extractLteTrpServingAndNeighbors(point) {
+    function extractLteTrpServingAndNeighbors(point, activeLog = null) {
         const toNumIfFinite = (v) => {
             if (v === null || v === undefined || v === '') return null;
             const n = Number(v);
             return Number.isFinite(n) ? n : null;
+        };
+        const toInt = (v) => {
+            const n = toNumIfFinite(v);
+            return Number.isFinite(n) ? Math.round(n) : null;
+        };
+        const toTsMs = (v) => {
+            if (Number.isFinite(Number(v))) return Number(v);
+            const t = pointDetailsTsMs(v);
+            return Number.isFinite(t) ? t : null;
+        };
+        const allowedEarfcnSet = (() => {
+            // Default operator EARFCNs for this project; can be extended at runtime via window.__lteAllowedEarfcn.
+            const out = new Set([1320, 6300, 3050, 1350, 550, 525]);
+            const extra = (typeof window !== 'undefined' && Array.isArray(window.__lteAllowedEarfcn))
+                ? window.__lteAllowedEarfcn
+                : [];
+            extra.forEach((v) => {
+                const n = toInt(v);
+                if (Number.isFinite(n)) out.add(n);
+            });
+            return out;
+        })();
+        const isValidLteEarfcn = (v) => {
+            const n = toInt(v);
+            if (!Number.isFinite(n)) return false;
+            return !allowedEarfcnSet.size || allowedEarfcnSet.has(n);
+        };
+        const sanitizeLteEarfcn = (v) => {
+            const n = toInt(v);
+            if (!Number.isFinite(n)) return null;
+            if (isValidLteEarfcn(n)) return n;
+            // Some decoded paths can expose doubled EARFCN values (e.g. 6100 instead of 3050).
+            if (n % 2 === 0) {
+                const half = Math.round(n / 2);
+                if (isValidLteEarfcn(half)) return half;
+            }
+            return null;
         };
         const resolveField = (suffix) => {
             const s = String(suffix || '').toLowerCase();
@@ -8491,17 +12024,891 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (/(^|\.)(pci)$/.test(s) || s.includes('physicalcellid')) return 'pci';
             if (/(^|\.)(rsrp)$/.test(s)) return 'rsrp';
             if (/(^|\.)(rsrq)$/.test(s)) return 'rsrq';
+            if (/(^|\.)(cinr)$/.test(s) || /(^|\.)(sinr)$/.test(s)) return 'sinr';
             if (s.includes('earfcn')) return 'earfcn';
             if (s.includes('cellidentity') || s.endsWith('.cellid') || s.endsWith('cellid')) return 'cellid';
             return null;
         };
         const ensureBucket = (obj, key) => {
-            if (!obj[key]) obj[key] = { pci: null, rsrp: null, rsrq: null, earfcn: null, cellid: null };
+            if (!obj[key]) obj[key] = { pci: null, rsrp: null, rsrq: null, sinr: null, earfcn: null, cellid: null };
             return obj[key];
         };
+        const sourcePriority = (kind) => {
+            const k = String(kind || '').toLowerCase();
+            if (k === 'decoded') return 4;
+            if (k === 'inferred') return 3;
+            if (k === 'estimated') return 2;
+            if (k === 'configured') return 1;
+            return 1;
+        };
+        const normalizeBsicValue = (raw, compact = false) => {
+            if (raw === null || raw === undefined) return '';
+            if (typeof raw === 'object') {
+                const ncc = toInt(raw.networkColourCode ?? raw.ncc ?? raw.NCC);
+                const bcc = toInt(raw.baseStationColourCode ?? raw.bcc ?? raw.BCC);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) {
+                    return compact ? `${ncc}-${bcc}` : `NCC${ncc}-BCC${bcc}`;
+                }
+                const flat = toInt(raw.bsic ?? raw.BSIC ?? raw.value);
+                if (Number.isFinite(flat)) return String(flat);
+                return '';
+            }
+            const txt = String(raw || '').trim();
+            if (!txt || txt.toLowerCase() === '[object object]') return '';
+            const pair = txt.match(/(\d+)\D+(\d+)/);
+            if (pair) {
+                const ncc = Number(pair[1]);
+                const bcc = Number(pair[2]);
+                return compact ? `${ncc}-${bcc}` : `NCC${ncc}-BCC${bcc}`;
+            }
+            return txt;
+        };
+        const bsicToResolverCode = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            if (typeof raw === 'object') {
+                const ncc = toInt(raw.networkColourCode ?? raw.ncc ?? raw.NCC);
+                const bcc = toInt(raw.baseStationColourCode ?? raw.bcc ?? raw.BCC);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) return (ncc * 8) + bcc;
+                const flat = toInt(raw.bsic ?? raw.BSIC ?? raw.value);
+                return Number.isFinite(flat) ? flat : null;
+            }
+            const flat = toInt(raw);
+            if (Number.isFinite(flat)) return flat;
+            const txt = String(raw || '').trim();
+            const pair = txt.match(/(\d+)\D+(\d+)/);
+            if (pair) {
+                const ncc = toInt(pair[1]);
+                const bcc = toInt(pair[2]);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) return (ncc * 8) + bcc;
+            }
+            return null;
+        };
+        const toNeighborKey = (row, fallbackId) => {
+            const rat = String(row && row.rat || 'LTE').trim().toUpperCase();
+            const pci = toInt(row && row.pci);
+            const earfcn = toInt(row && row.earfcn);
+            const psc = toInt(row && row.psc);
+            const uarfcn = toInt(row && row.uarfcn);
+            const arfcn = toInt(row && row.arfcn);
+            const bsic = normalizeBsicValue(row && row.bsic, true);
+            const kind = String(row && row.source_kind || '').toLowerCase();
+            if (rat === 'UTRA') {
+                if (Number.isFinite(psc) && Number.isFinite(uarfcn)) return `utra:psc:${psc}|u:${uarfcn}`;
+                if (Number.isFinite(psc)) return `utra:psc:${psc}`;
+                if (Number.isFinite(uarfcn)) return `utra:u:${uarfcn}`;
+            }
+            if (rat === 'GERAN') {
+                if (Number.isFinite(arfcn) && bsic) return `geran:a:${arfcn}|b:${bsic}`;
+                if (Number.isFinite(arfcn)) return `geran:a:${arfcn}`;
+                if (bsic) return `geran:b:${bsic}`;
+            }
+            // Prefer PCI-only merge key for decoded/estimated rows so decoded identities can inherit KPI metrics.
+            // Keep PCI+EARFCN key for configured rows to avoid collapsing configured inter-frequency relations.
+            if (Number.isFinite(pci)) {
+                if (kind === 'configured' && Number.isFinite(earfcn)) return `pci:${pci}|f:${earfcn}`;
+                return `pci:${pci}`;
+            }
+            if (Number.isFinite(earfcn)) return `f:${earfcn}`;
+            return `k:${fallbackId}`;
+        };
+        const mergeNeighborRows = (rows) => {
+            const map = new Map();
+            (Array.isArray(rows) ? rows : []).forEach((raw, idx) => {
+                const row = {
+                    idx: toInt(raw && raw.idx),
+                    neighborIndex: toInt(raw && raw.neighborIndex),
+                    pci: toInt(raw && raw.pci),
+                    psc: toInt(raw && raw.psc),
+                    uarfcn: toInt(raw && raw.uarfcn),
+                    arfcn: toInt(raw && raw.arfcn),
+                    bsic: normalizeBsicValue(raw && raw.bsic, true) || null,
+                    rsrp: toNumIfFinite(raw && raw.rsrp),
+                    rsrq: toNumIfFinite(raw && raw.rsrq),
+                    rscp: toNumIfFinite(raw && raw.rscp),
+                    ecno: toNumIfFinite(raw && raw.ecno),
+                    rxlev: toNumIfFinite(raw && raw.rxlev),
+                    rxqual: toNumIfFinite(raw && raw.rxqual),
+                    sinr: toNumIfFinite(raw && (raw.sinr ?? raw.cinr)),
+                    earfcn: (() => {
+                        const rat = String(raw && raw.rat || 'LTE').trim().toUpperCase();
+                        if (rat === 'LTE') return sanitizeLteEarfcn(raw && raw.earfcn);
+                        return toInt(raw && raw.earfcn);
+                    })(),
+                    cellid: toInt(raw && raw.cellid),
+                    source_kind: String(raw && raw.source_kind || 'estimated').toLowerCase(),
+                    source_note: String(raw && raw.source_note || '').trim(),
+                    neighbor_type: String(raw && (raw.neighbor_type ?? raw.type) || '').trim(),
+                    rat: String(raw && raw.rat || 'LTE').trim().toUpperCase(),
+                    source_time_ms: toTsMs(raw && raw.source_time_ms),
+                    source_event_name: String(raw && raw.source_event_name || '').trim()
+                };
+                const hasNumericCore = [row.pci, row.psc, row.rsrp, row.rsrq, row.rscp, row.ecno, row.rxlev, row.rxqual, row.sinr, row.earfcn, row.uarfcn, row.arfcn].some(v => Number.isFinite(v));
+                const hasGeranIdentity = Boolean(row.bsic);
+                if (!hasNumericCore && !hasGeranIdentity) return;
+                const key = toNeighborKey(row, idx);
+                const prev = map.get(key);
+                if (!prev) {
+                    map.set(key, row);
+                    return;
+                }
+                const pNew = sourcePriority(row.source_kind);
+                const pOld = sourcePriority(prev.source_kind);
+                const primary = pNew > pOld ? row : prev;
+                const secondary = pNew > pOld ? prev : row;
+                const merged = { ...primary };
+                ['pci', 'psc', 'uarfcn', 'arfcn', 'rsrp', 'rsrq', 'rscp', 'ecno', 'rxlev', 'rxqual', 'sinr', 'earfcn', 'cellid', 'idx', 'neighborIndex', 'source_time_ms'].forEach((k) => {
+                    if (!Number.isFinite(merged[k]) && Number.isFinite(secondary[k])) merged[k] = secondary[k];
+                });
+                if (!merged.bsic && secondary.bsic) merged.bsic = secondary.bsic;
+                // If primary row has no quality but secondary does, trust secondary EARFCN.
+                const mergedHasQuality = Number.isFinite(merged.rsrp) || Number.isFinite(merged.rsrq) || Number.isFinite(merged.rscp) || Number.isFinite(merged.ecno) || Number.isFinite(merged.rxlev) || Number.isFinite(merged.rxqual) || Number.isFinite(merged.sinr);
+                const secondaryHasQuality = Number.isFinite(secondary.rsrp) || Number.isFinite(secondary.rsrq) || Number.isFinite(secondary.rscp) || Number.isFinite(secondary.ecno) || Number.isFinite(secondary.rxlev) || Number.isFinite(secondary.rxqual) || Number.isFinite(secondary.sinr);
+                if (!mergedHasQuality && secondaryHasQuality && Number.isFinite(secondary.earfcn)) {
+                    merged.earfcn = secondary.earfcn;
+                }
+                if (!merged.source_note) merged.source_note = secondary.source_note || '';
+                if (!merged.source_event_name) merged.source_event_name = secondary.source_event_name || '';
+                if (!merged.neighbor_type) merged.neighbor_type = secondary.neighbor_type || '';
+                if (!merged.rat || merged.rat === 'LTE') merged.rat = secondary.rat || merged.rat;
+                map.set(key, merged);
+            });
+            return Array.from(map.values());
+        };
+        const getEventParamPairs = (ev) => {
+            const out = [];
+            if (!ev || typeof ev !== 'object') return out;
+            if (Array.isArray(ev.params)) {
+                ev.params.forEach((p) => {
+                    if (!p || typeof p !== 'object') return;
+                    const k = p.param_id ?? p.param_name ?? p.name ?? p.key;
+                    const v = p.param_value ?? p.value ?? p.value_str;
+                    if (k !== undefined || v !== undefined) out.push([String(k ?? ''), String(v ?? '')]);
+                });
+            }
+            if (ev.params_map && typeof ev.params_map === 'object') {
+                Object.entries(ev.params_map).forEach(([k, v]) => out.push([String(k ?? ''), String(v ?? '')]));
+            }
+            if (ev.properties && typeof ev.properties === 'object') {
+                Object.entries(ev.properties).forEach(([k, v]) => out.push([String(k ?? ''), String(v ?? '')]));
+            }
+            return out;
+        };
+        const getEventParamValueCI = (ev, wantedKey) => {
+            const wanted = String(wantedKey || '').toLowerCase();
+            const pairs = getEventParamPairs(ev);
+            for (const [k, v] of pairs) {
+                if (String(k || '').toLowerCase() === wanted) return v;
+            }
+            return undefined;
+        };
+        const parseFirstNumber = (value) => {
+            const n = toNumIfFinite(value);
+            if (Number.isFinite(n)) return n;
+            const m = String(value || '').match(/-?\d+(?:\.\d+)?/);
+            if (!m) return null;
+            const v = Number(m[0]);
+            return Number.isFinite(v) ? v : null;
+        };
+        const parseJsonSafe = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            if (typeof raw === 'object') return raw;
+            const txt = String(raw || '').trim();
+            if (!txt || txt === '-' || /^n\/?a$/i.test(txt)) return null;
+            try {
+                return JSON.parse(txt);
+            } catch (_e) {
+                return null;
+            }
+        };
+        const classifyMeasField = (rawKey) => {
+            const key = String(rawKey || '').toLowerCase().replace(/\s+/g, '');
+            if (!key) return null;
+            if (key.includes('physicalcellid') || key.includes('physcellid') || key === 'pci' || key.endsWith('.pci')) return 'pci';
+            if (key.includes('earfcn') || key.includes('carrierfreq') || key.includes('frequency') || key.endsWith('.freq') || key.endsWith('_freq')) return 'earfcn';
+            if (key.includes('rsrp')) return 'rsrp';
+            if (key.includes('rsrq')) return 'rsrq';
+            if (key.includes('sinr') || key.includes('cinr')) return 'sinr';
+            return null;
+        };
+        const normalizeMeasFieldValue = (field, rawNum) => {
+            if (!Number.isFinite(rawNum)) return null;
+            if (field === 'pci' || field === 'earfcn') return Math.round(rawNum);
+            if (field === 'rsrp') {
+                // 3GPP quantized rsrpResult (0..97) -> dBm: -140 + value
+                if (rawNum >= 0 && rawNum <= 97) return Number((-140 + rawNum).toFixed(1));
+                return Number(rawNum.toFixed(1));
+            }
+            if (field === 'rsrq') {
+                // 3GPP quantized rsrqResult (0..34) -> dB: -19.5 + 0.5*value
+                if (rawNum >= 0 && rawNum <= 34) return Number((-19.5 + 0.5 * rawNum).toFixed(1));
+                return Number(rawNum.toFixed(1));
+            }
+            return Number(rawNum.toFixed(1));
+        };
+        const extractPairRowIndex = (rawKey) => {
+            const key = String(rawKey || '');
+            if (!key) return null;
+            let m = key.match(/\[(\d+)\]/);
+            if (m) {
+                const idx = toInt(m[1]);
+                if (Number.isFinite(idx)) return idx;
+            }
+            m = key.match(/(?:neighbor|neighbour|cell|result|idx|index)[^\d]{0,8}(\d+)/i);
+            if (m) {
+                const idx = toInt(m[1]);
+                if (Number.isFinite(idx)) return idx;
+            }
+            return null;
+        };
+        const parseMeasRowsFromPairs = (pairs) => {
+            const rows = [];
+            const rowsByIdx = new Map();
+            const ensureIdxRow = (idx) => {
+                if (!rowsByIdx.has(idx)) {
+                    const row = {};
+                    rowsByIdx.set(idx, row);
+                    rows.push(row);
+                }
+                return rowsByIdx.get(idx);
+            };
+            (Array.isArray(pairs) ? pairs : []).forEach(([k, v]) => {
+                const key = String(k || '');
+                const field = classifyMeasField(key);
+                if (!field) return;
+                const low = key.toLowerCase();
+                // Avoid pulling PCell/serving-only rows into neighbor list.
+                if ((low.includes('serving') || low.includes('pcell')) && !low.includes('neigh')) return;
+                const raw = parseFirstNumber(v);
+                const val = normalizeMeasFieldValue(field, raw);
+                if (!Number.isFinite(val)) return;
+                const idx = extractPairRowIndex(key);
+                let row = null;
+                if (Number.isFinite(idx)) {
+                    row = ensureIdxRow(idx);
+                } else {
+                    row = rows.length ? rows[rows.length - 1] : null;
+                    if (!row || (field === 'pci' && Number.isFinite(row.pci)) || (row[field] !== undefined && field !== 'sinr')) {
+                        row = {};
+                        rows.push(row);
+                    }
+                }
+                row[field] = val;
+            });
+            return rows.filter((r) => [r.pci, r.rsrp, r.rsrq, r.sinr, r.earfcn].some((x) => Number.isFinite(x)));
+        };
+        const parseMeasRowsFromText = (text) => {
+            const rows = [];
+            const txt = String(text || '');
+            if (!txt) return rows;
+            let current = {};
+            const pushCurrent = () => {
+                if (![current.pci, current.rsrp, current.rsrq, current.sinr, current.earfcn].some(v => Number.isFinite(v))) return;
+                rows.push(current);
+                current = {};
+            };
+            const tokenRe = /(physical\s*cell\s*id|phys\s*cell\s*id|physcellid|pci|earfcn|carrier\s*freq(?:uency)?|frequency|freq|rsrp(?:result)?(?:-?r\d+)?|rsrq(?:result)?(?:-?r\d+)?|sinr|cinr)[^-\d]{0,24}(-?\d+(?:\.\d+)?)/ig;
+            let m = null;
+            while ((m = tokenRe.exec(txt)) !== null) {
+                const key = String(m[1] || '');
+                const field = classifyMeasField(key);
+                const raw = parseFirstNumber(m[2]);
+                const val = normalizeMeasFieldValue(field, raw);
+                if (!Number.isFinite(val)) continue;
+                if (!field) continue;
+                if (field === 'pci' && Number.isFinite(current.pci)) pushCurrent();
+                current[field] = val;
+            }
+            pushCurrent();
+            return rows;
+        };
+        const isMeasurementReportEvent = (ev) => {
+            const name = String(ev && (ev.event_name || ev.event || ev.message) || '').toLowerCase();
+            if (name.includes('measurementreport')) return true;
+            const pairs = getEventParamPairs(ev);
+            return pairs.some(([k, v]) => /measurementreport/i.test(String(k || '')) || /measurementreport/i.test(String(v || '')));
+        };
+        const parseMeasIdFromEvent = (ev, pairs, texts) => {
+            const fromPairs = (Array.isArray(pairs) ? pairs : []).find(([k]) => /(^|[^a-z0-9])meas\s*id([^a-z0-9]|$)|\bmeasid\b/i.test(String(k || '')));
+            if (fromPairs) {
+                const n = toInt(fromPairs[1]);
+                if (Number.isFinite(n)) return n;
+            }
+            for (const txt of (Array.isArray(texts) ? texts : [])) {
+                const m = String(txt || '').match(/\bmeas\s*id\b\s*[:=]?\s*(\d+)/i) || String(txt || '').match(/\bmeasid\b\s*[:=]?\s*(\d+)/i);
+                if (m) {
+                    const n = toInt(m[1]);
+                    if (Number.isFinite(n)) return n;
+                }
+            }
+            const name = String(ev && (ev.event_name || ev.event || ev.message) || '');
+            const m = name.match(/\bmeas\s*id\b\s*[:=]?\s*(\d+)/i) || name.match(/\bmeasid\b\s*[:=]?\s*(\d+)/i);
+            if (!m) return null;
+            const n = toInt(m[1]);
+            return Number.isFinite(n) ? n : null;
+        };
+        const detectSibFamilyFromTexts = (texts) => {
+            const joined = (Array.isArray(texts) ? texts : []).map((x) => String(x || '').toLowerCase()).join(' | ');
+            if (!joined) return null;
+            if (/\bsib\s*4\b|\bsib4\b/.test(joined)) return { sib: 'SIB4', rat: 'LTE', neighbor_type: 'intra-frequency' };
+            if (/\bsib\s*5\b|\bsib5\b/.test(joined)) return { sib: 'SIB5', rat: 'LTE', neighbor_type: 'inter-frequency' };
+            if (/\bsib\s*6\b|\bsib6\b/.test(joined)) return { sib: 'SIB6', rat: 'UTRA', neighbor_type: 'inter-rat' };
+            if (/\bsib\s*7\b|\bsib7\b/.test(joined)) return { sib: 'SIB7', rat: 'GERAN', neighbor_type: 'inter-rat' };
+            if (/\bsib\s*8\b|\bsib8\b/.test(joined)) return { sib: 'SIB8', rat: 'CDMA2000', neighbor_type: 'inter-rat' };
+            return null;
+        };
+        const inferNeighborType = (rat, earfcn, servingEarfcn, fallbackType) => {
+            const explicit = String(fallbackType || '').toLowerCase();
+            if (explicit.includes('inter-rat')) return 'inter-rat';
+            if (explicit.includes('intra')) return 'intra-frequency';
+            if (explicit.includes('inter')) return 'inter-frequency';
+            if (String(rat || '').toUpperCase() !== 'LTE') return 'inter-rat';
+            if (Number.isFinite(earfcn) && Number.isFinite(servingEarfcn)) {
+                return earfcn === servingEarfcn ? 'intra-frequency' : 'inter-frequency';
+            }
+            return 'unknown';
+        };
+        const buildLteNeighborContextCache = (log) => {
+            if (!log || !Array.isArray(log.events)) return null;
+            const events = log.events;
+            const points = Array.isArray(log.points) ? log.points : [];
+            const lastEventTs = events.length ? toTsMs(events[events.length - 1] && (events[events.length - 1].time ?? events[events.length - 1].timestamp ?? events[events.length - 1].ts)) : null;
+            const sig = `${events.length}:${points.length}:${Number.isFinite(lastEventTs) ? lastEventTs : 0}`;
+            if (log.__lteNeighborContextCache && log.__lteNeighborContextCache._sig === sig) return log.__lteNeighborContextCache;
 
+            const cache = {
+                _sig: sig,
+                servingTimeline: [],
+                measReports: [],
+                configuredRows: [],
+                measObjects: {},
+                reportConfigs: {},
+                measIdMap: {}
+            };
+            const eventsSorted = events
+                .map((ev) => ({ ev, ts: toTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts)) }))
+                .filter((row) => Number.isFinite(row.ts))
+                .sort((a, b) => a.ts - b.ts);
+
+            const servingState = { pci: null, earfcn: null, cellid: null };
+            const pushServingIfChanged = (ts, source) => {
+                if (!Number.isFinite(ts)) return;
+                if (!Number.isFinite(servingState.pci) && !Number.isFinite(servingState.earfcn) && !Number.isFinite(servingState.cellid)) return;
+                const prev = cache.servingTimeline.length ? cache.servingTimeline[cache.servingTimeline.length - 1] : null;
+                if (prev && prev.pci === servingState.pci && prev.earfcn === servingState.earfcn && prev.cellid === servingState.cellid) return;
+                cache.servingTimeline.push({
+                    ts,
+                    pci: Number.isFinite(servingState.pci) ? servingState.pci : null,
+                    earfcn: Number.isFinite(servingState.earfcn) ? servingState.earfcn : null,
+                    cellid: Number.isFinite(servingState.cellid) ? servingState.cellid : null,
+                    source: String(source || 'event')
+                });
+            };
+            const updateMeasConfigHints = (texts, pairs) => {
+                const joined = (Array.isArray(texts) ? texts : []).map((x) => String(x || '')).join(' | ');
+                const tupleRe = /meas\s*id\s*[:=]?\s*(\d+)[^]{0,120}?meas\s*object(?:id)?\s*[:=]?\s*(\d+)[^]{0,120}?report\s*config(?:id)?\s*[:=]?\s*(\d+)/ig;
+                let m = null;
+                while ((m = tupleRe.exec(joined)) !== null) {
+                    const measId = toInt(m[1]);
+                    const measObjectId = toInt(m[2]);
+                    const reportConfigId = toInt(m[3]);
+                    if (Number.isFinite(measId) && Number.isFinite(measObjectId) && Number.isFinite(reportConfigId)) {
+                        cache.measIdMap[String(measId)] = { measObjectId, reportConfigId };
+                    }
+                }
+                const objRe = /meas\s*object(?:id)?\s*[:=]?\s*(\d+)[^]{0,200}?(?:earfcn|carrier\s*freq(?:uency)?|carrierfreq)\s*[:=]?\s*(\d+)/ig;
+                while ((m = objRe.exec(joined)) !== null) {
+                    const objId = toInt(m[1]);
+                    const earfcn = sanitizeLteEarfcn(m[2]);
+                    if (Number.isFinite(objId) && Number.isFinite(earfcn)) {
+                        cache.measObjects[String(objId)] = { rat: 'LTE', earfcn };
+                    }
+                }
+                const repRe = /report\s*config(?:id)?\s*[:=]?\s*(\d+)[^]{0,160}?(event\s*a[1-5])/ig;
+                while ((m = repRe.exec(joined)) !== null) {
+                    const repId = toInt(m[1]);
+                    const eventType = String(m[2] || '').toUpperCase().replace(/\s+/g, '');
+                    if (Number.isFinite(repId)) cache.reportConfigs[String(repId)] = { eventType };
+                }
+                const getObjValByRegex = (obj, regex) => {
+                    if (!obj || typeof obj !== 'object') return undefined;
+                    const keys = Object.keys(obj);
+                    for (let i = 0; i < keys.length; i++) {
+                        const key = String(keys[i] || '');
+                        if (regex.test(key)) return obj[keys[i]];
+                    }
+                    return undefined;
+                };
+                const detectEventTypeFromNode = (node) => {
+                    if (!node || typeof node !== 'object') return null;
+                    const txt = JSON.stringify(node);
+                    const mEvt = txt.match(/eventA([1-5])/i);
+                    if (mEvt) return `EVENTA${mEvt[1]}`;
+                    return null;
+                };
+                const detectRatFromNode = (node) => {
+                    if (!node || typeof node !== 'object') return 'LTE';
+                    const txt = JSON.stringify(node).toLowerCase();
+                    if (txt.includes('measobjectutra') || txt.includes('"utra"')) return 'UTRA';
+                    if (txt.includes('measobjectgeran') || txt.includes('"geran"')) return 'GERAN';
+                    if (txt.includes('measobjectcdma2000') || txt.includes('cdma2000')) return 'CDMA2000';
+                    return 'LTE';
+                };
+                const extractConfiguredPcisFromNode = (node, depth = 0) => {
+                    if (depth > 10 || !node || typeof node !== 'object') return [];
+                    const out = [];
+                    const pushPci = (v) => {
+                        const n = toInt(v);
+                        if (!Number.isFinite(n)) return;
+                        if (n < 0 || n > 503) return;
+                        out.push(n);
+                    };
+                    if (Array.isArray(node)) {
+                        node.forEach((child) => {
+                            extractConfiguredPcisFromNode(child, depth + 1).forEach((pci) => pushPci(pci));
+                        });
+                        return Array.from(new Set(out));
+                    }
+                    Object.entries(node).forEach(([k, v]) => {
+                        const key = String(k || '').toLowerCase();
+                        if (key === 'physcellid' || key.endsWith('.physcellid') || key.includes('physicalcellid')) {
+                            pushPci(v);
+                        }
+                        if (key.includes('cellstoaddmodlist') || key.includes('cellsforwhich')) {
+                            extractConfiguredPcisFromNode(v, depth + 1).forEach((pci) => pushPci(pci));
+                        }
+                    });
+                    return Array.from(new Set(out));
+                };
+                const findFirstNumericByKeyRegex = (node, keyRegex, depth = 0) => {
+                    if (depth > 10 || !node || typeof node !== 'object') return null;
+                    if (Array.isArray(node)) {
+                        for (let i = 0; i < node.length; i++) {
+                            const v = findFirstNumericByKeyRegex(node[i], keyRegex, depth + 1);
+                            if (Number.isFinite(v)) return v;
+                        }
+                        return null;
+                    }
+                    const keys = Object.keys(node);
+                    for (let i = 0; i < keys.length; i++) {
+                        const k = String(keys[i] || '');
+                        if (!keyRegex.test(k)) continue;
+                        const n = toInt(node[keys[i]]);
+                        if (Number.isFinite(n)) return n;
+                    }
+                    for (let i = 0; i < keys.length; i++) {
+                        const v = findFirstNumericByKeyRegex(node[keys[i]], keyRegex, depth + 1);
+                        if (Number.isFinite(v)) return v;
+                    }
+                    return null;
+                };
+                const ingestMeasConfigJson = (jsonObj) => {
+                    const walk = (node, depth = 0) => {
+                        if (depth > 12 || !node || typeof node !== 'object') return;
+                        if (Array.isArray(node)) {
+                            node.forEach((child) => walk(child, depth + 1));
+                            return;
+                        }
+                        const measId = toInt(getObjValByRegex(node, /^measId(?:[-_a-z0-9]*)?$/i));
+                        const measObjectId = toInt(getObjValByRegex(node, /measObjectId/i));
+                        const reportConfigId = toInt(getObjValByRegex(node, /reportConfigId/i));
+                        if (Number.isFinite(measId) && Number.isFinite(measObjectId) && Number.isFinite(reportConfigId)) {
+                            cache.measIdMap[String(measId)] = { measObjectId, reportConfigId };
+                        }
+                        const objId = Number.isFinite(measObjectId) ? measObjectId : toInt(getObjValByRegex(node, /measObjectId/i));
+                        if (Number.isFinite(objId)) {
+                            const rat = detectRatFromNode(node);
+                            const earfcnDirect = sanitizeLteEarfcn(getObjValByRegex(node, /earfcn|carrier.?freq/i));
+                            const earfcnDeep = Number.isFinite(earfcnDirect) ? earfcnDirect : sanitizeLteEarfcn(findFirstNumericByKeyRegex(node, /earfcn|carrier.?freq/i));
+                            const configuredPcis = extractConfiguredPcisFromNode(node);
+                            if (rat !== 'LTE' || Number.isFinite(earfcnDeep)) {
+                                const prev = cache.measObjects[String(objId)] || {};
+                                const prevCells = Array.isArray(prev.cells) ? prev.cells : [];
+                                cache.measObjects[String(objId)] = {
+                                    rat: rat || prev.rat || 'LTE',
+                                    earfcn: Number.isFinite(earfcnDeep) ? earfcnDeep : (Number.isFinite(prev.earfcn) ? prev.earfcn : null),
+                                    cells: Array.from(new Set([...prevCells, ...configuredPcis]))
+                                };
+                            } else if (configuredPcis.length) {
+                                const prev = cache.measObjects[String(objId)] || {};
+                                const prevCells = Array.isArray(prev.cells) ? prev.cells : [];
+                                cache.measObjects[String(objId)] = {
+                                    ...prev,
+                                    rat: prev.rat || rat || 'LTE',
+                                    cells: Array.from(new Set([...prevCells, ...configuredPcis]))
+                                };
+                            }
+                        }
+                        const repId = Number.isFinite(reportConfigId) ? reportConfigId : toInt(getObjValByRegex(node, /reportConfigId/i));
+                        const eventType = detectEventTypeFromNode(node);
+                        if (Number.isFinite(repId) && eventType) {
+                            const prev = cache.reportConfigs[String(repId)] || {};
+                            cache.reportConfigs[String(repId)] = { ...prev, eventType };
+                        }
+                        Object.values(node).forEach((child) => walk(child, depth + 1));
+                    };
+                    walk(jsonObj, 0);
+                };
+                const measCfgPair = (Array.isArray(pairs) ? pairs : []).find(([k]) => String(k || '').toLowerCase() === 'rrc_recfg_meas_config_json');
+                if (measCfgPair && measCfgPair[1] !== undefined && measCfgPair[1] !== null) {
+                    const parsedCfg = parseJsonSafe(measCfgPair[1]);
+                    if (parsedCfg && typeof parsedCfg === 'object') ingestMeasConfigJson(parsedCfg);
+                }
+                (Array.isArray(pairs) ? pairs : []).forEach(([k, v]) => {
+                    const key = String(k || '').toLowerCase();
+                    if (!key.includes('measobject') || !key.includes('earfcn')) return;
+                    const objM = key.match(/(\d+)/);
+                    const objId = objM ? toInt(objM[1]) : null;
+                    const earfcn = sanitizeLteEarfcn(v);
+                    if (Number.isFinite(objId) && Number.isFinite(earfcn)) {
+                        cache.measObjects[String(objId)] = { rat: 'LTE', earfcn };
+                    }
+                });
+            };
+
+            eventsSorted.forEach(({ ev, ts }) => {
+                const pairs = getEventParamPairs(ev);
+                const texts = [String(ev && (ev.event_name || ev.event || ev.message) || '')];
+                pairs.forEach(([k, v]) => {
+                    texts.push(`${k}:${v}`);
+                    texts.push(String(v || ''));
+                });
+                updateMeasConfigHints(texts, pairs);
+
+                const srcPci = toInt(getEventParamValueCI(ev, 'rrc_recfg_src_pci'));
+                const srcEarfcn = sanitizeLteEarfcn(getEventParamValueCI(ev, 'rrc_recfg_src_earfcn'));
+                const tgtPci = toInt(getEventParamValueCI(ev, 'rrc_recfg_tgt_pci'));
+                const tgtEarfcn = sanitizeLteEarfcn(getEventParamValueCI(ev, 'rrc_recfg_tgt_earfcn'));
+                if (Number.isFinite(tgtPci) || Number.isFinite(tgtEarfcn) || Number.isFinite(srcPci) || Number.isFinite(srcEarfcn)) {
+                    if (Number.isFinite(tgtPci)) servingState.pci = tgtPci;
+                    else if (!Number.isFinite(servingState.pci) && Number.isFinite(srcPci)) servingState.pci = srcPci;
+                    if (Number.isFinite(tgtEarfcn)) servingState.earfcn = tgtEarfcn;
+                    else if (!Number.isFinite(servingState.earfcn) && Number.isFinite(srcEarfcn)) servingState.earfcn = srcEarfcn;
+                    pushServingIfChanged(ts, 'rrc_recfg');
+                }
+
+                if (isMeasurementReportEvent(ev)) {
+                    const measNeighborsDecoded = parseJsonSafe(getEventParamValueCI(ev, 'measurement_report_neighbors_json'));
+                    const measServFreqDecoded = parseJsonSafe(getEventParamValueCI(ev, 'measurement_report_servfreq_json'));
+                    const measIdFromParam = toInt(getEventParamValueCI(ev, 'measurement_report_measid'));
+                    const measId = Number.isFinite(measIdFromParam) ? measIdFromParam : parseMeasIdFromEvent(ev, pairs, texts);
+                    const measMap = Number.isFinite(measId) ? cache.measIdMap[String(measId)] : null;
+                    const measObj = measMap ? cache.measObjects[String(measMap.measObjectId)] : null;
+                    const reportCfg = measMap ? cache.reportConfigs[String(measMap.reportConfigId)] : null;
+                    const parsedRows = [];
+                    if (Array.isArray(measNeighborsDecoded) && measNeighborsDecoded.length) {
+                        measNeighborsDecoded.forEach((row) => {
+                            if (!row || typeof row !== 'object') return;
+                            const rat = String(row.rat || 'LTE').toUpperCase();
+                            parsedRows.push({
+                                rat,
+                                pci: toInt(row.pci ?? row.physCellId),
+                                psc: toInt(row.psc),
+                                bsic: normalizeBsicValue(row.bsic, true) || null,
+                                earfcn: rat === 'LTE' ? sanitizeLteEarfcn(row.earfcn ?? row.freq) : null,
+                                uarfcn: toInt(row.uarfcn),
+                                arfcn: toInt(row.arfcn),
+                                rsrp: toNumIfFinite(row.rsrp_dbm ?? row.rsrp),
+                                rsrq: toNumIfFinite(row.rsrq_db ?? row.rsrq),
+                                rscp: toNumIfFinite(row.rscp_dbm ?? row.rscp),
+                                ecno: toNumIfFinite(row.ecno_db ?? row.ecno),
+                                rxlev: toNumIfFinite(row.rxlev_dbm ?? row.rxlev),
+                                rxqual: toNumIfFinite(row.rxqual),
+                                sinr: toNumIfFinite(row.sinr ?? row.cinr)
+                            });
+                        });
+                    }
+                    if (Array.isArray(measServFreqDecoded) && measServFreqDecoded.length) {
+                        measServFreqDecoded.forEach((row) => {
+                            if (!row || typeof row !== 'object') return;
+                            const best = (row.best_neighbor && typeof row.best_neighbor === 'object') ? row.best_neighbor : {};
+                            parsedRows.push({
+                                pci: toInt(best.pci ?? row.pci),
+                                earfcn: sanitizeLteEarfcn(best.earfcn ?? row.earfcn),
+                                rsrp: toNumIfFinite(best.rsrp_dbm ?? best.rsrp),
+                                rsrq: toNumIfFinite(best.rsrq_db ?? best.rsrq),
+                                sinr: toNumIfFinite(best.sinr ?? best.cinr)
+                            });
+                        });
+                    }
+                    if (!parsedRows.length) {
+                        parseMeasRowsFromPairs(pairs).forEach((r) => parsedRows.push(r));
+                        texts.forEach((txt) => {
+                            parseMeasRowsFromText(txt).forEach((r) => parsedRows.push(r));
+                        });
+                    }
+                    const marker = String(getEventParamValueCI(ev, 'rrc_recfg_a3a5_inferred') || '');
+                    if (!parsedRows.length && /measurementreport/i.test(marker)) {
+                        parsedRows.push({
+                            pci: toInt(getEventParamValueCI(ev, 'rrc_recfg_tgt_pci')),
+                            earfcn: sanitizeLteEarfcn(getEventParamValueCI(ev, 'rrc_recfg_tgt_earfcn')),
+                            rsrp: toNumIfFinite(getEventParamValueCI(ev, 'rrc_recfg_a5_neighbor_threshold_est_dbm'))
+                        });
+                    }
+                    const mergedRows = (() => {
+                        if (!parsedRows.length) return [];
+                        const byKey = new Map();
+                        const ordered = [];
+                        parsedRows.forEach((r, i) => {
+                            const key = toNeighborKey(r, `mr:${i}`);
+                            const prev = byKey.get(key);
+                            if (!prev) {
+                                const row = {
+                                    rat: String(r && r.rat || 'LTE').toUpperCase(),
+                                    pci: Number.isFinite(toInt(r && r.pci)) ? toInt(r && r.pci) : null,
+                                    psc: Number.isFinite(toInt(r && r.psc)) ? toInt(r && r.psc) : null,
+                                    bsic: normalizeBsicValue(r && r.bsic, true) || null,
+                                    earfcn: sanitizeLteEarfcn(r && r.earfcn),
+                                    uarfcn: toInt(r && r.uarfcn),
+                                    arfcn: toInt(r && r.arfcn),
+                                    rsrp: toNumIfFinite(r && r.rsrp),
+                                    rsrq: toNumIfFinite(r && r.rsrq),
+                                    rscp: toNumIfFinite(r && r.rscp),
+                                    ecno: toNumIfFinite(r && r.ecno),
+                                    rxlev: toNumIfFinite(r && r.rxlev),
+                                    rxqual: toNumIfFinite(r && r.rxqual),
+                                    sinr: toNumIfFinite(r && (r.sinr ?? r.cinr))
+                                };
+                                if (row.rat !== 'LTE' && !Number.isFinite(row.earfcn)) row.earfcn = null;
+                                byKey.set(key, row);
+                                ordered.push(row);
+                                return;
+                            }
+                            if (!Number.isFinite(prev.earfcn) && Number.isFinite(sanitizeLteEarfcn(r && r.earfcn))) prev.earfcn = sanitizeLteEarfcn(r && r.earfcn);
+                            if (!Number.isFinite(prev.uarfcn) && Number.isFinite(toInt(r && r.uarfcn))) prev.uarfcn = toInt(r && r.uarfcn);
+                            if (!Number.isFinite(prev.arfcn) && Number.isFinite(toInt(r && r.arfcn))) prev.arfcn = toInt(r && r.arfcn);
+                            if (!Number.isFinite(prev.psc) && Number.isFinite(toInt(r && r.psc))) prev.psc = toInt(r && r.psc);
+                            if (!prev.bsic && r && r.bsic) prev.bsic = normalizeBsicValue(r.bsic, true) || prev.bsic;
+                            if (!Number.isFinite(prev.rsrp) && Number.isFinite(toNumIfFinite(r && r.rsrp))) prev.rsrp = toNumIfFinite(r && r.rsrp);
+                            if (!Number.isFinite(prev.rsrq) && Number.isFinite(toNumIfFinite(r && r.rsrq))) prev.rsrq = toNumIfFinite(r && r.rsrq);
+                            if (!Number.isFinite(prev.rscp) && Number.isFinite(toNumIfFinite(r && r.rscp))) prev.rscp = toNumIfFinite(r && r.rscp);
+                            if (!Number.isFinite(prev.ecno) && Number.isFinite(toNumIfFinite(r && r.ecno))) prev.ecno = toNumIfFinite(r && r.ecno);
+                            if (!Number.isFinite(prev.rxlev) && Number.isFinite(toNumIfFinite(r && r.rxlev))) prev.rxlev = toNumIfFinite(r && r.rxlev);
+                            if (!Number.isFinite(prev.rxqual) && Number.isFinite(toNumIfFinite(r && r.rxqual))) prev.rxqual = toNumIfFinite(r && r.rxqual);
+                            if (!Number.isFinite(prev.sinr) && Number.isFinite(toNumIfFinite(r && (r.sinr ?? r.cinr)))) prev.sinr = toNumIfFinite(r && (r.sinr ?? r.cinr));
+                        });
+                        return ordered;
+                    })();
+                    const configuredCandidateRows = (() => {
+                        const out = [];
+                        const measCells = (measObj && Array.isArray(measObj.cells)) ? measObj.cells : [];
+                        const cfgEarfcn = Number.isFinite(measObj && measObj.earfcn)
+                            ? measObj.earfcn
+                            : sanitizeLteEarfcn(servingState.earfcn);
+                        measCells.forEach((pciRaw) => {
+                            const pci = toInt(pciRaw);
+                            if (!Number.isFinite(pci) || pci < 0 || pci > 503) return;
+                            if (Number.isFinite(servingState.pci) && Number.isFinite(cfgEarfcn) &&
+                                pci === servingState.pci && cfgEarfcn === sanitizeLteEarfcn(servingState.earfcn)) {
+                                return;
+                            }
+                            out.push({
+                                pci,
+                                earfcn: Number.isFinite(cfgEarfcn) ? cfgEarfcn : null,
+                                rsrp: null,
+                                rsrq: null,
+                                sinr: null,
+                                configured_only: true
+                            });
+                        });
+                        return out;
+                    })();
+
+                    const decodedNeighbors = [];
+                    const rowsForNeighbors = mergedRows.length ? mergedRows : configuredCandidateRows;
+                    rowsForNeighbors.forEach((r) => {
+                        const rat = String(r && r.rat || (measObj && measObj.rat) || 'LTE').toUpperCase();
+                        const pci = toInt(r && r.pci);
+                        const psc = toInt(r && r.psc);
+                        const bsic = normalizeBsicValue(r && r.bsic, true) || null;
+                        const rsrp = toNumIfFinite(r && r.rsrp);
+                        const rsrq = toNumIfFinite(r && r.rsrq);
+                        const rscp = toNumIfFinite(r && r.rscp);
+                        const ecno = toNumIfFinite(r && r.ecno);
+                        const rxlev = toNumIfFinite(r && r.rxlev);
+                        const rxqual = toNumIfFinite(r && r.rxqual);
+                        const sinr = toNumIfFinite(r && r.sinr);
+                        let earfcn = rat === 'LTE' ? sanitizeLteEarfcn(r && r.earfcn) : null;
+                        let uarfcn = toInt(r && r.uarfcn);
+                        let arfcn = toInt(r && r.arfcn);
+                        if (rat === 'LTE') {
+                            if (!Number.isFinite(earfcn) && measObj && Number.isFinite(measObj.earfcn)) earfcn = measObj.earfcn;
+                            if (!Number.isFinite(earfcn) && Number.isFinite(sanitizeLteEarfcn(servingState.earfcn))) earfcn = sanitizeLteEarfcn(servingState.earfcn);
+                        } else if (rat === 'UTRA') {
+                            if (!Number.isFinite(uarfcn) && Number.isFinite(toInt(measObj && measObj.uarfcn))) uarfcn = toInt(measObj && measObj.uarfcn);
+                        } else if (rat === 'GERAN') {
+                            if (!Number.isFinite(arfcn) && Number.isFinite(toInt(measObj && measObj.arfcn))) arfcn = toInt(measObj && measObj.arfcn);
+                        }
+                        if (rat === 'LTE' && !Number.isFinite(pci) && !Number.isFinite(earfcn)) return;
+                        if (rat === 'UTRA' && !Number.isFinite(psc) && !Number.isFinite(uarfcn)) return;
+                        if (rat === 'GERAN' && !bsic && !Number.isFinite(arfcn)) return;
+                        if (rat === 'LTE' && Number.isFinite(pci) && (pci < 0 || pci > 503)) return;
+                        if (rat === 'LTE' && Number.isFinite(pci) && Number.isFinite(servingState.pci) && pci === servingState.pci &&
+                            Number.isFinite(earfcn) && Number.isFinite(sanitizeLteEarfcn(servingState.earfcn)) &&
+                            earfcn === sanitizeLteEarfcn(servingState.earfcn)) {
+                            return;
+                        }
+                        const neighborType = inferNeighborType(rat, earfcn, servingState.earfcn, reportCfg && reportCfg.eventType);
+                        const isConfiguredOnly = Boolean(r && r.configured_only) || (!Number.isFinite(rsrp) && !Number.isFinite(rsrq) && !Number.isFinite(rscp) && !Number.isFinite(ecno) && !Number.isFinite(rxlev) && !Number.isFinite(rxqual) && !Number.isFinite(sinr));
+                        const note = isConfiguredOnly
+                            ? `MeasurementReport configured neighbor (${neighborType}${Number.isFinite(measId) ? `, measId=${measId}` : ''})`
+                            : `MeasurementReport decoded (${neighborType}${Number.isFinite(measId) ? `, measId=${measId}` : ''})`;
+                        decodedNeighbors.push({
+                            pci,
+                            psc,
+                            bsic,
+                            earfcn,
+                            uarfcn,
+                            arfcn,
+                            rsrp,
+                            rsrq,
+                            rscp,
+                            ecno,
+                            rxlev,
+                            rxqual,
+                            sinr,
+                            rat,
+                            neighbor_type: neighborType,
+                            source_kind: isConfiguredOnly ? 'configured' : 'decoded',
+                            source_note: note,
+                            source_time_ms: ts,
+                            source_event_name: String(ev && (ev.event_name || ev.event || ev.message) || '')
+                        });
+                    });
+                    if (decodedNeighbors.length) {
+                        cache.measReports.push({
+                            ts,
+                            serving: {
+                                pci: Number.isFinite(servingState.pci) ? servingState.pci : null,
+                                earfcn: Number.isFinite(servingState.earfcn) ? servingState.earfcn : null
+                            },
+                            neighbors: decodedNeighbors
+                        });
+                    }
+                }
+
+                const sibInfo = detectSibFamilyFromTexts(texts);
+                if (sibInfo) {
+                    const parsedRows = [];
+                    parseMeasRowsFromPairs(pairs).forEach((r) => parsedRows.push(r));
+                    texts.forEach((txt) => {
+                        parseMeasRowsFromText(txt).forEach((r) => parsedRows.push(r));
+                    });
+                    const seen = new Set();
+                    parsedRows.forEach((r) => {
+                        const pci = toInt(r && r.pci);
+                        const earfcn = sanitizeLteEarfcn(r && r.earfcn);
+                        if (!Number.isFinite(pci) && !Number.isFinite(earfcn)) return;
+                        if (Number.isFinite(pci) && (pci < 0 || pci > 503)) return;
+                        const key = `${Number.isFinite(pci) ? pci : '-'}|${Number.isFinite(earfcn) ? earfcn : '-'}|${sibInfo.sib}`;
+                        if (seen.has(key)) return;
+                        seen.add(key);
+                        cache.configuredRows.push({
+                            pci,
+                            earfcn,
+                            rsrp: null,
+                            rsrq: null,
+                            sinr: null,
+                            rat: sibInfo.rat,
+                            neighbor_type: sibInfo.neighbor_type,
+                            source_kind: 'configured',
+                            source_note: `${sibInfo.sib} configured neighbor (${sibInfo.neighbor_type})`,
+                            source_time_ms: ts,
+                            source_event_name: String(ev && (ev.event_name || ev.event || ev.message) || ''),
+                            serving_pci: Number.isFinite(servingState.pci) ? servingState.pci : null,
+                            serving_earfcn: Number.isFinite(servingState.earfcn) ? servingState.earfcn : null
+                        });
+                    });
+                }
+            });
+
+            log.__lteNeighborContextCache = cache;
+            return cache;
+        };
+        const pointTs = (() => {
+            const byTime = toTsMs(point && point.time);
+            if (Number.isFinite(byTime)) return byTime;
+            const byTs = toTsMs(point && point.timestamp);
+            return Number.isFinite(byTs) ? byTs : null;
+        })();
+        const lteCtxCache = buildLteNeighborContextCache(activeLog);
+        const nearEvents = (Array.isArray(activeLog && activeLog.events) ? activeLog.events : []).filter((ev) => {
+            const ts = toTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts));
+            if (!Number.isFinite(pointTs) || !Number.isFinite(ts)) return false;
+            return Math.abs(ts - pointTs) <= 3000;
+        });
+        const measurementDecodedNeighbors = [];
+        if (lteCtxCache && Number.isFinite(pointTs) && Array.isArray(lteCtxCache.measReports)) {
+            lteCtxCache.measReports.forEach((report) => {
+                const ts = toTsMs(report && report.ts);
+                if (!Number.isFinite(ts) || Math.abs(ts - pointTs) > 3000) return;
+                (Array.isArray(report && report.neighbors) ? report.neighbors : []).forEach((n) => {
+                    const rat = String(n && n.rat || 'LTE').toUpperCase();
+                    measurementDecodedNeighbors.push({
+                        pci: toInt(n && n.pci),
+                        psc: toInt(n && n.psc),
+                        bsic: normalizeBsicValue(n && n.bsic, true) || null,
+                        earfcn: rat === 'LTE' ? sanitizeLteEarfcn(n && n.earfcn) : null,
+                        uarfcn: toInt(n && n.uarfcn),
+                        arfcn: toInt(n && n.arfcn),
+                        rsrp: toNumIfFinite(n && n.rsrp),
+                        rsrq: toNumIfFinite(n && n.rsrq),
+                        rscp: toNumIfFinite(n && n.rscp),
+                        ecno: toNumIfFinite(n && n.ecno),
+                        rxlev: toNumIfFinite(n && n.rxlev),
+                        rxqual: toNumIfFinite(n && n.rxqual),
+                        sinr: toNumIfFinite(n && (n.sinr ?? n.cinr)),
+                        rat,
+                        neighbor_type: String(n && n.neighbor_type || ''),
+                        source_kind: 'decoded',
+                        source_note: String(n && n.source_note || 'MeasurementReport decoded'),
+                        source_time_ms: ts,
+                        source_event_name: String(n && n.source_event_name || '')
+                    });
+                });
+            });
+        }
+        if (!measurementDecodedNeighbors.length) {
+            nearEvents.forEach((ev) => {
+                if (!isMeasurementReportEvent(ev)) return;
+                const eventTs = toTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts));
+                const texts = [];
+                texts.push(String(ev && (ev.event_name || ev.event || ev.message) || ''));
+                getEventParamPairs(ev).forEach(([k, v]) => {
+                    texts.push(`${k}:${v}`);
+                    texts.push(String(v || ''));
+                });
+                const parsedRows = [];
+                texts.forEach((txt) => {
+                    parseMeasRowsFromText(txt).forEach((r) => parsedRows.push(r));
+                });
+                parsedRows.forEach((r) => {
+                    const pci = toInt(r.pci);
+                    const earfcn = sanitizeLteEarfcn(r.earfcn);
+                    const rsrp = toNumIfFinite(r.rsrp);
+                    const rsrq = toNumIfFinite(r.rsrq);
+                    const sinr = toNumIfFinite(r.sinr);
+                    const qualityCount = [rsrp, rsrq, sinr].filter((v) => Number.isFinite(v)).length;
+                    if (!Number.isFinite(pci)) return;
+                    if (pci < 0 || pci > 503) return;
+                    if (qualityCount === 0) return;
+                    const fallbackType = inferNeighborType('LTE', earfcn, null, '');
+                    measurementDecodedNeighbors.push({
+                        pci,
+                        earfcn,
+                        rsrp,
+                        rsrq,
+                        sinr,
+                        rat: 'LTE',
+                        neighbor_type: fallbackType,
+                        source_kind: 'decoded',
+                        source_note: `MeasurementReport decoded (${fallbackType})`,
+                        source_time_ms: eventTs,
+                        source_event_name: String(ev && (ev.event_name || ev.event || ev.message) || '')
+                    });
+                });
+            });
+        }
         const servingByCell = {};
-        const neighborsByCell = {};
         const sources = [point, point && point.properties];
         sources.forEach((src) => {
             if (!src || typeof src !== 'object') return;
@@ -8515,22 +12922,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     if (!field) return;
                     const bucket = ensureBucket(servingByCell, idx);
                     const n = toNumIfFinite(rawValue);
-                    bucket[field] = n !== null ? n : bucket[field];
-                    return;
-                }
-                m = key.match(/radio\.lte\.neighbor\[(\d+)\]\.(.+)$/i);
-                if (m) {
-                    const idx = m[1] || '0';
-                    const field = resolveField(m[2]);
-                    if (!field) return;
-                    const bucket = ensureBucket(neighborsByCell, idx);
-                    const n = toNumIfFinite(rawValue);
-                    bucket[field] = n !== null ? n : bucket[field];
+                    if (field === 'earfcn') {
+                        const ef = sanitizeLteEarfcn(n);
+                        bucket[field] = Number.isFinite(ef) ? ef : bucket[field];
+                    } else {
+                        bucket[field] = n !== null ? n : bucket[field];
+                    }
                 }
             });
         });
 
-        const serving = Object.values(servingByCell)
+        let serving = Object.values(servingByCell)
             .sort((a, b) => {
                 const score = (x) =>
                     (Number.isFinite(x.rsrp) ? 3 : 0) +
@@ -8539,31 +12941,189 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     (Number.isFinite(x.earfcn) ? 1 : 0);
                 return score(b) - score(a);
             })[0] || null;
+        const servingFromTimeline = (() => {
+            if (!lteCtxCache || !Array.isArray(lteCtxCache.servingTimeline) || !lteCtxCache.servingTimeline.length) return null;
+            if (!Number.isFinite(pointTs)) return lteCtxCache.servingTimeline[lteCtxCache.servingTimeline.length - 1] || null;
+            const before = lteCtxCache.servingTimeline.filter((s) => Number.isFinite(s && s.ts) && s.ts <= pointTs);
+            const candidate = before.length ? before[before.length - 1] : lteCtxCache.servingTimeline[0];
+            if (!candidate || !Number.isFinite(candidate.ts)) return null;
+            if (Math.abs(candidate.ts - pointTs) > 60000) return null;
+            return candidate;
+        })();
+        if (servingFromTimeline) {
+            serving = { ...(serving || {}) };
+            if (!Number.isFinite(serving.pci) && Number.isFinite(servingFromTimeline.pci)) serving.pci = servingFromTimeline.pci;
+            if (!Number.isFinite(serving.earfcn) && Number.isFinite(servingFromTimeline.earfcn)) serving.earfcn = servingFromTimeline.earfcn;
+            if (!Number.isFinite(serving.cellid) && Number.isFinite(servingFromTimeline.cellid)) serving.cellid = servingFromTimeline.cellid;
+        }
+        const directServingCellId = toInt(
+            point && (
+                point['Radio.Lte.ServingCell[8].CellIdentity.Complete'] ??
+                point['Radio.Lte.ServingCell[8].CellId'] ??
+                (point.properties && (
+                    point.properties['Radio.Lte.ServingCell[8].CellIdentity.Complete'] ??
+                    point.properties['Radio.Lte.ServingCell[8].CellId']
+                ))
+            )
+        );
+        const directTac = toInt(
+            point && (
+                point['Radio.Lte.ServingCell[8].TrackingAreaCode'] ??
+                point['Radio.Lte.ServingCell[8].Tac'] ??
+                (point.properties && (
+                    point.properties['Radio.Lte.ServingCell[8].TrackingAreaCode'] ??
+                    point.properties['Radio.Lte.ServingCell[8].Tac']
+                ))
+            )
+        );
+        if (serving) {
+            if (!Number.isFinite(serving.cellid) && Number.isFinite(directServingCellId)) serving.cellid = directServingCellId;
+            if (!Number.isFinite(serving.ecgi) && Number.isFinite(serving.cellid)) serving.ecgi = serving.cellid;
+            if (!Number.isFinite(serving.tac) && Number.isFinite(directTac)) serving.tac = directTac;
+            serving.source_kind = 'decoded';
+            serving.source_note = 'Serving anchored from serving metrics + RRC reconfiguration context';
+        }
 
-        const precomputedWindowNeighbors = Array.isArray(point && point.__lteTrpNeighborWindow && point.__lteTrpNeighborWindow.neighbors)
-            ? point.__lteTrpNeighborWindow.neighbors
-                .map((n, idx) => ({
-                    idx: idx + 1,
-                    pci: toNumIfFinite(n && n.pci),
-                    rsrp: toNumIfFinite(n && n.rsrp),
-                    rsrq: toNumIfFinite(n && n.rsrq),
-                    earfcn: toNumIfFinite(n && n.earfcn),
-                    cellid: null
-                }))
-                .filter(n => Number.isFinite(n.rsrp) || Number.isFinite(n.rsrq) || Number.isFinite(n.pci))
-            : [];
+        const configuredNeighbors = (() => {
+            if (!lteCtxCache || !Array.isArray(lteCtxCache.configuredRows) || !lteCtxCache.configuredRows.length) return [];
+            const servingPci = toInt(serving && serving.pci);
+            const servingEarfcn = toInt(serving && serving.earfcn);
+            const bucket = [];
+            lteCtxCache.configuredRows.forEach((row, idx) => {
+                const ts = toTsMs(row && row.source_time_ms);
+                if (!Number.isFinite(ts)) return;
+                if (Number.isFinite(pointTs) && Math.abs(ts - pointTs) > 300000) return;
+                const rowServingPci = toInt(row && row.serving_pci);
+                const rowServingEarfcn = toInt(row && row.serving_earfcn);
+                const servingMatch = (
+                    (Number.isFinite(servingPci) && Number.isFinite(rowServingPci) && servingPci === rowServingPci) ||
+                    (Number.isFinite(servingEarfcn) && Number.isFinite(rowServingEarfcn) && servingEarfcn === rowServingEarfcn)
+                );
+                bucket.push({
+                    idx: Number(idx + 1),
+                    pci: toInt(row && row.pci),
+                    earfcn: sanitizeLteEarfcn(row && row.earfcn),
+                    rsrp: null,
+                    rsrq: null,
+                    sinr: null,
+                    rat: String(row && row.rat || 'LTE').toUpperCase(),
+                    neighbor_type: String(row && row.neighbor_type || ''),
+                    source_kind: 'configured',
+                    source_note: String(row && row.source_note || 'Configured neighbor'),
+                    source_time_ms: ts,
+                    source_event_name: String(row && row.source_event_name || ''),
+                    _serving_match: servingMatch
+                });
+            });
+            if (!bucket.length) return [];
+            const preferred = bucket.filter((r) => r._serving_match);
+            const base = preferred.length ? preferred : bucket;
+            const byKey = new Map();
+            base.forEach((row, idx) => {
+                const key = toNeighborKey(row, `cfg-${idx}`);
+                const prev = byKey.get(key);
+                if (!prev) {
+                    byKey.set(key, row);
+                    return;
+                }
+                const prevDelta = Number.isFinite(pointTs) && Number.isFinite(prev.source_time_ms) ? Math.abs(prev.source_time_ms - pointTs) : Number.MAX_SAFE_INTEGER;
+                const rowDelta = Number.isFinite(pointTs) && Number.isFinite(row.source_time_ms) ? Math.abs(row.source_time_ms - pointTs) : Number.MAX_SAFE_INTEGER;
+                if (rowDelta < prevDelta) byKey.set(key, row);
+            });
+            return Array.from(byKey.values());
+        })();
+        const neighborWindowMetricRows = (() => {
+            const src = point && point.__lteTrpNeighborWindow && Array.isArray(point.__lteTrpNeighborWindow.neighbors)
+                ? point.__lteTrpNeighborWindow.neighbors
+                : [];
+            return src.map((n, idx) => ({
+                idx: idx + 1,
+                pci: toInt(n && n.pci),
+                earfcn: sanitizeLteEarfcn(n && n.earfcn),
+                rsrp: toNumIfFinite(n && n.rsrp),
+                rsrq: toNumIfFinite(n && n.rsrq),
+                sinr: toNumIfFinite(n && (n.cinr ?? n.sinr))
+            })).filter((n) => Number.isFinite(n.pci) || Number.isFinite(n.earfcn) || Number.isFinite(n.rsrp) || Number.isFinite(n.rsrq));
+        })();
+        const estimatedWindowNeighbors = neighborWindowMetricRows.map((n) => ({
+            idx: toInt(n && n.idx),
+            pci: toInt(n && n.pci),
+            earfcn: sanitizeLteEarfcn(n && n.earfcn),
+            rsrp: toNumIfFinite(n && n.rsrp),
+            rsrq: toNumIfFinite(n && n.rsrq),
+            sinr: toNumIfFinite(n && n.sinr),
+            rat: 'LTE',
+            neighbor_type: inferNeighborType('LTE', toInt(n && n.earfcn), toInt(serving && serving.earfcn), ''),
+            source_kind: 'estimated',
+            source_note: 'Neighbor[64] bucket+order pairing',
+            source_time_ms: pointTs,
+            source_event_name: ''
+        }));
 
-        const neighborsBase = precomputedWindowNeighbors.length
-            ? precomputedWindowNeighbors
-            : Object.entries(neighborsByCell)
-                .map(([idx, n]) => ({ idx: Number(idx), ...n }))
-                .filter(n => Number.isFinite(n.rsrp) || Number.isFinite(n.rsrq) || Number.isFinite(n.pci));
+        const hybridNeighbors = mergeNeighborRows([
+            ...measurementDecodedNeighbors,
+            ...configuredNeighbors,
+            ...estimatedWindowNeighbors
+        ]);
+
+        const neighborsBase = hybridNeighbors.map((n) => {
+            const out = { ...n };
+            const rat = String(out && out.rat || 'LTE').toUpperCase();
+            if (rat !== 'LTE') return out;
+            const missRsrp = !Number.isFinite(out.rsrp);
+            const missRsrq = !Number.isFinite(out.rsrq);
+            if (!missRsrp && !missRsrq) return out;
+            if (!neighborWindowMetricRows.length) return out;
+            const candidates = neighborWindowMetricRows.filter((w) => {
+                if (Number.isFinite(out.pci) && Number.isFinite(w.pci) && out.pci !== w.pci) return false;
+                if (Number.isFinite(out.earfcn) && Number.isFinite(w.earfcn) && out.earfcn !== w.earfcn) return false;
+                return true;
+            });
+            const pickPool = candidates.length ? candidates : neighborWindowMetricRows.filter((w) => Number.isFinite(out.pci) && Number.isFinite(w.pci) && out.pci === w.pci);
+            if (!pickPool.length) return out;
+            const best = pickPool
+                .slice()
+                .sort((a, b) => {
+                    const aScore = (Number.isFinite(a.rsrp) ? 3 : 0) + (Number.isFinite(a.rsrq) ? 2 : 0) + (Number.isFinite(a.earfcn) ? 1 : 0);
+                    const bScore = (Number.isFinite(b.rsrp) ? 3 : 0) + (Number.isFinite(b.rsrq) ? 2 : 0) + (Number.isFinite(b.earfcn) ? 1 : 0);
+                    if (bScore !== aScore) return bScore - aScore;
+                    return (a.idx || 0) - (b.idx || 0);
+                })[0];
+            if (!best) return out;
+            if (!Number.isFinite(out.earfcn) && Number.isFinite(best.earfcn)) out.earfcn = best.earfcn;
+            if (missRsrp && Number.isFinite(best.rsrp)) out.rsrp = best.rsrp;
+            if (missRsrq && Number.isFinite(best.rsrq)) out.rsrq = best.rsrq;
+            if (!Number.isFinite(out.sinr) && Number.isFinite(best.sinr)) out.sinr = best.sinr;
+            if ((missRsrp || missRsrq) && (Number.isFinite(best.rsrp) || Number.isFinite(best.rsrq))) {
+                out.source_note = `${String(out.source_note || '').trim()} + KPI neighbor window metrics`.trim();
+            }
+            const hasQuality = Number.isFinite(out.rsrp) || Number.isFinite(out.rsrq) || Number.isFinite(out.sinr);
+            if (!hasQuality && String(out.source_kind || '').toLowerCase() === 'decoded') {
+                // Decoded identity without explicit measured quality should be shown as configured context.
+                out.source_kind = 'configured';
+                if (!String(out.source_note || '').trim()) {
+                    out.source_note = 'Configured neighbor identity (no measured RSRP/RSRQ in MeasurementReport)';
+                }
+            }
+            return out;
+        });
 
         const neighbors = neighborsBase
+            .filter((n) => {
+                const rat = String(n && n.rat || 'LTE').toUpperCase();
+                const pci = toInt(n && n.pci);
+                // For LTE point details, keep only neighbors with a concrete PCI.
+                // Rows without PCI come from partial decode contexts and are ambiguous in UI.
+                if (rat === 'LTE' && !Number.isFinite(pci)) return false;
+                return true;
+            })
             .sort((a, b) => {
                 const ra = Number.isFinite(a.rsrp) ? a.rsrp : -999;
                 const rb = Number.isFinite(b.rsrp) ? b.rsrp : -999;
                 if (rb !== ra) return rb - ra;
+                const pa = sourcePriority(a.source_kind);
+                const pb = sourcePriority(b.source_kind);
+                if (pb !== pa) return pb - pa;
                 return (a.idx || 0) - (b.idx || 0);
             });
 
@@ -8650,7 +13210,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         }
 
         // TRP LTE override: extract serving + neighbors from decoded LTE metric keys at this timestamp.
-        const lteTrpCtx = (isTrpPoint && isLTE) ? extractLteTrpServingAndNeighbors(p) : null;
+        const lteTrpCtx = (isTrpPoint && isLTE) ? extractLteTrpServingAndNeighbors(p, activeLog) : null;
         if (lteTrpCtx && lteTrpCtx.serving) {
             const sv = lteTrpCtx.serving;
             if (Number.isFinite(sv.pci)) sSC = sv.pci;
@@ -8677,6 +13237,10 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             return undefined;
         };
+        const servingSourceHint = String(getValCI('Serving Source') || '');
+        const showDualServing = /mimomeas/i.test(servingSourceHint);
+        const cellServingScForDedup = getValCI('CELLMEAS Serving SC') ?? getValCI('Serving SC');
+        const cellServingFreqForDedup = getValCI('CELLMEAS Serving Freq') ?? getValCI('Serving Freq') ?? getValCI('Freq') ?? sFreq;
         const findByKeyPattern = (obj, predicate) => {
             if (!obj || typeof obj !== 'object') return undefined;
             const keys = Object.keys(obj);
@@ -8695,6 +13259,47 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const n = Number(v);
             if (!Number.isFinite(n)) return null;
             return Math.round(n);
+        };
+        const normalizeBsicValue = (raw, compact = false) => {
+            if (raw === null || raw === undefined) return '';
+            if (typeof raw === 'object') {
+                const ncc = parseFiniteInt(raw.networkColourCode ?? raw.ncc ?? raw.NCC);
+                const bcc = parseFiniteInt(raw.baseStationColourCode ?? raw.bcc ?? raw.BCC);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) {
+                    return compact ? `${ncc}-${bcc}` : `NCC${ncc}-BCC${bcc}`;
+                }
+                const flat = parseFiniteInt(raw.bsic ?? raw.BSIC ?? raw.value);
+                return Number.isFinite(flat) ? String(flat) : '';
+            }
+            const txt = String(raw || '').trim();
+            if (!txt || txt.toLowerCase() === '[object object]') return '';
+            const pair = txt.match(/(\d+)\D+(\d+)/);
+            if (pair) {
+                const ncc = Number(pair[1]);
+                const bcc = Number(pair[2]);
+                return compact ? `${ncc}-${bcc}` : `NCC${ncc}-BCC${bcc}`;
+            }
+            return txt;
+        };
+        const bsicToResolverCode = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            if (typeof raw === 'object') {
+                const ncc = parseFiniteInt(raw.networkColourCode ?? raw.ncc ?? raw.NCC);
+                const bcc = parseFiniteInt(raw.baseStationColourCode ?? raw.bcc ?? raw.BCC);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) return (ncc * 8) + bcc;
+                const flat = parseFiniteInt(raw.bsic ?? raw.BSIC ?? raw.value);
+                return Number.isFinite(flat) ? flat : null;
+            }
+            const flat = parseFiniteInt(raw);
+            if (Number.isFinite(flat)) return flat;
+            const txt = String(raw || '').trim();
+            const pair = txt.match(/(\d+)\D+(\d+)/);
+            if (pair) {
+                const ncc = parseFiniteInt(pair[1]);
+                const bcc = parseFiniteInt(pair[2]);
+                if (Number.isFinite(ncc) && Number.isFinite(bcc)) return (ncc * 8) + bcc;
+            }
+            return null;
         };
         const pointLteEci = (() => {
             const direct = [
@@ -8827,8 +13432,30 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const n = Number(s);
             return Number.isFinite(n) ? String(n) : s.toLowerCase();
         };
-        const servingScKey = normalizeCellKeyPart(sSC);
-        const servingFreqKey = normalizeCellKeyPart(sFreq);
+        const normalizeNeighborRat = (v) => {
+            const raw = String(v || '').trim().toUpperCase();
+            if (!raw) return null;
+            if (raw.includes('GERAN')) return 'GERAN';
+            if (raw.includes('UTRA') || raw.includes('WCDMA') || raw.includes('UMTS')) return 'UTRA';
+            if (raw.includes('LTE') || raw.includes('EUTRA') || raw.includes('E-UTRA')) return 'LTE';
+            return raw;
+        };
+        const inferNeighborRat = (n) => {
+            if (!n || typeof n !== 'object') return 'LTE';
+            const direct = normalizeNeighborRat(n.rat);
+            if (direct) return direct;
+            if (Number.isFinite(Number(n.uarfcn)) || Number.isFinite(Number(n.psc))) return 'UTRA';
+            if (Number.isFinite(Number(n.arfcn)) || Boolean(normalizeBsicValue(n.bsic, true))) return 'GERAN';
+            return 'LTE';
+        };
+        const ratSortRank = (rat) => {
+            if (rat === 'LTE') return 0;
+            if (rat === 'UTRA') return 1;
+            if (rat === 'GERAN') return 2;
+            return 3;
+        };
+        const servingScKey = normalizeCellKeyPart(showDualServing ? cellServingScForDedup : sSC);
+        const servingFreqKey = normalizeCellKeyPart(showDualServing ? cellServingFreqForDedup : sFreq);
         const isServingEquivalentNeighbor = (n) => {
             if (!n) return false;
             const nScKey = normalizeCellKeyPart(n.sc);
@@ -8840,32 +13467,69 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             return nFreqKey === servingFreqKey;
         };
 
+        const getNeighborSourceFilter = () => {
+            const raw = String(window.__pointDetailsNeighborSourceFilter || 'all').toLowerCase();
+            return raw === 'decoded_configured' ? 'decoded_configured' : 'all';
+        };
+        const getNeighborSourceFilterLabel = () => (
+            getNeighborSourceFilter() === 'decoded_configured'
+                ? 'Decoded+Configured'
+                : 'All'
+        );
+
         // Neighbors
         let rawNeighbors = [];
         let explicitNeighbors = [];
         let lteTrpNeighbors = [];
 
         if (isLteTrp && lteTrpCtx && Array.isArray(lteTrpCtx.neighbors)) {
-            lteTrpNeighbors = lteTrpCtx.neighbors.map((n, idx) => ({
-                type: 'N' + (idx + 1),
-                sc: Number.isFinite(n.pci) ? n.pci : '-',
-                rsrp: Number.isFinite(n.rsrp) ? n.rsrp : '-',
-                rscp: Number.isFinite(n.rsrp) ? n.rsrp : '-',
-                ecno: Number.isFinite(n.rsrq) ? n.rsrq : '-',
-                freq: Number.isFinite(n.earfcn) ? n.earfcn : '-',
-                cellName: null
-            }));
+                lteTrpNeighbors = lteTrpCtx.neighbors.map((n, idx) => {
+                    const rat = normalizeNeighborRat(n && n.rat) || 'LTE';
+                    const freq = rat === 'LTE'
+                        ? (Number.isFinite(n && n.earfcn) ? n.earfcn : '-')
+                        : (rat === 'UTRA'
+                            ? (Number.isFinite(n && n.uarfcn) ? n.uarfcn : '-')
+                            : (rat === 'GERAN'
+                                ? (Number.isFinite(n && n.arfcn) ? n.arfcn : (Number.isFinite(n && n.bcch) ? n.bcch : '-'))
+                                : '-'));
+                    return {
+                        type: 'N' + (idx + 1),
+                        sc: Number.isFinite(n.pci)
+                            ? n.pci
+                            : (Number.isFinite(n.psc)
+                                ? n.psc
+                                : (normalizeBsicValue(n && n.bsic, true) || '-')),
+                        rsrp: Number.isFinite(n.rsrp) ? n.rsrp : '-',
+                        rsrq: Number.isFinite(n.rsrq) ? n.rsrq : '-',
+                        rscp: Number.isFinite(n.rscp) ? n.rscp : (Number.isFinite(n.rsrp) ? n.rsrp : '-'),
+                        ecno: Number.isFinite(n.ecno) ? n.ecno : (Number.isFinite(n.rsrq) ? n.rsrq : '-'),
+                        rxlev: Number.isFinite(n.rxlev) ? n.rxlev : '-',
+                        rxqual: Number.isFinite(n.rxqual) ? n.rxqual : '-',
+                        sinr: Number.isFinite(n.sinr) ? n.sinr : (Number.isFinite(n.cinr) ? n.cinr : '-'),
+                        freq,
+                        psc: Number.isFinite(n.psc) ? n.psc : null,
+                        uarfcn: Number.isFinite(n.uarfcn) ? n.uarfcn : null,
+                        arfcn: Number.isFinite(n.arfcn) ? n.arfcn : null,
+                        bcch: Number.isFinite(n.bcch) ? n.bcch : null,
+                        bsic: normalizeBsicValue(n && n.bsic, true) || null,
+                        cellName: null,
+                        neighbor_type: String(n && n.neighbor_type || ''),
+                        rat,
+                        source_kind: String(n && n.source_kind || 'estimated').toLowerCase(),
+                        source_note: String(n && n.source_note || '')
+                    };
+                });
         }
 
         // Prefer explicit M/A/D metrics if available (UMTS DT style)
         if (!isLTE) {
-            for (let i = 1; i <= 16; i++) {
-                const m = readNeighborMetric('m', i);
-                if (m) explicitNeighbors.push(m);
-            }
             for (let i = 2; i <= 16; i++) {
                 const a = readNeighborMetric('a', i);
                 if (a) explicitNeighbors.push(a);
+            }
+            for (let i = 1; i <= 16; i++) {
+                const m = readNeighborMetric('m', i);
+                if (m) explicitNeighbors.push(m);
             }
             for (let i = 1; i <= 16; i++) {
                 const d = readNeighborMetric('d', i);
@@ -8874,18 +13538,44 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             // Avoid showing serving cell again as A2/A3/Mx when vendor fields duplicate SC/FREQ.
             explicitNeighbors = explicitNeighbors.filter(n => !isServingEquivalentNeighbor(n));
         }
-        const resolveN = (sc, freq, cellName) => {
-            if (window.resolveSmartSite && (sc !== undefined || freq !== undefined)) {
+        const resolveN = (neighbor) => {
+            const rat = normalizeNeighborRat(neighbor && neighbor.rat) || 'LTE';
+            const psc = parseFiniteInt(neighbor && neighbor.psc);
+            const uarfcn = parseFiniteInt(neighbor && neighbor.uarfcn);
+            const arfcn = parseFiniteInt(neighbor && neighbor.arfcn);
+                const bsicNorm = normalizeBsicValue(neighbor && neighbor.bsic, true) || null;
+                const bsicCode = bsicToResolverCode(neighbor && neighbor.bsic);
+                const lteSc = (neighbor && neighbor.sc !== undefined) ? neighbor.sc : undefined;
+                const lteFreq = (neighbor && neighbor.freq !== undefined) ? neighbor.freq : undefined;
+                const geranBcch = parseFiniteInt(neighbor && neighbor.bcch);
+                const probe = {
+                    sc: rat === 'UTRA'
+                        ? (Number.isFinite(psc) ? psc : lteSc)
+                        : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : lteSc) : lteSc),
+                    freq: rat === 'UTRA'
+                        ? (Number.isFinite(uarfcn) ? uarfcn : lteFreq)
+                        : (rat === 'GERAN' ? (Number.isFinite(arfcn) ? arfcn : (Number.isFinite(geranBcch) ? geranBcch : lteFreq)) : lteFreq),
+                    pci: rat === 'UTRA'
+                        ? (Number.isFinite(psc) ? psc : undefined)
+                        : (rat === 'GERAN' ? (Number.isFinite(bsicCode) ? bsicCode : undefined) : lteSc),
+                psc: Number.isFinite(psc) ? psc : undefined,
+                    uarfcn: Number.isFinite(uarfcn) ? uarfcn : undefined,
+                    arfcn: Number.isFinite(arfcn) ? arfcn : undefined,
+                    bcch: Number.isFinite(geranBcch) ? geranBcch : undefined,
+                    bsic: bsicNorm || undefined,
+                    lat: p.lat,
+                    lng: p.lng,
+                    lac: sLac
+            };
+            if (window.resolveSmartSite && (probe.sc !== undefined || probe.freq !== undefined)) {
                 // Try with current LAC first
-                let nRes = window.resolveSmartSite({
-                    sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng, lac: sLac
-                });
+                let nRes = window.resolveSmartSite(probe);
 
                 // Fallback: Try without LAC (neighbors are often on different LACs)
                 if ((!nRes || nRes.name === 'Unknown') && sLac) {
-                    nRes = window.resolveSmartSite({
-                        sc: sc, freq: freq, pci: sc, lat: p.lat, lng: p.lng
-                    });
+                    const fallbackProbe = { ...probe };
+                    delete fallbackProbe.lac;
+                    nRes = window.resolveSmartSite(fallbackProbe);
                 }
 
                 if (nRes && nRes.name && nRes.name !== 'Unknown') {
@@ -8896,7 +13586,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 }
             }
             return {
-                name: cellName || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null,
+                name: (neighbor && neighbor.cellName) || 'Unknown', rnc: null, cid: null, id: null, lat: null, lng: null,
                 azimuth: null, range: null, tipLat: null, tipLng: null
             };
         };
@@ -8910,11 +13600,17 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 if (sc == sSC && freq == sFreq) return;
 
                 rawNeighbors.push({
-                    sc: sc !== undefined ? sc : '-',
+                    sc: sc !== undefined ? sc : (n.psc !== undefined ? n.psc : (normalizeBsicValue(n.bsic, true) || '-')),
                     rsrp: n.rsrp !== undefined ? n.rsrp : (n.rscp !== undefined ? n.rscp : -140),
                     rscp: n.rscp !== undefined ? n.rscp : -140, // Default low for sort
                     ecno: n.ecno !== undefined ? n.ecno : '-',
-                    freq: n.freq !== undefined ? n.freq : '-',
+                    freq: n.freq !== undefined ? n.freq : (n.earfcn !== undefined ? n.earfcn : (n.uarfcn !== undefined ? n.uarfcn : (n.arfcn !== undefined ? n.arfcn : '-'))),
+                    psc: n.psc,
+                    uarfcn: n.uarfcn,
+                    arfcn: n.arfcn,
+                    bsic: normalizeBsicValue(n.bsic, true) || null,
+                    bcch: n.bcch,
+                    rat: normalizeNeighborRat(n.rat),
                     cellName: n.cellName,
                     type: n.type // Capture type from parser (A2, M1...)
                 });
@@ -8931,6 +13627,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         const sourceNeighbors = (lteTrpNeighbors.length > 0)
             ? lteTrpNeighbors
             : (explicitNeighbors.length > 0 ? explicitNeighbors : rawNeighbors);
+        const filteredByNeighborSource = sourceNeighbors.filter((n) => {
+            const mode = getNeighborSourceFilter();
+            if (mode !== 'decoded_configured') return true;
+            const srcKind = String(n && n.source_kind || '').toLowerCase();
+            if (!srcKind) return true;
+            if (srcKind === 'decoded' || srcKind === 'configured') return true;
+            return false;
+        });
         const neighborSignalLevel = (n) => {
             const rsrp = parseFloat(n && n.rsrp);
             if (!isNaN(rsrp)) return rsrp;
@@ -8938,10 +13642,58 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (!isNaN(rscp)) return rscp;
             return null;
         };
-        const neighborsSource = sourceNeighbors
+        const neighborsSource = filteredByNeighborSource
             .filter(n => !isServingEquivalentNeighbor(n))
+            .filter((n) => {
+                const pci = Number(n && n.sc);
+                const rsrp = Number(n && (n.rsrp ?? n.rscp));
+                const rsrq = Number(n && n.ecno);
+                const sinr = Number(n && n.sinr);
+                const freq = Number(n && n.freq);
+                const srcKind = String(n && n.source_kind || '').toLowerCase();
+                const rat = String(n && n.rat || 'LTE').toUpperCase();
+                const hasInterRatIdentity = (
+                    (rat === 'UTRA' && (Number.isFinite(Number(n && n.psc)) || Number.isFinite(Number(n && n.uarfcn)))) ||
+                    (rat === 'GERAN' && (Boolean(normalizeBsicValue(n && n.bsic, true)) || Number.isFinite(Number(n && n.arfcn))))
+                );
+                if (hasInterRatIdentity) return true;
+                // Avoid noisy freq-only artifacts from loose text parsing.
+                if (Number.isFinite(freq) && (srcKind === 'configured' || rat !== 'LTE')) return true;
+                return Number.isFinite(pci) || Number.isFinite(rsrp) || Number.isFinite(rsrq) || Number.isFinite(sinr);
+            })
             .slice()
             .sort((a, b) => {
+                if (isLTE) {
+                    const ra = inferNeighborRat(a);
+                    const rb = inferNeighborRat(b);
+                    const byRat = ratSortRank(ra) - ratSortRank(rb);
+                    if (byRat !== 0) return byRat;
+                } else {
+                    const typeRank = (t) => {
+                        const pfx = String(t || '').trim().toUpperCase().charAt(0);
+                        if (pfx === 'A') return 0;
+                        if (pfx === 'M') return 1;
+                        if (pfx === 'D') return 2;
+                        return 3;
+                    };
+                    const aType = String(a && a.type || '');
+                    const bType = String(b && b.type || '');
+                    const byType = typeRank(aType) - typeRank(bType);
+                    if (byType !== 0) return byType;
+                    const aPfx = aType.trim().toUpperCase().charAt(0);
+                    const bPfx = bType.trim().toUpperCase().charAt(0);
+                    // Keep A/M vendor ordering, but sort detected neighbors by signal strength.
+                    if (aPfx === 'D' && bPfx === 'D') {
+                        const valA = neighborSignalLevel(a);
+                        const valB = neighborSignalLevel(b);
+                        if (valA === null && valB !== null) return 1;
+                        if (valA !== null && valB === null) return -1;
+                        if (valA !== null && valB !== null && valA !== valB) return valB - valA;
+                    }
+                    const aNum = Number.parseInt(aType.slice(1), 10);
+                    const bNum = Number.parseInt(bType.slice(1), 10);
+                    if (Number.isFinite(aNum) && Number.isFinite(bNum) && aNum !== bNum) return aNum - bNum;
+                }
                 const valA = neighborSignalLevel(a);
                 const valB = neighborSignalLevel(b);
                 if (valA === null && valB === null) return 0;
@@ -8951,10 +13703,47 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             });
 
         const neighbors = neighborsSource.map((n, i) => {
-            const resolved = resolveN(n.sc, n.freq, n.cellName);
+            const resolved = resolveN(n);
+            const rat = inferNeighborRat(n);
+            const displayName = (resolved.name && resolved.name !== 'Unknown')
+                ? resolved.name
+                : (rat !== 'LTE' ? `${rat} Neighbor` : (n.cellName || 'Unknown'));
+            const sourceKindRaw = String(n && n.source_kind || (isLteTrp ? 'inferred' : '')).toLowerCase();
+            const rsrpNum = Number(n && (n.rsrp ?? n.rscp));
+            const rsrqNum = Number(n && n.ecno);
+            const displaySourceKind = (sourceKindRaw === 'decoded' && !Number.isFinite(rsrpNum) && !Number.isFinite(rsrqNum))
+                ? 'configured'
+                : sourceKindRaw;
+            const typeBase = isLteTrp ? ('N' + (i + 1)) : (n.type || ('N' + (i + 1)));
+            const typeDisplay = (isLteTrp && rat !== 'LTE') ? `${typeBase} (${rat})` : typeBase;
+            const bsicDisplay = normalizeBsicValue(n && n.bsic, true) || '-';
+            const bcchDisplay = Number.isFinite(Number(n && n.bcch))
+                ? Number(n.bcch)
+                : (Number.isFinite(Number(n && n.arfcn)) ? Number(n.arfcn) : '-');
+            const scDisplay = rat === 'UTRA'
+                ? (Number.isFinite(Number(n && n.psc)) ? n.psc : (n && n.sc !== undefined ? n.sc : '-'))
+                : (rat === 'GERAN'
+                    ? `${bsicDisplay}/${bcchDisplay}`
+                    : (n && n.sc !== undefined ? n.sc : (Number.isFinite(Number(n && n.psc)) ? n.psc : '-')));
+            const levelDisplay = rat === 'UTRA'
+                ? (Number.isFinite(Number(n && n.rscp)) ? n.rscp : (Number.isFinite(Number(n && n.rsrp)) ? n.rsrp : '-'))
+                : (rat === 'GERAN'
+                    ? (Number.isFinite(Number(n && n.rxlev)) ? n.rxlev : (Number.isFinite(Number(n && n.rscp)) ? n.rscp : '-'))
+                    : (n && n.rscp === -140 ? '-' : n && n.rscp));
+            const qualDisplay = rat === 'UTRA'
+                ? (Number.isFinite(Number(n && n.ecno)) ? n.ecno : (Number.isFinite(Number(n && n.rsrq)) ? n.rsrq : '-'))
+                : (rat === 'GERAN'
+                    ? (Number.isFinite(Number(n && n.rxqual)) ? n.rxqual : '-')
+                    : n && n.ecno);
+            const freqDisplay = rat === 'UTRA'
+                ? (Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : (n && n.freq !== undefined ? n.freq : '-'))
+                : (rat === 'GERAN'
+                    ? (Number.isFinite(Number(n && n.freq)) ? n.freq : (Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : '-'))
+                    : (n && n.freq !== undefined ? n.freq : (Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : (Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : '-'))));
             return {
-                type: n.type || ('N' + (i + 1)),
-                name: resolved.name,
+                type: typeBase,
+                typeDisplay,
+                name: displayName,
                 rnc: resolved.rnc,
                 cid: resolved.cid,
                 id: resolved.id, // Pass ID
@@ -8964,12 +13753,34 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 tipLng: resolved.tipLng,
                 azimuth: resolved.azimuth,
                 range: resolved.range,
-                sc: n.sc,
-                rscp: n.rscp === -140 ? '-' : n.rscp,
-                ecno: n.ecno,
-                freq: n.freq
+                sc: scDisplay,
+                rscp: levelDisplay,
+                ecno: qualDisplay,
+                freq: freqDisplay,
+                psc: Number.isFinite(Number(n && n.psc)) ? n.psc : null,
+                uarfcn: Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : null,
+                arfcn: Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : null,
+                bsic: bsicDisplay,
+                bcch: Number.isFinite(Number(n && n.bcch))
+                    ? Number(n.bcch)
+                    : (Number.isFinite(Number(n && n.arfcn)) ? Number(n.arfcn) : null),
+                rat,
+                source_kind: displaySourceKind,
+                source_note: String(n && n.source_note || '')
             };
         });
+        if (!isLTE && neighbors.length) {
+            let aIdx = 2;
+            let mIdx = 1;
+            let dIdx = 1;
+            neighbors.forEach((n) => {
+                const baseType = String(n && n.type || '').toUpperCase();
+                const prefix = baseType.charAt(0);
+                if (prefix === 'A') n.typeDisplay = `A${aIdx++}`;
+                else if (prefix === 'M') n.typeDisplay = `M${mIdx++}`;
+                else if (prefix === 'D') n.typeDisplay = `D${dIdx++}`;
+            });
+        }
 
         // Build HTML
         let rows = '';
@@ -8981,43 +13792,204 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const safeId = servingRes.id || (servingRes.rnc && servingRes.cid ? servingRes.rnc + '/' + servingRes.cid : '');
             sClickAction = 'onclick="window.highlightAndPan(' + servingRes.lat + ', ' + servingRes.lng + ', \'' + safeId + '\', \'serving\')" style="cursor: pointer; color: #fff; "';
         }
+        const cellServingSc = getValCI('CELLMEAS Serving SC') ?? getValCI('Serving SC');
+        const cellServingRscp = getValCI('CELLMEAS Serving RSCP') ?? getValCI('Serving RSCP') ?? p.level;
+        const cellServingEcno = getValCI('CELLMEAS Serving EcNo') ?? getValCI('Serving EcNo') ?? getValCI('EcNo');
+        const cellServingFreq = getValCI('CELLMEAS Serving Freq') ?? getValCI('Serving Freq') ?? getValCI('Freq') ?? sFreq;
+        const asCellDisplay = (v) => {
+            if (v === undefined || v === null) return '-';
+            const s = String(v).trim();
+            return s ? s : '-';
+        };
+        const asRfDisplay = (v) => {
+            if (v === undefined || v === null) return '-';
+            const n = Number(v);
+            if (Number.isFinite(n)) return n.toFixed(1);
+            const s = String(v).trim();
+            return s ? s : '-';
+        };
+        const hasCellServingSnapshot = [cellServingSc, cellServingRscp, cellServingEcno, cellServingFreq]
+            .some((v) => v !== undefined && v !== null && String(v).trim() !== '');
 
         // Serving Row
         rows += '<tr class="log-row serving-row">' +
-            '<td class="log-cell-type">Serving</td>' +
+            '<td class="log-cell-type">' + (showDualServing ? 'Serving (MIMOMEAS)' : 'Serving') + '</td>' +
             '<td class="log-cell-name"><span class="log-header-serving" ' + sClickAction + '>' + sName + '</span> <span style="color:#666; font-size:10px;">(' + identityLabel + ')</span></td>' +
             '<td class="log-cell-val">' + sSC + '</td>' +
-            '<td class="log-cell-val">' + sRSCP + '</td>' +
-            '<td class="log-cell-val">' + sEcNo + '</td>' +
+            '<td class="log-cell-val">' + asRfDisplay(sRSCP) + '</td>' +
+            '<td class="log-cell-val">' + asRfDisplay(sEcNo) + '</td>' +
             '<td class="log-cell-val">' + sFreq + '</td>' +
             '</tr>';
+        if (showDualServing && hasCellServingSnapshot) {
+            rows += '<tr class="log-row">' +
+                '<td class="log-cell-type" style="color:#93c5fd;">Serving (CELLMEAS)</td>' +
+                '<td class="log-cell-name">' + sName + ' <span style="color:#666; font-size:10px;">(' + identityLabel + ')</span></td>' +
+                '<td class="log-cell-val">' + asCellDisplay(cellServingSc) + '</td>' +
+                '<td class="log-cell-val">' + asRfDisplay(cellServingRscp) + '</td>' +
+                '<td class="log-cell-val">' + asRfDisplay(cellServingEcno) + '</td>' +
+                '<td class="log-cell-val">' + asCellDisplay(cellServingFreq) + '</td>' +
+                '</tr>';
+        }
 
-        neighbors.forEach(n => {
-            let nIdLabel = n.sc + '/' + n.freq;
-            if (n.rnc && n.cid) nIdLabel = n.rnc + '/' + n.cid;
+        const numericOrNull = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const sortedByPrimaryThenSecondaryDesc = (arr, primaryKey, secondaryKey) => (
+            (arr || []).slice().sort((a, b) => {
+                const ap = numericOrNull(a && a[primaryKey]);
+                const bp = numericOrNull(b && b[primaryKey]);
+                if (ap === null && bp !== null) return 1;
+                if (ap !== null && bp === null) return -1;
+                if (ap !== null && bp !== null && ap !== bp) return bp - ap;
+                const as = numericOrNull(a && a[secondaryKey]);
+                const bs = numericOrNull(b && b[secondaryKey]);
+                if (as === null && bs !== null) return 1;
+                if (as !== null && bs === null) return -1;
+                if (as !== null && bs !== null && as !== bs) return bs - as;
+                return String(a && a.name || '').localeCompare(String(b && b.name || ''));
+            })
+        );
+        const buildNeighborIdLabel = (n) => {
+            if (!n) return '-';
+            if (n.rnc && n.cid) return n.rnc + '/' + n.cid;
+            if (n.rat === 'GERAN') return `${n.bsic}/${(n.bcch ?? '-')}`;
+            if (n.rat === 'UTRA') return `${n.sc}/${n.freq}`;
+            return `${n.sc}/${n.freq}`;
+        };
+        const buildNeighborClickAction = (n) => {
+            if (!(n && n.lat && n.lng)) return '';
+            const safeId = n.id || (n.rnc && n.cid ? n.rnc + '/' + n.cid : '');
+            return 'onclick="window.highlightAndPan(' + n.lat + ', ' + n.lng + ', \'' + safeId + '\', \'neighbor\') " style="cursor: pointer; "';
+        };
+        const buildNeighborNameCell = (n) => {
+            const srcKind = String(n && n.source_kind || '').toLowerCase();
+            const srcBadge = srcKind
+                ? ' <span style="color:#94a3b8; font-size:10px;">[' + srcKind + ']</span>'
+                : '';
+            const nClickAction = buildNeighborClickAction(n);
+            return '<span ' + nClickAction + '>' + (n && n.name ? n.name : 'Unknown') + '</span>' + srcBadge + ' <span style="color:#666; font-size:10px;">(' + buildNeighborIdLabel(n) + ')</span>';
+        };
+        const pushSectionHeaderRow = (title, col3, col4, col5, col6) => {
+            rows += '<tr class="log-row">' +
+                '<td colspan="6" style="padding-top:16px; color:#e2e8f0; font-size:15px; font-weight:700;">' + title + '</td>' +
+                '</tr>';
+            rows += '<tr class="log-row" style="border-bottom:1px solid rgba(148,163,184,0.35);">' +
+                '<td class="log-cell-type" style="color:#9fb0c8; font-weight:700;">TYPE</td>' +
+                '<td class="log-cell-name" style="color:#9fb0c8; font-weight:700;">CELL NAME</td>' +
+                '<td class="log-cell-val" style="color:#9fb0c8; font-weight:700;">' + col3 + '</td>' +
+                '<td class="log-cell-val" style="color:#9fb0c8; font-weight:700;">' + col4 + '</td>' +
+                '<td class="log-cell-val" style="color:#9fb0c8; font-weight:700;">' + col5 + '</td>' +
+                '<td class="log-cell-val" style="color:#9fb0c8; font-weight:700;">' + col6 + '</td>' +
+                '</tr>';
+        };
+        const pushNeighborRow = (typeText, nameHtml, c3, c4, c5, c6, typeStyle = '', typeTitle = '') => {
+            rows += '<tr class="log-row">' +
+                '<td class="log-cell-type" style="' + typeStyle + '" title="' + (typeTitle || '') + '">' + typeText + '</td>' +
+                '<td class="log-cell-name">' + nameHtml + '</td>' +
+                '<td class="log-cell-val">' + c3 + '</td>' +
+                '<td class="log-cell-val">' + c4 + '</td>' +
+                '<td class="log-cell-val">' + c5 + '</td>' +
+                '<td class="log-cell-val">' + c6 + '</td>' +
+                '</tr>';
+        };
 
-            let nClickAction = '';
-            /* FIX: Use highlightAndPan */
-            if (n.lat && n.lng) {
-                const safeId = n.id || (n.rnc && n.cid ? n.rnc + '/' + n.cid : '');
-                nClickAction = 'onclick="window.highlightAndPan(' + n.lat + ', ' + n.lng + ', \'' + safeId + '\', \'neighbor\') " style="cursor: pointer; "';
+        if (isLTE) {
+            const lteNeighbors = sortedByPrimaryThenSecondaryDesc(
+                neighbors.filter(n => {
+                    const rat = String(n && n.rat || '').toUpperCase();
+                    return !rat || rat === 'LTE';
+                }),
+                'rscp',
+                'ecno'
+            );
+            const utraNeighbors = sortedByPrimaryThenSecondaryDesc(
+                neighbors.filter(n => String(n && n.rat || '').toUpperCase() === 'UTRA'),
+                'rscp',
+                'ecno'
+            );
+            const geranNeighbors = sortedByPrimaryThenSecondaryDesc(
+                neighbors.filter(n => String(n && n.rat || '').toUpperCase() === 'GERAN'),
+                'rscp',
+                'ecno'
+            );
+
+            lteNeighbors.forEach((n, idx) => {
+                pushNeighborRow(
+                    'N' + (idx + 1),
+                    buildNeighborNameCell(n),
+                    n.sc,
+                    asRfDisplay(n.rscp),
+                    asRfDisplay(n.ecno),
+                    n.freq
+                );
+            });
+
+            if (utraNeighbors.length) {
+                pushSectionHeaderRow('UTRA Neighbor', 'PSC', 'RSCP', 'EcNo', 'FREQ');
+                utraNeighbors.forEach((n, idx) => {
+                    pushNeighborRow(
+                        'N' + (idx + 1),
+                        buildNeighborNameCell(n),
+                        n.sc,
+                        asRfDisplay(n.rscp),
+                        asRfDisplay(n.ecno),
+                        n.freq
+                    );
+                });
             }
 
-            // Color Type D red
-            const typeStyle = n.type.startsWith('D') ? 'color: #DC2626; font-weight: bold;' : '';
-            const typePrefix = (n.type || '').toString().charAt(0);
-            const typeLabel = typePrefix === 'A' ? 'Active' : (typePrefix === 'M' ? 'Monitored' : (typePrefix === 'D' ? 'Detected' : ''));
-            const typeText = typeLabel ? `${n.type} (${typeLabel})` : n.type;
+            if (geranNeighbors.length) {
+                pushSectionHeaderRow('GERAN Neighbor', 'BSIC/BCCH', 'RxLev', 'RxQual', 'FREQ');
+                geranNeighbors.forEach((n, idx) => {
+                    pushNeighborRow(
+                        'N' + (idx + 1),
+                        buildNeighborNameCell(n),
+                        n.sc,
+                        asRfDisplay(n.rscp),
+                        asRfDisplay(n.ecno),
+                        n.freq
+                    );
+                });
+            }
 
-            rows += '<tr class="log-row">' +
-                '<td class="log-cell-type" style="' + typeStyle + '" title="' + (typeLabel || '') + '">' + typeText + '</td>' +
-                '<td class="log-cell-name"><span ' + nClickAction + '>' + n.name + '</span> <span style="color:#666; font-size:10px;">(' + nIdLabel + ')</span></td>' +
-                '<td class="log-cell-val">' + n.sc + '</td>' +
-                '<td class="log-cell-val">' + n.rscp + '</td>' +
-                '<td class="log-cell-val">' + n.ecno + '</td>' +
-                '<td class="log-cell-val">' + n.freq + '</td>' +
-                '</tr>';
-        });
+            if (!lteNeighbors.length && !utraNeighbors.length && !geranNeighbors.length) {
+                rows += '<tr class="log-row">' +
+                    '<td class="log-cell-type">-</td>' +
+                    '<td class="log-cell-name" colspan="5" style="color:#94a3b8;">No neighbors for current source filter</td>' +
+                    '</tr>';
+            }
+        } else {
+            neighbors.forEach(n => {
+                const nClickAction = buildNeighborClickAction(n);
+                const srcKind = String(n && n.source_kind || '').toLowerCase();
+                const srcBadge = srcKind
+                    ? ' <span style="color:#94a3b8; font-size:10px;">[' + srcKind + ']</span>'
+                    : '';
+                let typeStyle = '';
+                let typeLabel = '';
+                let typeText = n.typeDisplay || n.type;
+                typeStyle = (n.type || '').startsWith('D') ? 'color: #DC2626; font-weight: bold;' : '';
+                const typePrefix = (n.type || '').toString().charAt(0);
+                typeLabel = typePrefix === 'A' ? 'Active' : (typePrefix === 'M' ? 'Monitored' : (typePrefix === 'D' ? 'Detected' : ''));
+                const displayType = n.typeDisplay || n.type;
+                typeText = typeLabel ? `${displayType} (${typeLabel})` : displayType;
+                rows += '<tr class="log-row">' +
+                    '<td class="log-cell-type" style="' + typeStyle + '" title="' + (typeLabel || '') + '">' + typeText + '</td>' +
+                    '<td class="log-cell-name"><span ' + nClickAction + '>' + n.name + '</span>' + srcBadge + ' <span style="color:#666; font-size:10px;">(' + buildNeighborIdLabel(n) + ')</span></td>' +
+                    '<td class="log-cell-val">' + n.sc + '</td>' +
+                    '<td class="log-cell-val">' + asRfDisplay(n.rscp) + '</td>' +
+                    '<td class="log-cell-val">' + asRfDisplay(n.ecno) + '</td>' +
+                    '<td class="log-cell-val">' + n.freq + '</td>' +
+                    '</tr>';
+            });
+            if (!neighbors.length) {
+                rows += '<tr class="log-row">' +
+                    '<td class="log-cell-type">-</td>' +
+                    '<td class="log-cell-name" colspan="5" style="color:#94a3b8;">No neighbors for current source filter</td>' +
+                    '</tr>';
+            }
+        }
 
         // ----------------------------------------------------
         // OTHER METRICS (fixed ordered list requested by user)
@@ -9035,78 +14007,378 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             return String(v);
         };
-        const getFromObjCI = (obj, key) => {
-            if (!obj || typeof obj !== 'object') return undefined;
+        const getFromObjCIEntry = (obj, key, sourcePrefix = '') => {
+            if (!obj || typeof obj !== 'object') return null;
             const wanted = String(key || '').toLowerCase();
             const match = Object.keys(obj).find(k => String(k || '').toLowerCase() === wanted);
-            return match ? obj[match] : undefined;
+            if (!match) return null;
+            return { value: obj[match], sourceKey: sourcePrefix ? `${sourcePrefix}${match}` : match };
+        };
+        const getFromObjCI = (obj, key) => {
+            const entry = getFromObjCIEntry(obj, key);
+            return entry ? entry.value : undefined;
         };
         const hasValue = (v) => {
             if (v === undefined || v === null) return false;
-            if (typeof v === 'string' && v.trim() === '') return false;
+            if (typeof v === 'string') {
+                const s = v.trim();
+                if (!s) return false;
+                const low = s.toLowerCase();
+                if (low === 'n/a' || low === 'na' || low === '-' || low === 'nan' || low === 'unknown' || low === 'null' || low === 'undefined') return false;
+            }
             return true;
         };
-        const metricSources = [p, p?.properties, p?.parsed, p?.parsed?.serving];
+        const getValCIEntry = (key) => {
+            if (p && p[key] !== undefined) return { value: p[key], sourceKey: key };
+            if (p?.properties && typeof p.properties === 'object') {
+                const match = Object.keys(p.properties).find(k => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+                if (match) return { value: p.properties[match], sourceKey: match };
+            }
+            return null;
+        };
+        const metricSources = [
+            { obj: p, sourcePrefix: '' },
+            { obj: p?.properties, sourcePrefix: '' },
+            { obj: p?.parsed?.serving, sourcePrefix: '' },
+            { obj: p?.parsed, sourcePrefix: '' }
+        ];
         const normalizedKey = (k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        const findByKeyContains = (...patterns) => {
+        const findByKeyContainsEntry = (...patterns) => {
             const wanted = (patterns || []).map(normalizedKey).filter(Boolean);
-            if (!wanted.length) return undefined;
+            if (!wanted.length) return null;
             for (const src of metricSources) {
-                if (!src || typeof src !== 'object') continue;
-                for (const [k, v] of Object.entries(src)) {
+                if (!src?.obj || typeof src.obj !== 'object') continue;
+                for (const [k, v] of Object.entries(src.obj)) {
                     if (v === undefined || v === null || typeof v === 'object') continue;
                     const nk = normalizedKey(k);
-                    if (wanted.every(w => nk.includes(w))) return v;
+                    if (wanted.every(w => nk.includes(w))) {
+                        return { value: v, sourceKey: src.sourcePrefix ? `${src.sourcePrefix}${k}` : k };
+                    }
                 }
             }
-            return undefined;
+            return null;
+        };
+        const findByKeyContains = (...patterns) => {
+            const entry = findByKeyContainsEntry(...patterns);
+            return entry ? entry.value : undefined;
+        };
+        const resolveRunInfo = () => {
+            if (activeLog && activeLog.trpInfo && typeof activeLog.trpInfo === 'object') return activeLog.trpInfo;
+            if (activeLog && activeLog.trpInfoValues && typeof activeLog.trpInfoValues === 'object') {
+                const v = activeLog.trpInfoValues;
+                const mapped = {
+                    ue_category: v.__info_ue_category ?? v.__info_ue_category_inferred,
+                    ue_category_inferred: v.__info_ue_category_inferred ?? v.__info_ue_category,
+                    mimo_capability: v.__info_mimo_capability ?? v.__info_mimo_capability_inferred,
+                    mimo_capability_inferred: v.__info_mimo_capability_inferred ?? v.__info_mimo_capability,
+                    ca_capability: v.__info_ca_capability ?? v.__info_ca_capability_inferred,
+                    ca_capability_inferred: v.__info_ca_capability_inferred ?? v.__info_ca_capability
+                };
+                if (Object.values(mapped).some(hasValue)) return mapped;
+            }
+            if (p && p.__trpInfo && typeof p.__trpInfo === 'object') return p.__trpInfo;
+            const runInfoMap = (window && window.__trpRunInfoById && typeof window.__trpRunInfoById === 'object') ? window.__trpRunInfoById : null;
+            if (runInfoMap) {
+                const pointRunIdKey = String((p && p.__trpRunId) ?? '');
+                const mappedInfo = pointRunIdKey ? runInfoMap[pointRunIdKey] : null;
+                if (mappedInfo && typeof mappedInfo === 'object' && Object.keys(mappedInfo).length) return mappedInfo;
+            }
+            const runIdFromPoint = Number(p && p.__trpRunId);
+            if (Number.isFinite(runIdFromPoint) && Array.isArray(window.loadedLogs)) {
+                const found = window.loadedLogs.find((l) => Number(l && l.trpRunId) === runIdFromPoint);
+                if (found && found.trpInfo && typeof found.trpInfo === 'object') return found.trpInfo;
+            }
+            return null;
+        };
+        const getFromRunInfoEntry = (...keys) => {
+            const info = resolveRunInfo();
+            if (!info) return null;
+            for (const k of keys) {
+                const entry = getFromObjCIEntry(info, k, 'run.info.');
+                if (entry && hasValue(entry.value)) return entry;
+            }
+            return null;
         };
         const getFromRunInfo = (...keys) => {
-            const info = (activeLog && activeLog.trpInfo && typeof activeLog.trpInfo === 'object') ? activeLog.trpInfo : null;
-            if (!info) return undefined;
-            for (const k of keys) {
-                const val = getFromObjCI(info, k);
-                if (hasValue(val)) return val;
-            }
-            return undefined;
+            const entry = getFromRunInfoEntry(...keys);
+            return entry ? entry.value : undefined;
         };
-        const getByTrpLabel = (...labels) => {
-            const labelMap = (activeLog && activeLog.trpMetricLabels && typeof activeLog.trpMetricLabels === 'object') ? activeLog.trpMetricLabels : null;
-            if (!labelMap) return undefined;
-            const wanted = (labels || []).map(normalizedKey).filter(Boolean);
-            if (!wanted.length) return undefined;
-            for (const [rawName, friendly] of Object.entries(labelMap)) {
-                const fr = normalizedKey(friendly);
-                if (!wanted.includes(fr)) continue;
-                const rawVal = getAny(rawName);
-                if (hasValue(rawVal)) return rawVal;
+        const getAnyEntry = (...keys) => {
+            for (const k of keys) {
+                const v1 = getValCIEntry(k);
+                if (v1 && hasValue(v1.value)) return v1;
+                const v2 = getFromObjCIEntry(p?.parsed?.serving, k);
+                if (v2 && hasValue(v2.value)) return v2;
+                const v3 = getFromObjCIEntry(p?.parsed, k);
+                if (v3 && hasValue(v3.value)) return v3;
             }
-            return undefined;
+            return null;
         };
         const getAny = (...keys) => {
-            for (const k of keys) {
-                const v1 = getValCI(k);
-                if (v1 !== undefined && v1 !== null && String(v1).trim() !== '') return v1;
-                const v2 = getFromObjCI(p?.parsed?.serving, k);
-                if (v2 !== undefined && v2 !== null && String(v2).trim() !== '') return v2;
-                const v3 = getFromObjCI(p?.parsed, k);
-                if (v3 !== undefined && v3 !== null && String(v3).trim() !== '') return v3;
-            }
-            return undefined;
+            const entry = getAnyEntry(...keys);
+            return entry ? entry.value : undefined;
         };
-        const findByTokens = (tokens) => {
+        const entryValue = (entry) => (entry ? entry.value : undefined);
+        const findByTokensEntry = (tokens) => {
             const t = (tokens || []).map(x => String(x || '').toLowerCase());
-            const sources = [p, p?.properties, p?.parsed?.serving];
-            for (const src of sources) {
-                if (!src || typeof src !== 'object') continue;
-                for (const [k, v] of Object.entries(src)) {
+            for (const src of metricSources) {
+                if (!src?.obj || typeof src.obj !== 'object') continue;
+                for (const [k, v] of Object.entries(src.obj)) {
                     if (v === undefined || v === null || typeof v === 'object') continue;
                     const lk = String(k || '').toLowerCase();
                     const ok = t.every(tok => lk.includes(tok));
-                    if (ok) return v;
+                    if (ok) return { value: v, sourceKey: src.sourcePrefix ? `${src.sourcePrefix}${k}` : k };
                 }
             }
-            return undefined;
+            return null;
+        };
+        const findByTokens = (tokens) => {
+            const entry = findByTokensEntry(tokens);
+            return entry ? entry.value : undefined;
+        };
+        const getByTrpLabelEntry = (...labels) => {
+            const labelMap = (activeLog && activeLog.trpMetricLabels && typeof activeLog.trpMetricLabels === 'object') ? activeLog.trpMetricLabels : null;
+            if (!labelMap) return null;
+            const wanted = (labels || []).map(normalizedKey).filter(Boolean);
+            if (!wanted.length) return null;
+            for (const [rawName, friendly] of Object.entries(labelMap)) {
+                const fr = normalizedKey(friendly);
+                if (!wanted.includes(fr)) continue;
+                const rawEntry = getAnyEntry(rawName);
+                if (rawEntry && hasValue(rawEntry.value)) return { value: rawEntry.value, sourceKey: rawName };
+            }
+            return null;
+        };
+        const getByTrpLabel = (...labels) => {
+            const entry = getByTrpLabelEntry(...labels);
+            return entry ? entry.value : undefined;
+        };
+        const isDirectSourceKey = (sourceKey) => {
+            if (!sourceKey) return false;
+            const low = String(sourceKey || '').toLowerCase();
+            if (!low) return false;
+            if (low.startsWith('run.info.') || low.startsWith('derived.') || low.startsWith('event.') || low.startsWith('inferred.')) return false;
+            if (low.startsWith('__info_') || low.startsWith('__derived_')) return false;
+            if (low.includes('inferred') || low.includes('proxy')) return false;
+            return true;
+        };
+        const metricMetaFromEntry = (entry, forceEstimated = false) => {
+            if (forceEstimated) return { estimated: true };
+            if (!entry) return {};
+            if (entry.estimated) return { estimated: true };
+            if (isDirectSourceKey(entry.sourceKey)) return { source: entry.sourceKey };
+            return { estimated: true };
+        };
+        const stripTrailingMetricTags = (raw) => {
+            let txt = String(raw == null ? '' : raw).trim();
+            if (!txt) return { value: txt, qualifier: null };
+            let qualifier = null;
+            const q1 = txt.match(/\((est|decoded|inferred)\)\s*$/i);
+            if (q1) {
+                qualifier = String(q1[1] || '').toLowerCase();
+                txt = txt.replace(/\((est|decoded|inferred)\)\s*$/i, '').trim();
+            }
+            txt = txt.replace(/\s*\[[^\]]+\]\s*$/i, '').trim();
+            return { value: txt, qualifier };
+        };
+        const resolveMetricQualifier = (label, value, opts = {}) => {
+            const lowSource = String(opts && opts.source || '').toLowerCase();
+            if (lowSource.includes('decoded')) return 'decoded';
+            if (lowSource.includes('inferred')) return 'inferred';
+            if (opts && opts.estimated) return 'est';
+            const normalized = normalizeMissing(value);
+            if (!hasValue(normalized) || normalized === 'N/A') return null;
+            const stripped = stripTrailingMetricTags(normalized);
+            if (stripped.qualifier) return stripped.qualifier;
+            const lowVal = String(normalized).toLowerCase();
+            if (/\binferred\b/.test(lowVal)) return 'inferred';
+            if (/\bdecoded\b/.test(lowVal)) return 'decoded';
+            if (/\bestimated\b|\bproxy\b/.test(lowVal)) return 'est';
+            if (/\((?:proxy|est|inferred)\)/i.test(String(label || ''))) return 'est';
+            return null;
+        };
+        const formatMetricValueForDisplay = (value, _opts = {}) => {
+            const normalized = normalizeMissing(value);
+            if (normalized === 'N/A') return normalized;
+            const stripped = stripTrailingMetricTags(normalized);
+            return normalizeMissing(stripped.value);
+        };
+        const formatMetricLabelForDisplay = (label, qualifier) => {
+            const base = String(label || '').trim();
+            if (!base || !qualifier) return base;
+            if (/\((?:[^)]*decoded[^)]*|[^)]*inferred[^)]*|[^)]*est[^)]*)\)/i.test(base)) return base;
+            const q = String(qualifier || '').toLowerCase();
+            if (q === 'decoded') return `${base} (decoded)`;
+            if (q === 'inferred') return `${base} (inferred)`;
+            if (q === 'est') return `${base} (est)`;
+            return base;
+        };
+        const toComparableMetricValue = (v) => {
+            if (v === undefined || v === null) return null;
+            if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+            const s = String(v).trim();
+            if (!s) return null;
+            const n = Number(s);
+            if (Number.isFinite(n)) return n;
+            const m = s.match(/-?\d+(?:\.\d+)?/);
+            if (m) {
+                const mn = Number(m[0]);
+                if (Number.isFinite(mn)) return mn;
+            }
+            return s.toLowerCase();
+        };
+        const metricValuesEquivalent = (a, b) => {
+            const va = toComparableMetricValue(a);
+            const vb = toComparableMetricValue(b);
+            if (va === null || vb === null) return false;
+            if (typeof va === 'number' && typeof vb === 'number') return Math.abs(va - vb) <= 0.11;
+            return String(va) === String(vb);
+        };
+        const metricSourceCandidatesByLabel = {
+            'Serving cell name': ['Cell Name', 'Serving cell name'],
+            'Application throughput DL': ['Application throughput DL', 'Data.Http.Download.Throughput', 'Data.Http.Downlink.Throughput'],
+            'Cell ID': ['Cell ID', 'Radio.Lte.ServingCell[8].CellId', '__derived_cell_id', '__info_cell_id'],
+            'Cellid': ['Cellid', 'Radio.Lte.ServingCell[8].CellIdentity.Complete', 'Radio.Lte.ServingCell[8].Ecgi', '__info_cellid'],
+            'DL throughput': ['DL throughput', 'Radio.Lte.ServingCellTotal.Pdsch.Throughput', 'Radio.Lte.ServingCell[8].Pdsch.Throughput'],
+            'Downlink EARFCN': ['Radio.Lte.ServingCell[8].Downlink.Earfcn', 'Radio.Lte.ServingCellTotal.Downlink.Earfcn', 'Downlink EARFCN'],
+            'Band': ['Band', 'Radio.Lte.ServingCell[8].Band', 'Radio.Lte.ServingCellTotal.Band'],
+            'BW': ['BW', 'Radio.Lte.ServingCell[8].Downlink.Bandwidth', 'Radio.Lte.ServingCellTotal.Downlink.Bandwidth'],
+            'UE category': ['UE category', 'UE Category'],
+            'MIMO capability': ['MIMO capability'],
+            'CA capability': ['CA capability'],
+            'CA Status': ['CA Status', 'Carrier Aggregation Status', 'CA state', 'Radio.Lte.Ca.Status', 'Radio.Lte.ServingCellTotal.Ca.Status'],
+            'CA SCell Add/Remove': ['CA SCell Add/Remove', 'SCell Add/Remove', 'SCell add', 'SCell remove', 'CA SCell event'],
+            'eNodeB ID': ['eNodeB ID', 'enodeb id'],
+            'Physical cell ID': ['Physical cell ID', 'PCI', 'Radio.Lte.ServingCell[8].Pci', 'Radio.Lte.ServingCellTotal.Pci'],
+            'RSRP': ['RSRP', 'Radio.Lte.ServingCell[8].Rsrp', 'Radio.Lte.ServingCellTotal.Rsrp'],
+            'RSRQ': ['RSRQ', 'Radio.Lte.ServingCell[8].Rsrq', 'Radio.Lte.ServingCellTotal.Rsrq'],
+            'SINR': ['SINR', 'RS-SINR', 'RSSINR', 'RS SINR', 'Radio.Lte.ServingCell[8].RsSinr', 'Radio.Lte.ServingCellTotal.RsSinr'],
+            'Tracking area code': ['Tracking area code', 'Radio.Lte.ServingSystem.Tac', 'Radio.Lte.ServingCell[8].TrackingAreaCode', 'Radio.Lte.ServingCell[8].Tac', 'Radio.Lte.ServingCellTotal.TrackingAreaCode', 'Radio.Lte.ServingCellTotal.Tac', '__info_tac'],
+            'UL throughput': ['UL throughput', 'Radio.Lte.ServingCellTotal.Pusch.Throughput', 'Radio.Lte.ServingCell[8].Pusch.Throughput'],
+            'RTT': ['RTT', 'Data.Ping.Rtt', 'Data.Tcp.Rtt', 'Data.Http.Rtt'],
+            'Packet loss (proxy)': ['Packet loss', 'Packet Loss', 'Data.Ping.PacketLoss', 'Data.Http.PacketLoss'],
+            'Retransmissions (proxy)': ['Retransmissions', 'HARQ Retransmissions', 'HARQ Retx', 'RLC Retransmissions'],
+            'Bearer active': ['Bearer active', 'Radio.Lte.Bearer.Active'],
+            'DRX (DTX)': ['DRX', 'Radio.Lte.Rrc.DrxState', 'Radio.Lte.ServingCell[8].DrxState', 'Radio.Lte.ServingCellTotal.DrxState'],
+            'Tx power': ['Tx power', 'Radio.Lte.ServingCell[8].UeTxPower', 'Radio.Lte.ServingCellTotal.UeTxPower', 'Radio.Lte.Pusch.TxPower'],
+            'Estimated RB usage': ['Estimated RB usage', 'DL PRB Usage', 'PRB Load', 'Radio.Lte.ServingCell[8].PrbUsage', 'Radio.Lte.ServingCellTotal.PrbUsage'],
+            'Allocated RBs': ['Allocated RBs', 'Radio.Lte.ServingCell[8].AllocatedRbs', 'Radio.Lte.ServingCellTotal.AllocatedRbs', 'Radio.Lte.ServingCell[8].Pdsch.AllocatedPrb', 'Radio.Lte.ServingCellTotal.Pdsch.AllocatedPrb'],
+            'Allocated RBs (raw)': ['Allocated RBs', 'Allocated RBs (raw)', 'Radio.Lte.ServingCell[8].AllocatedRbs', 'Radio.Lte.ServingCellTotal.AllocatedRbs', 'Radio.Lte.ServingCell[8].Pdsch.AllocatedPrb', 'Radio.Lte.ServingCellTotal.Pdsch.AllocatedPrb'],
+            'Allocated RBs sanity': ['Allocated RBs sanity'],
+            'Allocated RBs UL': ['Allocated RBs UL', 'Radio.Lte.ServingCell[8].Pusch.NumberOfResourceBlocks', 'Radio.Lte.ServingCellTotal.Pusch.NumberOfResourceBlocks', 'Radio.Lte.ServingCell[8].Pusch.AllocatedPrb', 'Radio.Lte.ServingCellTotal.Pusch.AllocatedPrb'],
+            'TBS': ['TBS', 'Radio.Lte.ServingCell[8].Pdsch.Tbs', 'Radio.Lte.ServingCellTotal.Pdsch.Tbs', 'Radio.Lte.ServingCell[8].Pusch.Tbs', 'Radio.Lte.ServingCellTotal.Pusch.Tbs'],
+            'TBS UL': ['TBS UL', 'Radio.Lte.ServingCell[8].Pusch.Tbs', 'Radio.Lte.ServingCellTotal.Pusch.Tbs', 'Radio.Lte.ServingCell[8].Pusch.TransportBlockSize', 'Radio.Lte.ServingCellTotal.Pusch.TransportBlockSize'],
+            '#layers': ['#layers', 'Radio.Lte.ServingCell[8].Layers', 'Radio.Lte.ServingCellTotal.Layers'],
+            'CQI (DL)': ['CQI (DL)', 'CQI', 'Radio.Lte.ServingCell[8].Stream[2].Cqi', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi'],
+            'DL MCS': ['DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs'],
+            'UL MCS': ['UL MCS', 'Radio.Lte.ServingCell[8].UlMcs', 'Radio.Lte.ServingCellTotal.UlMcs'],
+            'Code Rate': ['Code Rate', 'DL Code Rate', 'UL Code Rate', 'PDSCH Code Rate', 'PUSCH Code Rate'],
+            'Modulation (DL/UL)': ['DL Modulation', 'UL Modulation', 'Radio.Lte.ServingCell[8].DlModulation', 'Radio.Lte.ServingCellTotal.DlModulation', 'Radio.Lte.ServingCell[8].UlModulation', 'Radio.Lte.ServingCellTotal.UlModulation'],
+            'Timing Advance': ['Timing Advance', 'Radio.Lte.ServingCell[8].TimingAdvance', 'Radio.Lte.ServingCellTotal.TimingAdvance', 'TA'],
+            'MIMO/CA': ['MIMO/CA', 'MIMO', 'CA'],
+            'PMI': ['PMI', 'Radio.Lte.ServingCell[8].Pmi', 'Radio.Lte.ServingCellTotal.Pmi'],
+            'Rank (RI)': ['Rank (RI)', 'RI', 'Rank Indicator', 'Radio.Lte.ServingCell[8].RankIndicator', 'Radio.Lte.ServingCellTotal.RankIndicator'],
+            'Rank/Layers (feedback proxy)': ['Rank/Layers (feedback proxy)', 'Rank Indicator', 'RI', 'Radio.Lte.ServingCell[8].Rank', 'Radio.Lte.ServingCellTotal.Rank'],
+            'HARQ': ['HARQ', 'HARQ DL', 'HARQ UL', 'Radio.Lte.ServingCell[8].Harq', 'Radio.Lte.ServingCellTotal.Harq'],
+            'HARQ process-level': ['HARQ process-level', 'Radio.Lte.ServingCell[8].Harq.ProcessId', 'Radio.Lte.ServingCellTotal.Harq.ProcessId'],
+            'MAC retransmissions': ['MAC retransmissions', 'Radio.Lte.ServingCell[8].Mac.Retransmissions', 'Radio.Lte.ServingCellTotal.Mac.Retransmissions'],
+            'RLC retransmissions': ['RLC retransmissions', 'Radio.Lte.ServingCell[8].Rlc.Retransmissions', 'Radio.Lte.ServingCellTotal.Rlc.Retransmissions'],
+            'PDCP Discard / Reordering': ['PDCP Discard / Reordering', 'PDCP Discard', 'PDCP Reordering', 'Radio.Lte.ServingCell[8].Pdcp.Discard', 'Radio.Lte.ServingCell[8].Pdcp.Reordering', 'Radio.Lte.ServingCellTotal.Pdcp.Discard', 'Radio.Lte.ServingCellTotal.Pdcp.Reordering'],
+            'L1/L2 per-TTI exact': ['L1/L2 per-TTI exact', '__l1l2_per_tti_exact'],
+            'L1/L2 decode note': ['L1/L2 decode note', '__l1l2_decode_note'],
+            'BLER DL': ['BLER DL', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl'],
+            'BLER UL': ['BLER UL', 'UL BLER', 'Radio.Lte.ServingCell[8].BlerUl', 'Radio.Lte.ServingCellTotal.BlerUl', 'UL IBLER (%)'],
+            'RRC State (decoded exact)': ['RRC State (decoded exact)', '__decoded_rrc_state_exact', 'Radio.Lte.Rrc.State', 'Radio.Lte.Rrc.ConnectionState'],
+            'RRC Re-establishment': ['RRC Re-establishment', 'RRC Reestablishment', 'RRC Connection Reestablishment', 'RrcConnectionReestablishmentRequest', 'RrcConnectionReestablishmentComplete', 'RrcConnectionReestablishmentReject'],
+            'RRC State': ['RRC State', 'rrcState', 'Radio.Lte.Rrc.State', 'Radio.Lte.Rrc.ConnectionState'],
+            'HO Start/Complete': ['HO Start/Complete'],
+            'A3/A5 triggers': ['A3/A5 triggers', 'A3 Trigger', 'A5 Trigger'],
+            'A3/A5 event thresholds': ['A3/A5 event thresholds', 'A3/A5 thresholds', 'rrc_recfg_a3a5_thresholds_inferred'],
+            'A3/A5 threshold source time': ['A3/A5 threshold source time', 'A3/A5 source time', 'rrc_recfg_meas_report_time'],
+            'A3/A5 threshold source PCI': ['A3/A5 threshold source PCI', 'A3/A5 source PCI', 'rrc_recfg_src_pci', 'rrc_recfg_tgt_pci'],
+            'A3/A5 threshold context check': ['A3/A5 threshold context check', 'A3/A5 context check'],
+            'HO command': ['HO command', 'HO Command', 'Handover Command'],
+            'HO execution time': ['HO execution time', 'HO Execution Time', 'Handover Execution Time'],
+            'HO failure': ['HO failure', 'HO Failure', 'Handover Failure', 'HOF'],
+            'RLF': ['RLF', 'RLF indication', 'Radio Link Failure'],
+            'RLF root-cause details': ['RLF root-cause details', 'RLF root cause details', 'ue_info_rsp_rlf_root_cause_details', 'ue_info_rsp_rlf_root_cause'],
+            'Reestablishment timeline': ['Reestablishment timeline', 'Reestablishment-related timeline', 'ue_info_rsp_reest_timeline'],
+            'RLF reason breakdown': ['RLF reason breakdown', 'RLF reason KPI breakdown', 'ue_info_rsp_rlf_reason_breakdown'],
+            'Cell/PCI Change (inferred)': ['Cell/PCI Change (inferred)'],
+            'EARFCN/Band Change (inferred)': ['EARFCN/Band Change (inferred)'],
+            'RRC State Transition': ['RRC State Transition'],
+            'Bearer / EPS Bearer': ['Bearer / EPS Bearer', 'EPS Bearer', 'Bearer', 'EpsBearer', 'ERAB', 'DRB'],
+            'TA Jumps': ['TA Jumps'],
+            'Data Session Start/Stop': ['Data Session Start/Stop', 'Data session start', 'Data session stop', 'Session start', 'Session stop', 'PDN connect', 'PDN disconnect'],
+            'VoLTE Call Start/End': ['VoLTE Call Start/End', 'VoLTE call start', 'VoLTE call end', 'IMS call start', 'IMS call end', 'SIP INVITE', 'SIP BYE']
+        };
+        const estimatedOnlyLabels = new Set([
+            'Packet loss (proxy)',
+            'Retransmissions (proxy)',
+            'HARQ (proxy)',
+            'Allocated RBs (est)',
+            'Allocated RBs sanity',
+            'Estimated RB usage',
+            'Cell/PCI Change (inferred)',
+            'EARFCN/Band Change (inferred)'
+        ]);
+        const resolveMetricDisplayMeta = (label, value, opts = {}) => {
+            if (opts && (opts.source || opts.estimated !== undefined)) return opts;
+            if (!hasValue(value)) return opts;
+            if (estimatedOnlyLabels.has(label)) return { estimated: true };
+            if (/\b(inferred|proxy|estimated)\b/i.test(String(value || '')) || /\((?:proxy|est|inferred)\)/i.test(String(label || ''))) {
+                return { estimated: true };
+            }
+            const candidates = metricSourceCandidatesByLabel[label] || [label];
+            for (const key of candidates) {
+                const entry = getAnyEntry(key);
+                if (!entry || !hasValue(entry.value)) continue;
+                if (metricValuesEquivalent(value, entry.value)) {
+                    const meta = metricMetaFromEntry(entry);
+                    if (meta.source || meta.estimated) return meta;
+                }
+            }
+            const byLabel = getByTrpLabelEntry(label);
+            if (byLabel && metricValuesEquivalent(value, byLabel.value)) {
+                const meta = metricMetaFromEntry(byLabel);
+                if (meta.source || meta.estimated) return meta;
+            }
+            return { estimated: true };
+        };
+        const normalizeRrcStateLabel = (raw) => {
+            if (!hasValue(raw)) return null;
+            const txt = String(raw).trim();
+            if (!txt) return null;
+            const low = txt.toLowerCase();
+            const compact = low.replace(/[^a-z0-9]/g, '');
+            let state = null;
+
+            // Numeric fallback used by some decoders/enums.
+            if (/^-?\d+$/.test(txt)) {
+                const n = Number(txt);
+                if (n === 0) state = 'Idle';
+                else if (n === 1) state = 'Connected';
+                else if (n === 2) state = 'Inactive';
+            }
+
+            if (!state) {
+                if (/(rrc_?connected|\bconnected\b|cell_dch|cell_fach|cell_pch|ura_pch)/i.test(low)) state = 'Connected';
+                else if (/(rrc_?idle|\bidle\b|released?|release complete|pcch.*paging|\bpaging\b)/i.test(low)) state = 'Idle';
+                else if (/(rrc_?inactive|\binactive\b)/i.test(low)) state = 'Inactive';
+            }
+
+            if (!state) {
+                if (compact === 'rrcconnected' || compact === 'connected') state = 'Connected';
+                else if (compact === 'rrcidle' || compact === 'idle') state = 'Idle';
+                else if (compact === 'rrcinactive' || compact === 'inactive') state = 'Inactive';
+            }
+
+            if (!state) {
+                // Avoid showing protocol message names as "RRC state".
+                if (/(^message\.|layer3|errc|pcch|dcch|ccch|paging)/i.test(low)) return null;
+                return txt;
+            }
+            return compact === state.toLowerCase() ? state : `${state} (${txt})`;
         };
         const enbOnly = (() => {
             const txt = String(servingEnodebCellId || '').trim();
@@ -9121,7 +14393,18 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             return m ? m[2] : undefined;
         })();
         const metricRows = [];
-        const pushMetric = (label, value) => metricRows.push({ label, value: normalizeMissing(value), header: false });
+        const pushMetric = (label, value, opts = {}) => {
+            const meta = resolveMetricDisplayMeta(label, value, opts);
+            const qualifier = resolveMetricQualifier(label, value, meta);
+            const metricLabel = formatMetricLabelForDisplay(label, qualifier);
+            metricRows.push({
+                label: metricLabel,
+                baseLabel: label,
+                value: formatMetricValueForDisplay(value, meta),
+                header: false,
+                meta
+            });
+        };
         const pushHeader = (label) => metricRows.push({ label, value: '', header: true });
 
         const appThroughputDl = getByTrpLabel('Application throughput DL') ??
@@ -9174,8 +14457,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 'Tracking area code',
                 'TAC',
                 '__info_tac',
+                'Radio.Lte.ServingSystem.Tac',
                 'Radio.Lte.ServingCell[8].TrackingAreaCode',
-                'Radio.Lte.ServingCell[8].Tac'
+                'Radio.Lte.ServingCell[8].Tac',
+                'Radio.Lte.ServingCellTotal.TrackingAreaCode',
+                'Radio.Lte.ServingCellTotal.Tac'
             ) ??
             findByTokens(['tracking', 'area', 'code']) ??
             findByTokens(['tac']) ??
@@ -9193,7 +14479,93 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             findByTokens(['http', 'upload', 'throughput']) ??
             findByTokens(['http', 'uplink', 'throughput']) ??
             findByTokens(['throughput', 'ul']);
-        const cqiDlValue = getAny('CQI (DL)', 'CQI', 'Downlink CQI', 'Radio.Lte.ServingCell[8].Cqi', 'Radio.Lte.ServingCellTotal.Cqi') ?? findByTokens(['cqi']);
+        const rttValue = getByTrpLabel('RTT') ??
+            getAny(
+                'RTT',
+                'Round Trip Time',
+                'Latency',
+                'Ping RTT',
+                'TCP RTT',
+                'Data.Ping.Rtt',
+                'Data.Tcp.Rtt',
+                'Data.Http.Rtt',
+                'Data.Http.Download.Rtt',
+                'Data.Http.Upload.Rtt'
+            ) ??
+            findByTokens(['round', 'trip', 'time']) ??
+            findByTokens(['ping', 'rtt']) ??
+            findByTokens(['tcp', 'rtt']) ??
+            findByTokens(['latency']) ??
+            findByTokens(['rtt']);
+        const packetLossValue = getByTrpLabel('Packet loss', 'Packet Loss') ??
+            getAny(
+                'Packet loss',
+                'Packet Loss',
+                'DL Packet Loss Rate',
+                'Packet Loss Rate',
+                'IP Packet Loss',
+                'Data.Ping.PacketLoss',
+                'Data.Http.PacketLoss'
+            ) ??
+            findByTokens(['packet', 'loss']) ??
+            findByTokens(['ip', 'loss']) ??
+            findByTokens(['plr']);
+        const retransmissionsValue = getByTrpLabel('Retransmissions', 'Retransmission') ??
+            getAny(
+                'Retransmissions',
+                'Retransmission',
+                'DL Retransmissions',
+                'HARQ Retransmissions',
+                'HARQ Retx',
+                'RLC Retransmissions',
+                'Retx'
+            ) ??
+            findByTokens(['harq', 'retrans']) ??
+            findByTokens(['rlc', 'retrans']) ??
+            findByTokens(['retx']) ??
+            findByTokens(['retrans']);
+        const harqValue = getByTrpLabel('HARQ', 'HARQ DL', 'HARQ UL') ??
+            getAny(
+                'HARQ',
+                'HARQ DL',
+                'HARQ UL',
+                'HARQ Ack Rate',
+                'HARQ Nack Rate',
+                'HARQ Retransmissions',
+                'HARQ Retx',
+                'Radio.Lte.ServingCell[8].Harq',
+                'Radio.Lte.ServingCellTotal.Harq'
+            ) ??
+            findByTokens(['harq', 'nack']) ??
+            findByTokens(['harq', 'ack']) ??
+            findByTokens(['harq']);
+        const drxValue = getByTrpLabel('DRX', 'DRX (DTX)') ??
+            getAny('DRX', 'Drx', 'DRX State', 'RRC DRX State', 'Radio.Lte.Rrc.DrxState', 'Radio.Lte.ServingCell[8].DrxState', 'Radio.Lte.ServingCellTotal.DrxState') ??
+            findByTokens(['drx']);
+        const txPowerRaw = getByTrpLabel('Tx power') ??
+            getAny(
+                'Tx power',
+                'Tx Power',
+                'UE Tx Power',
+                'Radio.Lte.ServingCell[8].UeTxPower',
+                'Radio.Lte.ServingCellTotal.UeTxPower',
+                'Radio.Lte.ServingCell[8].Pusch.TxPower',
+                'Radio.Lte.ServingCellTotal.Pusch.TxPower',
+                'Radio.Lte.Pusch.TxPower'
+            ) ??
+            findByTokens(['ue', 'tx', 'power']) ??
+            findByTokens(['pusch', 'tx', 'power']) ??
+            findByTokens(['tx', 'power']);
+        const txPowerNum = Number(txPowerRaw);
+        const txPowerValue = Number.isFinite(txPowerNum) ? (Number.isInteger(txPowerNum) ? `${txPowerNum} dBm` : `${txPowerNum.toFixed(1)} dBm`) : txPowerRaw;
+        const cqiDlValue = getAny(
+            'Radio.Lte.ServingCell[8].Stream[2].Cqi',
+            'Radio.Lte.ServingCell[8].Cqi',
+            'Radio.Lte.ServingCellTotal.Cqi',
+            'CQI (DL)',
+            'CQI',
+            'Downlink CQI'
+        ) ?? findByTokens(['cqi']);
         const dlMcsValue = getAny('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs') ?? findByTokens(['dl', 'mcs']) ?? findByTokens(['pdsch', 'mcs']);
         const ulMcsValue = getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs', 'Radio.Lte.ServingCellTotal.UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']);
         const dlMod = getByTrpLabel('Modulation (DL/UL)') ?? getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation', 'Radio.Lte.ServingCellTotal.DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
@@ -9209,8 +14581,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             findByTokens(['timingadvance']);
         const timingAdvanceValue = normalizeTa(timingAdvanceRaw);
         const pmiValue = getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi', 'Radio.Lte.ServingCellTotal.Pmi') ?? findByTokens(['pmi']);
-        const rankLayersRaw = getByTrpLabel('Rank/Layers (feedback proxy)') ??
-            getAny(
+        const rankLayersEntry = getByTrpLabelEntry('Rank/Layers (feedback proxy)') ??
+            getAnyEntry(
                 'Rank/Layers (feedback proxy)',
                 'Rank Indicator',
                 'RI',
@@ -9221,8 +14593,27 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 'Radio.Lte.ServingCellTotal.RankIndicator',
                 'Radio.Lte.ServingCellTotal.Layers'
             ) ??
-            findByTokens(['rank', 'indicator']) ??
-            findByTokens(['rankindicator']);
+            findByTokensEntry(['rank', 'indicator']) ??
+            findByTokensEntry(['rankindicator']);
+        const rankLayersRaw = entryValue(rankLayersEntry);
+        const inferRiFromFeedbackCounts = () => {
+            const counts = {};
+            for (let r = 1; r <= 8; r++) {
+                const raw = getAny(
+                    `Radio.Lte.ServingCell[8].Rank${r}.FeedbackCount`,
+                    `Radio.Lte.ServingCellTotal.Rank${r}.FeedbackCount`,
+                    `Rank${r}.FeedbackCount`,
+                    `Rank${r} FeedbackCount`
+                );
+                const n = Number(raw);
+                if (Number.isFinite(n)) counts[r] = n;
+            }
+            for (let r = 8; r >= 1; r--) {
+                if (Number.isFinite(counts[r]) && counts[r] > 0) return r;
+            }
+            return null;
+        };
+        const rankFeedbackRi = inferRiFromFeedbackCounts();
         const normalizeRankLayers = (v) => {
             if (v === undefined || v === null) return null;
             const n = Number(v);
@@ -9236,12 +14627,418 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (m) return Number(m[1]);
             return null;
         };
-        const rankLayersValue = normalizeRankLayers(rankLayersRaw);
+        const rankLayersValue = normalizeRankLayers(rankLayersRaw ?? rankFeedbackRi);
+        const rankLayersMeta = (() => {
+            if (rankLayersEntry && hasValue(rankLayersEntry.value)) return metricMetaFromEntry(rankLayersEntry);
+            if (Number.isFinite(Number(rankFeedbackRi))) return { estimated: true };
+            return {};
+        })();
+        const rankRiEntry = getByTrpLabelEntry('Rank (RI)', 'Rank/Layers (feedback proxy)') ??
+            getAnyEntry(
+                'Rank (RI)',
+                'RI',
+                'Rank Indicator',
+                'Radio.Lte.ServingCell[8].RankIndicator',
+                'Radio.Lte.ServingCellTotal.RankIndicator'
+            ) ??
+            findByTokensEntry(['rank', 'indicator']) ??
+            findByTokensEntry(['ri']) ??
+            (Number.isFinite(Number(rankFeedbackRi)) ? { value: rankFeedbackRi, sourceKey: 'derived.rank_feedback_ri', estimated: true } : null) ??
+            getFromRunInfoEntry('rank_ri', 'rank_ri_inferred', 'rank_layers_inferred');
+        const rankRiRaw = entryValue(rankRiEntry);
+        const rankRiValue = normalizeRankLayers(rankRiRaw);
+        const rankRiMeta = (() => {
+            if (!rankRiEntry || !hasValue(rankRiEntry.value)) return {};
+            return metricMetaFromEntry(rankRiEntry);
+        })();
+        const normalizePercent = (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            if (n < 0) return null;
+            if (n <= 1) return Number((n * 100).toFixed(1));
+            if (n <= 100) return Number(n.toFixed(1));
+            return null;
+        };
+        const rbUsageRaw = getByTrpLabel('Estimated RB usage', 'DL PRB Usage', 'PRB Load', 'Average DL RB Quantity', 'DL PRB/RB Used') ??
+            getAny(
+                'Estimated RB usage',
+                'DL PRB Usage',
+                'PRB Load',
+                'Average DL RB Quantity',
+                'DL RB Usage',
+                'DL PRB/RB Used',
+                'Radio.Lte.ServingCell[8].PrbUsage',
+                'Radio.Lte.ServingCellTotal.PrbUsage'
+            ) ??
+            findByTokens(['dl', 'prb']) ??
+            findByTokens(['prb', 'load']) ??
+            findByTokens(['dl', 'rb', 'usage']) ??
+            findByTokens(['dl', 'rb', 'quantity']);
+        const rbUsageDirectPct = normalizePercent(rbUsageRaw);
+        const estimateDlRbUsagePct = (() => {
+            if (rbUsageDirectPct !== null) return null;
+            const dlTpKbps = Number(dlThroughput);
+            if (!Number.isFinite(dlTpKbps) || dlTpKbps <= 0) return null;
+            const cqiNum = Number(cqiDlValue);
+            const mcsNum = Number(dlMcsValue);
+            // CQI -> rough spectral efficiency (bits/s/Hz), index 1..15.
+            const cqiSe = [0, 0.15, 0.23, 0.38, 0.6, 0.88, 1.18, 1.48, 1.91, 2.41, 2.73, 3.32, 3.9, 4.52, 5.12, 5.55];
+            let se = null;
+            if (Number.isFinite(cqiNum)) {
+                const idx = Math.max(1, Math.min(15, Math.round(cqiNum)));
+                se = cqiSe[idx];
+            } else if (Number.isFinite(mcsNum) && mcsNum >= 0) {
+                // Coarse fallback when CQI missing.
+                se = Math.max(0.2, Math.min(5.5, (mcsNum / 28) * 5.5));
+            }
+            if (!Number.isFinite(se) || se <= 0) return null;
+            const riNum = Number(rankRiValue ?? rankLayersValue);
+            const layers = Number.isFinite(riNum) ? Math.max(1, Math.min(4, Math.round(riNum))) : 1;
+            // Assume 20 MHz LTE carrier with ~18 MHz usable OFDM bandwidth.
+            const usableHz = 18e6;
+            const estPct = (dlTpKbps * 1000) / (se * layers * usableHz) * 100;
+            if (!Number.isFinite(estPct) || estPct < 0) return null;
+            return Math.max(0, Math.min(100, Number(estPct.toFixed(1))));
+        })();
+        const rbUsageDisplay = (rbUsageDirectPct !== null)
+            ? `${rbUsageDirectPct}%`
+            : (estimateDlRbUsagePct !== null ? `${estimateDlRbUsagePct}% (est)` : 'N/A');
+        const mapBandwidthToTotalRbs = (rawBw) => {
+            let bw = Number(rawBw);
+            if (!Number.isFinite(bw) && typeof rawBw === 'string') {
+                const m = String(rawBw).match(/-?\d+(?:\.\d+)?/);
+                if (m) bw = Number(m[0]);
+            }
+            if (!Number.isFinite(bw) || bw <= 0) return null;
+            if (bw > 1000) bw = bw / 1e6; // Hz -> MHz
+            const pairs = [
+                { mhz: 1.4, rb: 6 },
+                { mhz: 3, rb: 15 },
+                { mhz: 5, rb: 25 },
+                { mhz: 10, rb: 50 },
+                { mhz: 15, rb: 75 },
+                { mhz: 20, rb: 100 }
+            ];
+            let best = null;
+            let bestDiff = Infinity;
+            pairs.forEach((p) => {
+                const d = Math.abs(bw - p.mhz);
+                if (d < bestDiff) {
+                    best = p;
+                    bestDiff = d;
+                }
+            });
+            return (best && bestDiff <= 1.0) ? best.rb : null;
+        };
+        const parseBandwidthMhz = (rawBw) => {
+            let bw = Number(rawBw);
+            if (!Number.isFinite(bw) && typeof rawBw === 'string') {
+                const m = String(rawBw).match(/-?\d+(?:\.\d+)?/);
+                if (m) bw = Number(m[0]);
+            }
+            if (!Number.isFinite(bw) || bw <= 0) return null;
+            if (bw > 1000) bw = bw / 1e6; // Hz -> MHz
+            return Number(bw.toFixed(1));
+        };
+        const dlBandwidthRaw = getByTrpLabel('BW', 'DL bandwidth', 'Downlink bandwidth', 'Bandwidth') ??
+            getAny(
+                'BW',
+                'DL bandwidth',
+                'Downlink bandwidth',
+                'Bandwidth',
+                'Channel bandwidth',
+                'Radio.Lte.ServingCell[8].Downlink.Bandwidth',
+                'Radio.Lte.ServingCellTotal.Downlink.Bandwidth'
+            ) ??
+            findByTokens(['downlink', 'bandwidth']) ??
+            findByTokens(['dl', 'bandwidth']) ??
+            findByTokens(['channel', 'bandwidth']) ??
+            findByTokens(['bandwidth']) ??
+            findByTokens(['bw']);
+        const dlBandwidthMhz = parseBandwidthMhz(dlBandwidthRaw);
+        const bwValue = (() => {
+            if (dlBandwidthMhz !== null) return `${dlBandwidthMhz} MHz`;
+            if (typeof dlBandwidthRaw === 'string' && dlBandwidthRaw.trim()) return dlBandwidthRaw.trim();
+            return null;
+        })();
+        const inferLteBandFromEarfcn = (earfcnRaw) => {
+            const earfcn = Number(earfcnRaw);
+            if (!Number.isFinite(earfcn)) return null;
+            const ranges = [
+                { lo: 0, hi: 599, band: 1 },
+                { lo: 600, hi: 1199, band: 2 },
+                { lo: 1200, hi: 1949, band: 3 },
+                { lo: 1950, hi: 2399, band: 4 },
+                { lo: 2400, hi: 2649, band: 5 },
+                { lo: 2750, hi: 3449, band: 7 },
+                { lo: 3450, hi: 3799, band: 8 },
+                { lo: 6150, hi: 6449, band: 20 },
+                { lo: 9210, hi: 9659, band: 28 },
+                { lo: 37750, hi: 38249, band: 38 },
+                { lo: 38650, hi: 39649, band: 40 },
+                { lo: 39650, hi: 41589, band: 41 }
+            ];
+            const found = ranges.find((r) => earfcn >= r.lo && earfcn <= r.hi);
+            return found ? `B${found.band}` : null;
+        };
+        const normalizeBandValue = (rawBand) => {
+            if (!hasValue(rawBand)) return null;
+            const txt = String(rawBand).trim();
+            if (!txt) return null;
+            const m = txt.match(/\b(?:band|b)\s*([0-9]{1,3})\b/i) || txt.match(/^([0-9]{1,3})$/);
+            if (m) return `B${Number(m[1])}`;
+            return txt;
+        };
+        const bandRaw = getByTrpLabel('Band', 'Serving Band', 'LTE Band') ??
+            getAny(
+                'Band',
+                'Serving Band',
+                'LTE Band',
+                'Radio.Lte.ServingCell[8].Band',
+                'Radio.Lte.ServingCellTotal.Band'
+            ) ??
+            findByTokens(['serving', 'band']) ??
+            findByTokens(['lte', 'band']) ??
+            findByTokens(['freq', 'band']);
+        const bandValue = normalizeBandValue(bandRaw) ?? inferLteBandFromEarfcn(sFreq);
+        const ueCategoryValue = getByTrpLabel('UE category', 'UE Category') ??
+            getAny('UE category', 'UE Category', 'UE Cat', '__info_ue_category', '__info_ue_category_inferred') ??
+            getFromRunInfo('ue_category', 'ue_category_inferred');
+        const mimoCapabilityValue = getByTrpLabel('MIMO capability') ??
+            getAny('MIMO capability', 'MIMO Capability', '__info_mimo_capability', '__info_mimo_capability_inferred') ??
+            getFromRunInfo('mimo_capability', 'mimo_capability_inferred');
+        const caCapabilityValue = getByTrpLabel('CA capability') ??
+            getAny('CA capability', 'CA Capability', 'Carrier Aggregation capability', '__info_ca_capability', '__info_ca_capability_inferred') ??
+            getFromRunInfo('ca_capability', 'ca_capability_inferred');
+        const estimateActiveCcCount = (() => {
+            const direct = getAny(
+                'CA active CC',
+                'CA Active CC',
+                'CA num CC',
+                'Num SCell',
+                'Num SCells',
+                'Radio.Lte.Ca.ActiveCcCount',
+                'Radio.Lte.ServingCellTotal.Ca.ActiveCcCount'
+            ) ?? findByTokens(['carrier', 'aggregation', 'cc']) ?? findByTokens(['scell', 'count']);
+            const dNum = Number(direct);
+            if (Number.isFinite(dNum) && dNum >= 1 && dNum <= 8) return Math.round(dNum);
+
+            const idxSet = new Set();
+            const collectIdx = (src) => {
+                if (!src || typeof src !== 'object') return;
+                Object.keys(src).forEach((k) => {
+                    const m = String(k || '').match(/^Radio\.Lte\.ServingCell\[(\d+)\]\./i);
+                    if (!m) return;
+                    idxSet.add(String(m[1]));
+                });
+            };
+            collectIdx(p);
+            collectIdx(p && p.properties);
+            if (idxSet.size >= 1 && idxSet.size <= 8) return idxSet.size;
+            return 1;
+        })();
+        const totalRbsPerCarrier = mapBandwidthToTotalRbs(dlBandwidthRaw) || 100; // fallback: 20 MHz LTE
+        const totalRbsForEst = totalRbsPerCarrier;
+        const perTtiRbCapDl = Math.max(1, Math.round(totalRbsPerCarrier * estimateActiveCcCount));
+        const rbUsagePctForEst = (rbUsageDirectPct !== null) ? rbUsageDirectPct : estimateDlRbUsagePct;
+        const allocatedRbsEstRaw = Number.isFinite(rbUsagePctForEst)
+            ? Math.max(0, Math.min(totalRbsForEst, Math.round((rbUsagePctForEst / 100) * totalRbsForEst)))
+            : null;
+        const allocatedRbsValue = getByTrpLabel('Allocated RBs', 'Allocated PRBs', 'DL PRB Allocated') ??
+            getAny(
+                'Allocated RBs',
+                'Allocated PRBs',
+                'DL PRB Allocated',
+                'Radio.Lte.ServingCell[8].AllocatedRbs',
+                'Radio.Lte.ServingCellTotal.AllocatedRbs',
+                'Radio.Lte.ServingCell[8].Pdsch.AllocatedPrb',
+                'Radio.Lte.ServingCellTotal.Pdsch.AllocatedPrb'
+            ) ??
+            findByTokens(['allocated', 'prb']) ??
+            findByTokens(['allocated', 'rb']) ??
+            findByTokens(['prb', 'allocated']) ??
+            findByTokens(['rb', 'allocated']);
+        const allocatedRbsValueNum = Number(allocatedRbsValue);
+        const formatRbCount = (n) => {
+            if (!Number.isFinite(n)) return 'N/A';
+            if (Math.abs(n - Math.round(n)) < 0.05) return String(Math.round(n));
+            return String(Number(n.toFixed(1)));
+        };
+        const allocatedRbsNormInfo = (() => {
+            if (!Number.isFinite(allocatedRbsValueNum) || allocatedRbsValueNum < 0) {
+                return {
+                    hasRaw: false,
+                    raw: null,
+                    rawDisplay: normalizeMissing(allocatedRbsValue),
+                    normalizedPerTti: null,
+                    normalizedDisplay: normalizeMissing(allocatedRbsValue),
+                    sanity: 'N/A',
+                    flagged: false,
+                    windowTti: null
+                };
+            }
+            const raw = allocatedRbsValueNum;
+            const cap = perTtiRbCapDl;
+            if (raw <= cap + 0.001) {
+                return {
+                    hasRaw: true,
+                    raw,
+                    rawDisplay: formatRbCount(raw),
+                    normalizedPerTti: raw,
+                    normalizedDisplay: `${formatRbCount(raw)} /TTI`,
+                    sanity: `OK (<= ${cap}/TTI max for ${estimateActiveCcCount} CC)`,
+                    flagged: false,
+                    windowTti: 1
+                };
+            }
+            const win = Math.max(2, Math.round(raw / cap));
+            const normalized = raw / win;
+            const hardImpossible = normalized > (cap + 0.5);
+            if (hardImpossible) {
+                return {
+                    hasRaw: true,
+                    raw,
+                    rawDisplay: formatRbCount(raw),
+                    normalizedPerTti: null,
+                    normalizedDisplay: `N/A (raw ${formatRbCount(raw)} > ${cap}/TTI cap)`,
+                    sanity: `Flag: impossible per-TTI value (raw=${formatRbCount(raw)}, cap=${cap}/TTI). Check metric mapping/units.`,
+                    flagged: true,
+                    windowTti: win
+                };
+            }
+            return {
+                hasRaw: true,
+                raw,
+                rawDisplay: formatRbCount(raw),
+                normalizedPerTti: normalized,
+                normalizedDisplay: `${formatRbCount(normalized)} /TTI (raw ${formatRbCount(raw)}, ~${win} TTI aggregate)`,
+                sanity: `Flag: raw ${formatRbCount(raw)} is > ${cap}/TTI cap. Interpreted as aggregate over ~${win} TTI.`,
+                flagged: true,
+                windowTti: win
+            };
+        })();
+        const allocatedRbsValueDisplay = allocatedRbsNormInfo.normalizedDisplay;
+        const allocatedRbsRawDisplay = allocatedRbsNormInfo.rawDisplay;
+        const allocatedRbsSanityValue = allocatedRbsNormInfo.sanity;
+        const allocatedRbsEstValue = Number.isFinite(allocatedRbsValueNum) && allocatedRbsValueNum >= 0
+            ? Math.round(Number.isFinite(allocatedRbsNormInfo.normalizedPerTti) ? allocatedRbsNormInfo.normalizedPerTti : allocatedRbsValueNum)
+            : allocatedRbsEstRaw;
+        const tbsValue = getByTrpLabel('TBS', 'Transport Block Size') ??
+            getAny(
+                'TBS',
+                'Transport Block Size',
+                'DL TBS',
+                'PDSCH TBS',
+                'PUSCH TBS',
+                'Radio.Lte.ServingCell[8].Pdsch.Tbs',
+                'Radio.Lte.ServingCellTotal.Pdsch.Tbs',
+                'Radio.Lte.ServingCell[8].Pusch.Tbs',
+                'Radio.Lte.ServingCellTotal.Pusch.Tbs'
+            ) ??
+            findByTokens(['transport', 'block', 'size']) ??
+            findByTokens(['pdsch', 'tbs']) ??
+            findByTokens(['pusch', 'tbs']) ??
+            findByTokens(['tbs']);
+        const allocatedRbsUlValue = getByTrpLabel('Allocated RBs UL', 'UL PRB Allocated') ??
+            getAny(
+                'Allocated RBs UL',
+                'UL PRB Allocated',
+                'Radio.Lte.ServingCell[8].Pusch.NumberOfResourceBlocks',
+                'Radio.Lte.ServingCellTotal.Pusch.NumberOfResourceBlocks',
+                'Radio.Lte.ServingCell[8].Pusch.AllocatedPrb',
+                'Radio.Lte.ServingCellTotal.Pusch.AllocatedPrb'
+            ) ??
+            findByTokens(['pusch', 'numberofresourceblocks']) ??
+            findByTokens(['allocated', 'rb', 'ul']) ??
+            findByTokens(['allocated', 'prb', 'ul']);
+        const tbsUlValue = getByTrpLabel('TBS UL', 'UL TBS', 'PUSCH TBS') ??
+            getAny(
+                'TBS UL',
+                'UL TBS',
+                'PUSCH TBS',
+                'Radio.Lte.ServingCell[8].Pusch.Tbs',
+                'Radio.Lte.ServingCellTotal.Pusch.Tbs',
+                'Radio.Lte.ServingCell[8].Pusch.TransportBlockSize',
+                'Radio.Lte.ServingCellTotal.Pusch.TransportBlockSize'
+            ) ??
+            findByTokens(['pusch', 'tbs']) ??
+            findByTokens(['tbs', 'ul']);
+        const harqProcessValue = getByTrpLabel('HARQ process-level') ??
+            getAny(
+                'HARQ process-level',
+                'HARQ Process',
+                'Radio.Lte.ServingCell[8].Harq.ProcessId',
+                'Radio.Lte.ServingCellTotal.Harq.ProcessId'
+            ) ??
+            findByTokens(['harq', 'process']);
+        const macRetxValue = getByTrpLabel('MAC retransmissions') ??
+            getAny(
+                'MAC retransmissions',
+                'Radio.Lte.ServingCell[8].Mac.Retransmissions',
+                'Radio.Lte.ServingCellTotal.Mac.Retransmissions'
+            ) ??
+            findByTokens(['mac', 'retrans']) ??
+            findByTokens(['mac', 'retx']);
+        const rlcRetxValue = getByTrpLabel('RLC retransmissions') ??
+            getAny(
+                'RLC retransmissions',
+                'Radio.Lte.ServingCell[8].Rlc.Retransmissions',
+                'Radio.Lte.ServingCellTotal.Rlc.Retransmissions'
+            ) ??
+            findByTokens(['rlc', 'retrans']) ??
+            findByTokens(['rlc', 'retx']);
+        const l1l2PerTtiExactValue = getAny('L1/L2 per-TTI exact', '__l1l2_per_tti_exact');
+        const l1l2DecodeNoteValue = getAny('L1/L2 decode note', '__l1l2_decode_note');
         const blerDlValue = getByTrpLabel('BLER DL') ??
             getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl', 'DL IBLER (%)') ??
             findByTokens(['bler', 'dl']) ??
             findByTokens(['dl', 'ibler']) ??
             findByTokens(['bler']);
+        const blerUlValue = getByTrpLabel('BLER UL', 'UL BLER') ??
+            getAny('BLER UL', 'blerUl', 'UL BLER', 'Radio.Lte.ServingCell[8].BlerUl', 'Radio.Lte.ServingCellTotal.BlerUl', 'UL IBLER (%)') ??
+            findByTokens(['bler', 'ul']) ??
+            findByTokens(['ul', 'ibler']);
+        const normalizePercentInput = (v) => {
+            if (v === undefined || v === null) return null;
+            let n = Number(v);
+            if (!Number.isFinite(n) && typeof v === 'string') {
+                const m = String(v).match(/-?\d+(?:\.\d+)?/);
+                if (m) n = Number(m[0]);
+            }
+            if (!Number.isFinite(n) || n < 0) return null;
+            if (n <= 1) n *= 100;
+            if (n > 100) n = 100;
+            return Number(n.toFixed(2));
+        };
+        const harqProxyPer100 = (() => {
+            const blerPct = normalizePercentInput(blerDlValue);
+            if (!Number.isFinite(blerPct)) return null;
+            const p = Math.max(0, Math.min(1, blerPct / 100));
+            const est = p + (p * p) + (p * p * p);
+            return Number((est * 100).toFixed(1));
+        })();
+        const harqProxyDisplay = Number.isFinite(harqProxyPer100) ? `${harqProxyPer100} /100 TB (from BLER)` : undefined;
+        const harqHasDirect = hasValue(harqValue);
+        const harqDisplay = harqHasDirect ? harqValue : harqProxyDisplay;
+        const layersValue = (() => {
+            const raw = getByTrpLabel('#layers', 'Layers', 'Number of layers') ??
+                getAny(
+                    '#layers',
+                    'Layers',
+                    'Number of layers',
+                    'Num Layers',
+                    'Radio.Lte.ServingCell[8].Layers',
+                    'Radio.Lte.ServingCellTotal.Layers'
+                ) ??
+                findByTokens(['number', 'layers']) ??
+                findByTokens(['num', 'layers']) ??
+                findByTokens(['layers']);
+            const norm = normalizeRankLayers(raw);
+            if (norm !== null) return norm;
+            if (rankLayersValue !== null && rankLayersValue !== undefined) return rankLayersValue;
+            if (rankRiValue !== null && rankRiValue !== undefined) return rankRiValue;
+            return raw;
+        })();
 
         const parseNum = (v) => {
             const n = Number(v);
@@ -9299,48 +15096,898 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         const currPci = parseNum(sSC);
         const prevEarfcn = parseNum(getPointValCI(prevPoint, 'Radio.Lte.ServingCell[8].Downlink.Earfcn') ?? getPointValCI(prevPoint, 'freq') ?? getPointByTokens(prevPoint, ['earfcn']));
         const currEarfcn = parseNum(sFreq);
+        const rrcStateExactRaw = getAny('RRC State (decoded exact)', '__decoded_rrc_state_exact');
+        const rrcStateExactDisplay = normalizeRrcStateLabel(rrcStateExactRaw) ?? (hasValue(rrcStateExactRaw) ? String(rrcStateExactRaw) : undefined);
+        const rrcStateExactSource = String(p && p.__rrcStateExactSource || '').trim();
         const prevRrc = getPointValCI(prevPoint, 'RRC State') ?? getPointByTokens(prevPoint, ['rrc', 'state']);
-        const currRrc = getAny('RRC State', 'rrcState', 'Radio.Lte.ServingCell[8].RrcState') ?? findByTokens(['rrc', 'state']);
+        const currRrc = getAny(
+            'RRC State',
+            'rrcState',
+            'Radio.Lte.ServingCell[8].RrcState',
+            'Radio.Lte.ServingCellTotal.RrcState',
+            'Radio.Lte.Rrc.State',
+            'Radio.Lte.Rrc.ConnectionState'
+        ) ?? findByTokens(['rrc', 'state']) ?? findByTokens(['connection', 'state']);
         const prevTa = getPointTimingAdvance(prevPoint);
         const currTa = normalizeTa(timingAdvanceValue);
-        const nearEventNames = (() => {
+        const getEventParamValue = (ev, id) => {
+            if (!ev || !id) return undefined;
+            const wanted = String(id).toLowerCase();
+            const params = Array.isArray(ev.params) ? ev.params : [];
+            for (const pRow of params) {
+                if (!pRow || typeof pRow !== 'object') continue;
+                const pid = String(pRow.param_id || '').toLowerCase();
+                if (pid !== wanted) continue;
+                return pRow.param_value;
+            }
+            if (ev.params_map && typeof ev.params_map === 'object') {
+                const key = Object.keys(ev.params_map).find((k) => String(k || '').toLowerCase() === wanted);
+                if (key) return ev.params_map[key];
+            }
+            if (ev.properties && typeof ev.properties === 'object') {
+                const key = Object.keys(ev.properties).find((k) => String(k || '').toLowerCase() === wanted);
+                if (key) return ev.properties[key];
+            }
+            return undefined;
+        };
+        const nearEventsDetailed = (() => {
             if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return [];
             const target = pointDetailsTsMs(p.time);
             if (!Number.isFinite(target)) return [];
             const windowMs = 10000;
-            const names = activeLog.events
-                .filter((ev) => {
-                    const te = pointDetailsTsMs(ev && ev.time);
-                    return Number.isFinite(te) && Math.abs(te - target) <= windowMs;
-                })
-                .map(ev => String(ev && ev.event_name || '').trim())
-                .filter(Boolean);
-            return Array.from(new Set(names));
+            const rows = [];
+            activeLog.events.forEach((ev) => {
+                const te = pointDetailsTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts));
+                if (!Number.isFinite(te) || Math.abs(te - target) > windowMs) return;
+                const nameRaw = ev && (
+                    ev.event_name ??
+                    ev.event ??
+                    ev.name ??
+                    ev.message ??
+                    (ev.properties && (ev.properties.Event ?? ev.properties.Message))
+                );
+                const name = String(nameRaw || '').trim();
+                if (!name) return;
+                const decodedRrcRecfg = getEventParamValue(ev, 'rrc_recfg_summary');
+                const hoCmdInf = getEventParamValue(ev, 'ho_command_inferred');
+                const recfgCompleteDelayMs = Number(getEventParamValue(ev, 'rrc_recfg_complete_delay_ms'));
+                const recfgA3a5 = getEventParamValue(ev, 'rrc_recfg_a3a5_inferred');
+                const recfgA3a5Thresholds = getEventParamValue(ev, 'rrc_recfg_a3a5_thresholds_inferred');
+                const recfgMeasReportTime = getEventParamValue(ev, 'rrc_recfg_meas_report_time');
+                const recfgA5ServingThresholdDbm = Number(getEventParamValue(ev, 'rrc_recfg_a5_serving_threshold_est_dbm'));
+                const recfgA5NeighborThresholdDbm = Number(getEventParamValue(ev, 'rrc_recfg_a5_neighbor_threshold_est_dbm'));
+                const recfgBearer = getEventParamValue(ev, 'rrc_recfg_bearer_inferred');
+                const recfgDrx = getEventParamValue(ev, 'rrc_recfg_drx_inferred');
+                const recfgHoStartComplete = getEventParamValue(ev, 'rrc_recfg_ho_start_complete');
+                const recfgRrcTransition = getEventParamValue(ev, 'rrc_recfg_rrc_transition');
+                const recfgCellPciChange = getEventParamValue(ev, 'rrc_recfg_cell_pci_change');
+                const recfgEarfcnBandChange = getEventParamValue(ev, 'rrc_recfg_earfcn_band_change');
+                const rrcRecfgFullDecoded = getEventParamValue(ev, 'rrc_recfg_full_decoded');
+                const rrcRecfgFullDecoder = getEventParamValue(ev, 'rrc_recfg_full_decoder');
+                const rrcRecfgFullType = getEventParamValue(ev, 'rrc_recfg_full_type');
+                const rrcRecfgFullJson = getEventParamValue(ev, 'rrc_recfg_full_json');
+                const rrcRecfgMeasConfigPresent = getEventParamValue(ev, 'rrc_recfg_meas_config_present');
+                const rrcRecfgMeasConfigJson = getEventParamValue(ev, 'rrc_recfg_meas_config_json');
+                const measReportFullDecoded = getEventParamValue(ev, 'measurement_report_full_decoded');
+                const measReportFullType = getEventParamValue(ev, 'measurement_report_full_type');
+                const measReportMeasId = getEventParamValue(ev, 'measurement_report_measid');
+                const measReportNeighborsJson = getEventParamValue(ev, 'measurement_report_neighbors_json');
+                const measReportServFreqJson = getEventParamValue(ev, 'measurement_report_servfreq_json');
+                const rrcMessageId = getEventParamValue(ev, 'rrc_message_id');
+                const rrcMessageSummary = getEventParamValue(ev, 'rrc_message_summary');
+                const ueInfoReqSummary = getEventParamValue(ev, 'ue_info_req_summary');
+                const ueInfoRspSummary = getEventParamValue(ev, 'ue_info_rsp_summary');
+                const ueInfoReqRlfReportReq = getEventParamValue(ev, 'ue_info_req_rlf_report_req');
+                const ueInfoRspHasRlfReport = getEventParamValue(ev, 'ue_info_rsp_has_rlf_report');
+                const ueInfoRspRlfRootCause = getEventParamValue(ev, 'ue_info_rsp_rlf_root_cause');
+                const ueInfoRspRlfRootCauseDetails = getEventParamValue(ev, 'ue_info_rsp_rlf_root_cause_details');
+                const ueInfoRspReestTimeline = getEventParamValue(ev, 'ue_info_rsp_reest_timeline');
+                const ueInfoRspReasonBreakdown = getEventParamValue(ev, 'ue_info_rsp_rlf_reason_breakdown');
+                rows.push({
+                    name,
+                    ms: te,
+                    time: new Date(te).toISOString(),
+                    decodedRrcRecfg: (decodedRrcRecfg === undefined || decodedRrcRecfg === null) ? undefined : String(decodedRrcRecfg),
+                    hoCommandInferred: (hoCmdInf === undefined || hoCmdInf === null) ? undefined : String(hoCmdInf),
+                    recfgCompleteDelayMs: Number.isFinite(recfgCompleteDelayMs) ? recfgCompleteDelayMs : null,
+                    recfgA3a5: (recfgA3a5 === undefined || recfgA3a5 === null) ? undefined : String(recfgA3a5),
+                    recfgA3a5Thresholds: (recfgA3a5Thresholds === undefined || recfgA3a5Thresholds === null) ? undefined : String(recfgA3a5Thresholds),
+                    recfgMeasReportTime: (recfgMeasReportTime === undefined || recfgMeasReportTime === null) ? undefined : String(recfgMeasReportTime),
+                    recfgA5ServingThresholdDbm: Number.isFinite(recfgA5ServingThresholdDbm) ? recfgA5ServingThresholdDbm : null,
+                    recfgA5NeighborThresholdDbm: Number.isFinite(recfgA5NeighborThresholdDbm) ? recfgA5NeighborThresholdDbm : null,
+                    recfgBearer: (recfgBearer === undefined || recfgBearer === null) ? undefined : String(recfgBearer),
+                    recfgDrx: (recfgDrx === undefined || recfgDrx === null) ? undefined : String(recfgDrx),
+                    recfgHoStartComplete: (recfgHoStartComplete === undefined || recfgHoStartComplete === null) ? undefined : String(recfgHoStartComplete),
+                    recfgRrcTransition: (recfgRrcTransition === undefined || recfgRrcTransition === null) ? undefined : String(recfgRrcTransition),
+                    recfgCellPciChange: (recfgCellPciChange === undefined || recfgCellPciChange === null) ? undefined : String(recfgCellPciChange),
+                    recfgEarfcnBandChange: (recfgEarfcnBandChange === undefined || recfgEarfcnBandChange === null) ? undefined : String(recfgEarfcnBandChange),
+                    rrcRecfgFullDecoded: (rrcRecfgFullDecoded === undefined || rrcRecfgFullDecoded === null) ? undefined : String(rrcRecfgFullDecoded),
+                    rrcRecfgFullDecoder: (rrcRecfgFullDecoder === undefined || rrcRecfgFullDecoder === null) ? undefined : String(rrcRecfgFullDecoder),
+                    rrcRecfgFullType: (rrcRecfgFullType === undefined || rrcRecfgFullType === null) ? undefined : String(rrcRecfgFullType),
+                    rrcRecfgFullJson: (rrcRecfgFullJson === undefined || rrcRecfgFullJson === null) ? undefined : String(rrcRecfgFullJson),
+                    rrcRecfgMeasConfigPresent: (rrcRecfgMeasConfigPresent === undefined || rrcRecfgMeasConfigPresent === null) ? undefined : String(rrcRecfgMeasConfigPresent),
+                    rrcRecfgMeasConfigJson: (rrcRecfgMeasConfigJson === undefined || rrcRecfgMeasConfigJson === null) ? undefined : String(rrcRecfgMeasConfigJson),
+                    measReportFullDecoded: (measReportFullDecoded === undefined || measReportFullDecoded === null) ? undefined : String(measReportFullDecoded),
+                    measReportFullType: (measReportFullType === undefined || measReportFullType === null) ? undefined : String(measReportFullType),
+                    measReportMeasId: (measReportMeasId === undefined || measReportMeasId === null) ? undefined : String(measReportMeasId),
+                    measReportNeighborsJson: (measReportNeighborsJson === undefined || measReportNeighborsJson === null) ? undefined : String(measReportNeighborsJson),
+                    measReportServFreqJson: (measReportServFreqJson === undefined || measReportServFreqJson === null) ? undefined : String(measReportServFreqJson),
+                    rrcMessageId: (rrcMessageId === undefined || rrcMessageId === null) ? undefined : String(rrcMessageId),
+                    rrcMessageSummary: (rrcMessageSummary === undefined || rrcMessageSummary === null) ? undefined : String(rrcMessageSummary),
+                    ueInfoReqSummary: (ueInfoReqSummary === undefined || ueInfoReqSummary === null) ? undefined : String(ueInfoReqSummary),
+                    ueInfoRspSummary: (ueInfoRspSummary === undefined || ueInfoRspSummary === null) ? undefined : String(ueInfoRspSummary),
+                    ueInfoReqRlfReportReq: (ueInfoReqRlfReportReq === undefined || ueInfoReqRlfReportReq === null) ? undefined : String(ueInfoReqRlfReportReq),
+                    ueInfoRspHasRlfReport: (ueInfoRspHasRlfReport === undefined || ueInfoRspHasRlfReport === null) ? undefined : String(ueInfoRspHasRlfReport),
+                    ueInfoRspRlfRootCause: (ueInfoRspRlfRootCause === undefined || ueInfoRspRlfRootCause === null) ? undefined : String(ueInfoRspRlfRootCause),
+                    ueInfoRspRlfRootCauseDetails: (ueInfoRspRlfRootCauseDetails === undefined || ueInfoRspRlfRootCauseDetails === null) ? undefined : String(ueInfoRspRlfRootCauseDetails),
+                    ueInfoRspReestTimeline: (ueInfoRspReestTimeline === undefined || ueInfoRspReestTimeline === null) ? undefined : String(ueInfoRspReestTimeline),
+                    ueInfoRspReasonBreakdown: (ueInfoRspReasonBreakdown === undefined || ueInfoRspReasonBreakdown === null) ? undefined : String(ueInfoRspReasonBreakdown),
+                    eventObj: ev
+                });
+            });
+            rows.sort((a, b) => a.ms - b.ms);
+            return rows;
         })();
-        const pickNearEventSummary = (regex, limit = 2) => {
-            const rows = nearEventNames.filter(n => regex.test(String(n || '')));
-            if (!rows.length) return undefined;
-            return rows.slice(0, limit).join(' | ');
+        const nearEventNames = (() => {
+            const seen = new Set();
+            const out = [];
+            nearEventsDetailed.forEach((row) => {
+                const key = String(row && row.name || '');
+                if (!key || seen.has(key)) return;
+                seen.add(key);
+                out.push(key);
+            });
+            return out;
+        })();
+        const summarizeNearEventRows = (rows, limit = 2) => {
+            if (!Array.isArray(rows) || !rows.length) return undefined;
+            const out = [];
+            const seen = new Set();
+            for (let i = 0; i < rows.length; i++) {
+                const name = String(rows[i] && rows[i].name || '').trim();
+                if (!name) continue;
+                const key = name.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push(name);
+                if (out.length >= limit) break;
+            }
+            return out.length ? out.join(' | ') : undefined;
+        };
+        const pickNearEventRows = (regex, limit = 2) => {
+            if (!(regex instanceof RegExp)) return [];
+            const rows = nearEventsDetailed.filter((row) => regex.test(String(row && row.name || '')));
+            return rows.slice(0, limit);
+        };
+        const pickNearEventSummary = (regex, limit = 2) => summarizeNearEventRows(pickNearEventRows(regex, limit), limit);
+        const findNearestEventGapMs = (startRows, endRows, maxGapMs = 30000) => {
+            if (!Array.isArray(startRows) || !Array.isArray(endRows) || !startRows.length || !endRows.length) return null;
+            let best = null;
+            startRows.forEach((start) => {
+                const s = Number(start && start.ms);
+                if (!Number.isFinite(s)) return;
+                for (let i = 0; i < endRows.length; i++) {
+                    const e = Number(endRows[i] && endRows[i].ms);
+                    if (!Number.isFinite(e) || e < s) continue;
+                    const dt = e - s;
+                    if (dt > maxGapMs) break;
+                    if (best === null || dt < best) best = dt;
+                    break;
+                }
+            });
+            return best;
+        };
+        const toFiniteNum = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const dlTpNum = toFiniteNum(dlThroughput);
+        const appDlTpNum = toFiniteNum(appThroughputDl);
+        const ulTpNum = toFiniteNum(ulThroughput);
+        // If throughput is present, RRC is practically in connected context for this DT sample.
+        const hasTrafficEvidence = [dlTpNum, appDlTpNum, ulTpNum].some((v) => Number.isFinite(v) && v > 50);
+        const hasConnectedSignalEvent = nearEventNames.some((n) => /(handover|rrc.*(reconfig|setup|resume|connected)|intrafrequencyhandoverevent|erab|drb|srb|securitymode|service request)/i.test(String(n || '')));
+        const hasIdleSignalEvent = nearEventNames.some((n) => /(paging|rrc.*release|release complete|\brrc.*idle\b)/i.test(String(n || '')));
+        const bearerRawBase = getByTrpLabel('Bearer / EPS Bearer') ??
+            getAny('Bearer / EPS Bearer', 'EPS Bearer', 'Bearer', 'EpsBearer', 'ERAB', 'DRB') ??
+            findByTokens(['eps', 'bearer']) ??
+            findByTokens(['bearer']);
+        const inferBearerActive = (raw) => {
+            const txt = String(raw ?? '').trim();
+            if (txt) {
+                const low = txt.toLowerCase();
+                if (/(inactive|deactiv|released?|detach|removed?|none|no bearer|failed)/i.test(low)) return 'Inactive';
+                if (/(active|established|connected|erab|drb|dedicated|eps bearer)/i.test(low)) return 'Active';
+                if (/(bearer signaling observed|bearer.*reconfig|bearer may be impacted)/i.test(low)) return 'Active (inferred)';
+            }
+            if (hasTrafficEvidence || hasConnectedSignalEvent) return 'Active (inferred)';
+            if (hasIdleSignalEvent) return 'Inactive (inferred)';
+            return undefined;
         };
         const rrcFromEvents = (() => {
             const s = pickNearEventSummary(/rrc/i, 1);
-            if (!s) return undefined;
-            const stateMatch = String(s).match(/\b(IDLE|CONNECTED|INACTIVE|CELL_DCH|CELL_FACH|CELL_PCH|URA_PCH)\b/i);
-            return stateMatch ? stateMatch[1].toUpperCase() : s;
+            if (s) {
+                const stateMatch = String(s).match(/\b(IDLE|CONNECTED|INACTIVE|CELL_DCH|CELL_FACH|CELL_PCH|URA_PCH)\b/i);
+                if (stateMatch) return stateMatch[1].toUpperCase();
+            }
+            if (hasConnectedSignalEvent || hasTrafficEvidence) return 'CONNECTED';
+            if (hasIdleSignalEvent && !hasTrafficEvidence) return 'IDLE';
+            return undefined;
         })();
+        const rawRrcStateValue = currRrc ?? rrcFromEvents;
+        const rrcStateDisplay = normalizeRrcStateLabel(rawRrcStateValue);
+        let rrcStateFinal = rrcStateDisplay ?? undefined;
+        if (!hasValue(rrcStateExactDisplay) && typeof rrcStateFinal === 'string' && /^idle\b/i.test(rrcStateFinal) && (hasTrafficEvidence || hasConnectedSignalEvent)) {
+            rrcStateFinal = 'Connected';
+        }
         const hoFromEvents = pickNearEventSummary(/handover|\bho\b|x2|s1/i, 2);
+        const isHoCommandEvent = (name) => {
+            const n = String(name || '').toLowerCase();
+            if (!n) return false;
+            if (/(fail|failure|complete|completed|success|reject|abort|cancel|rlf|radio link failure)/i.test(n)) return false;
+            return /(ho\s*cmd|ho\s*command|handover\s*command|rrcconnectionreconfiguration(?!complete)|mobilitycontrolinfo|handover.*(trigger|start|prepare|preparation))/i.test(n);
+        };
+        const isHoCompleteEvent = (name) => {
+            const n = String(name || '').toLowerCase();
+            if (!n) return false;
+            return /(handover.*(complete|completed|success|execution)|ho\s*complete|rrcconnectionreconfigurationcomplete|x2ap.*handover.*(notify|confirm|ack)|s1ap.*handover.*notify)/i.test(n);
+        };
+        const a3a5RowsAll = nearEventsDetailed.filter((row) => /(^|[^a-z0-9])(a3|a5)([^a-z0-9]|$)|measurement.*report.*a[35]|event\s*a[35]|a3\/a5/i.test(String(row && row.name || '')));
+        const hoCommandRowsAll = nearEventsDetailed.filter((row) => isHoCommandEvent(row && row.name));
+        const hoCompleteRowsAll = nearEventsDetailed.filter((row) => isHoCompleteEvent(row && row.name));
+        const hoFailureRowsAll = nearEventsDetailed.filter((row) => /(handover|ho).*(fail|failure|reject|abort|cancel)|\bhof\b|t304.*expir/i.test(String(row && row.name || '')));
+        const rlfRowsAll = nearEventsDetailed.filter((row) => /\brlf\b|radio\s*link\s*failure|out\s*of\s*sync|t310|n310|rrc.*reestablish/i.test(String(row && row.name || '')));
+        const reestRowsAll = nearEventsDetailed.filter((row) => /rrcconnectionreestablishment|rrc\s*re.?establish|re.?establishment/i.test(String(row && row.name || '')));
+        const caScellAddRowsAll = nearEventsDetailed.filter((row) => /(carrier\s*aggregation|\bca\b|s.?cell).*(add|activate|setup|config|enable)/i.test(String(row && row.name || '')));
+        const caScellRemoveRowsAll = nearEventsDetailed.filter((row) => /(carrier\s*aggregation|\bca\b|s.?cell).*(remove|deactiv|release|disable|delete)/i.test(String(row && row.name || '')));
+        const dataSessionStartRowsAll = nearEventsDetailed.filter((row) => /(data|session|pdn|default\s*bearer|eps\s*bearer|ip).*(start|setup|establish|connect|activate|request)/i.test(String(row && row.name || '')));
+        const dataSessionStopRowsAll = nearEventsDetailed.filter((row) => /(data|session|pdn|default\s*bearer|eps\s*bearer|ip).*(stop|end|release|disconnect|deactiv|terminate|detach)/i.test(String(row && row.name || '')));
+        const volteStartRowsAll = nearEventsDetailed.filter((row) => /(volte|ims|sip|mmtel|qci.?1).*(start|setup|invite|ring|answer|connect|establish)/i.test(String(row && row.name || '')));
+        const volteStopRowsAll = nearEventsDetailed.filter((row) => /(volte|ims|sip|mmtel|qci.?1).*(end|stop|bye|release|disconnect|terminate|drop)/i.test(String(row && row.name || '')));
+        const pdcpRowsAll = nearEventsDetailed.filter((row) => /\bpdcp\b.*(discard|reorder|reordering|out.?of.?order)/i.test(String(row && row.name || '')));
+        const ueInfoReqRowsAll = nearEventsDetailed.filter((row) => /ueinformationrequest/i.test(String(row && row.name || '')) || String(row && row.rrcMessageId || '') === 'ue_information_request');
+        const ueInfoRspRowsAll = nearEventsDetailed.filter((row) => /ueinformationresponse/i.test(String(row && row.name || '')) || String(row && row.rrcMessageId || '') === 'ue_information_response');
+        const reestReqRowsAll = nearEventsDetailed.filter((row) => /rrcconnectionreestablishmentrequest/i.test(String(row && row.name || '')));
+        const reestCompleteRowsAll = nearEventsDetailed.filter((row) => /rrcconnectionreestablishmentcomplete/i.test(String(row && row.name || '')));
+        const reestRejectRowsAll = nearEventsDetailed.filter((row) => /rrcconnectionreestablishmentreject/i.test(String(row && row.name || '')));
+        const recfgDecodedRows = nearEventsDetailed.filter((row) => {
+            if (!row) return false;
+            if (hasValue(row.decodedRrcRecfg)) return true;
+            return /^yes$/i.test(String(row.rrcRecfgFullDecoded || ''));
+        });
+        const pointMsForEvents = pointDetailsTsMs(p.time);
+        const toIntOrNull = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.round(n) : null;
+        };
+        const pCellSCellInfo = (() => {
+            const parseLocal = (raw) => {
+                if (raw === undefined || raw === null) return null;
+                if (typeof raw === 'object') return raw;
+                const txt = String(raw || '').trim();
+                if (!txt || txt === '-' || /^n\/?a$/i.test(txt)) return null;
+                try {
+                    return JSON.parse(txt);
+                } catch (_e) {
+                    return null;
+                }
+            };
+            const normalizeEarfcn = (v) => {
+                const n = toIntOrNull(v);
+                if (!Number.isFinite(n)) return null;
+                if (n <= 0) return null;
+                if (n > 10000 && (n % 2) === 0) return Math.round(n / 2);
+                return n;
+            };
+            const propRowsByIdx = new Map();
+            const feedProps = (src) => {
+                if (!src || typeof src !== 'object') return;
+                Object.entries(src).forEach(([k, v]) => {
+                    const m = String(k || '').match(/^Radio\.Lte\.ServingCell\[(\d+)\]\.(.+)$/i);
+                    if (!m) return;
+                    const idx = String(m[1]);
+                    const field = String(m[2] || '').toLowerCase();
+                    const row = propRowsByIdx.get(idx) || { idx: Number(idx), pci: null, earfcn: null, rsrp: null, rsrq: null };
+                    if (field === 'pci') row.pci = toIntOrNull(v);
+                    if (field === 'downlink.earfcn' || field === 'earfcn') row.earfcn = normalizeEarfcn(v);
+                    if (field === 'rsrp') row.rsrp = toFiniteNum(v);
+                    if (field === 'rsrq') row.rsrq = toFiniteNum(v);
+                    propRowsByIdx.set(idx, row);
+                });
+            };
+            feedProps(p);
+            feedProps(p && p.properties);
+            const propRows = Array.from(propRowsByIdx.values()).filter((r) => Number.isFinite(r.pci) || Number.isFinite(r.earfcn));
+            const servingPciNum = toIntOrNull(sSC);
+            const servingFreqNum = normalizeEarfcn(sFreq);
+            let pcellIdx = null;
+            for (let i = 0; i < propRows.length; i++) {
+                const r = propRows[i];
+                if (Number.isFinite(servingPciNum) && Number.isFinite(r.pci) && r.pci !== servingPciNum) continue;
+                if (Number.isFinite(servingFreqNum) && Number.isFinite(r.earfcn) && r.earfcn !== servingFreqNum) continue;
+                pcellIdx = r.idx;
+                break;
+            }
+            if (!Number.isFinite(pcellIdx) && propRows.length) {
+                pcellIdx = propRows[0].idx;
+            }
+            const pcellRow = Number.isFinite(pcellIdx) ? propRows.find((r) => r.idx === pcellIdx) : null;
+            const pcellDisplay = (() => {
+                const pci = Number.isFinite(pcellRow && pcellRow.pci) ? pcellRow.pci : servingPciNum;
+                const freq = Number.isFinite(pcellRow && pcellRow.earfcn) ? pcellRow.earfcn : servingFreqNum;
+                const rsrp = toFiniteNum((pcellRow && pcellRow.rsrp) ?? sRSCP);
+                const rsrq = toFiniteNum((pcellRow && pcellRow.rsrq) ?? sEcNo);
+                const parts = [];
+                if (Number.isFinite(pci) || Number.isFinite(freq)) {
+                    parts.push(`${Number.isFinite(pci) ? pci : '-'} / ${Number.isFinite(freq) ? freq : '-'}`);
+                }
+                if (Number.isFinite(rsrp)) parts.push(`RSRP ${rsrp}`);
+                if (Number.isFinite(rsrq)) parts.push(`RSRQ ${rsrq}`);
+                return parts.length ? parts.join(' | ') : 'N/A';
+            })();
+            const scellRows = [];
+            propRows.forEach((r) => {
+                if (Number.isFinite(pcellIdx) && r.idx === pcellIdx) return;
+                scellRows.push({
+                    source: 'ServingCell',
+                    sourcePriority: 0,
+                    idx: Number.isFinite(r.idx) ? r.idx : null,
+                    sfid: null,
+                    dms: 0,
+                    pci: Number.isFinite(r.pci) ? r.pci : null,
+                    earfcn: Number.isFinite(r.earfcn) ? r.earfcn : null,
+                    rsrp: toFiniteNum(r.rsrp),
+                    rsrq: toFiniteNum(r.rsrq),
+                });
+            });
+
+            const servFreqRowsByKey = new Map();
+            const shouldReplaceMrRow = (prev, next) => {
+                if (!prev) return true;
+                const prevScore =
+                    (Number.isFinite(prev.rsrp) ? 2 : 0) +
+                    (Number.isFinite(prev.rsrq) ? 1 : 0) +
+                    (Number.isFinite(prev.pci) ? 1 : 0) +
+                    (Number.isFinite(prev.earfcn) ? 1 : 0);
+                const nextScore =
+                    (Number.isFinite(next.rsrp) ? 2 : 0) +
+                    (Number.isFinite(next.rsrq) ? 1 : 0) +
+                    (Number.isFinite(next.pci) ? 1 : 0) +
+                    (Number.isFinite(next.earfcn) ? 1 : 0);
+                if (nextScore !== prevScore) return nextScore > prevScore;
+                const prevDms = Number.isFinite(prev.dms) ? prev.dms : 999999;
+                const nextDms = Number.isFinite(next.dms) ? next.dms : 999999;
+                if (nextDms !== prevDms) return nextDms < prevDms;
+                const prevRsrp = Number.isFinite(prev.rsrp) ? prev.rsrp : -999;
+                const nextRsrp = Number.isFinite(next.rsrp) ? next.rsrp : -999;
+                return nextRsrp > prevRsrp;
+            };
+            nearEventsDetailed.forEach((row) => {
+                const evMs = Number(row && row.ms);
+                const dms = (Number.isFinite(pointMsForEvents) && Number.isFinite(evMs))
+                    ? Math.abs(evMs - pointMsForEvents)
+                    : 999999;
+                if (Number.isFinite(pointMsForEvents) && Number.isFinite(evMs) && dms > 4000) return;
+                const raw = row && row.measReportServFreqJson;
+                const parsed = parseLocal(raw);
+                if (!Array.isArray(parsed)) return;
+                parsed.forEach((it) => {
+                    if (!it || typeof it !== 'object') return;
+                    const sfid = toIntOrNull(it.servFreqId);
+                    const bestNeighbor = (it.best_neighbor && typeof it.best_neighbor === 'object') ? it.best_neighbor : null;
+                    const bestPci = toIntOrNull(bestNeighbor && bestNeighbor.pci);
+                    const bestEarfcn = normalizeEarfcn(bestNeighbor && bestNeighbor.earfcn);
+                    const earfcn = normalizeEarfcn(it.earfcn) ?? bestEarfcn ?? servingFreqNum;
+                    const sCell = (it.scell && typeof it.scell === 'object') ? it.scell : null;
+                    const sCellRsrp = toFiniteNum(sCell && (sCell.rsrp_dbm ?? sCell.rsrp));
+                    const sCellRsrq = toFiniteNum(sCell && (sCell.rsrq_db ?? sCell.rsrq));
+                    const bestRsrp = toFiniteNum(bestNeighbor && (bestNeighbor.rsrp_dbm ?? bestNeighbor.rsrp));
+                    const bestRsrq = toFiniteNum(bestNeighbor && (bestNeighbor.rsrq_db ?? bestNeighbor.rsrq));
+                    const candidate = {
+                        source: 'SCell(MR)',
+                        sourcePriority: 1,
+                        idx: null,
+                        sfid: Number.isFinite(sfid) ? sfid : null,
+                        dms,
+                        pci: Number.isFinite(bestPci) ? bestPci : null,
+                        earfcn: Number.isFinite(earfcn) ? earfcn : null,
+                        rsrp: Number.isFinite(sCellRsrp) ? sCellRsrp : bestRsrp,
+                        rsrq: Number.isFinite(sCellRsrq) ? sCellRsrq : bestRsrq,
+                    };
+                    if (
+                        !Number.isFinite(candidate.pci) &&
+                        !Number.isFinite(candidate.earfcn) &&
+                        !Number.isFinite(candidate.rsrp) &&
+                        !Number.isFinite(candidate.rsrq)
+                    ) {
+                        return;
+                    }
+                    const key = [
+                        Number.isFinite(candidate.sfid) ? candidate.sfid : '-',
+                        Number.isFinite(candidate.pci) ? candidate.pci : '-',
+                        Number.isFinite(candidate.earfcn) ? candidate.earfcn : '-'
+                    ].join('|');
+                    const prev = servFreqRowsByKey.get(key);
+                    if (shouldReplaceMrRow(prev, candidate)) {
+                        servFreqRowsByKey.set(key, candidate);
+                    }
+                });
+            });
+
+            const mergedScells = [];
+            const findByPciFreq = (rows, candidate) => rows.find((r) => (
+                Number.isFinite(r && r.pci) &&
+                Number.isFinite(candidate && candidate.pci) &&
+                Number.isFinite(r && r.earfcn) &&
+                Number.isFinite(candidate && candidate.earfcn) &&
+                Number(r.pci) === Number(candidate.pci) &&
+                Number(r.earfcn) === Number(candidate.earfcn)
+            ));
+            const upsertScell = (candidate) => {
+                if (!candidate || typeof candidate !== 'object') return;
+                const byIdx = Number.isFinite(candidate.idx)
+                    ? mergedScells.find((r) => Number.isFinite(r && r.idx) && Number(r.idx) === Number(candidate.idx))
+                    : null;
+                const match = byIdx || findByPciFreq(mergedScells, candidate);
+                if (!match) {
+                    mergedScells.push({ ...candidate });
+                    return;
+                }
+                if (!Number.isFinite(match.pci) && Number.isFinite(candidate.pci)) match.pci = candidate.pci;
+                if (!Number.isFinite(match.earfcn) && Number.isFinite(candidate.earfcn)) match.earfcn = candidate.earfcn;
+                if (!Number.isFinite(match.rsrp) && Number.isFinite(candidate.rsrp)) match.rsrp = candidate.rsrp;
+                if (!Number.isFinite(match.rsrq) && Number.isFinite(candidate.rsrq)) match.rsrq = candidate.rsrq;
+                if (!Number.isFinite(match.sfid) && Number.isFinite(candidate.sfid)) match.sfid = candidate.sfid;
+                const prevDms = Number.isFinite(match.dms) ? match.dms : 999999;
+                const nextDms = Number.isFinite(candidate.dms) ? candidate.dms : 999999;
+                if (nextDms < prevDms) match.dms = nextDms;
+                if ((candidate.sourcePriority || 9) < (match.sourcePriority || 9)) {
+                    match.source = candidate.source;
+                    match.sourcePriority = candidate.sourcePriority;
+                }
+            };
+            scellRows.forEach((row) => upsertScell(row));
+            Array.from(servFreqRowsByKey.values()).forEach((row) => upsertScell(row));
+
+            const sortScellRows = (a, b) => {
+                const aPri = Number.isFinite(a && a.sourcePriority) ? a.sourcePriority : 9;
+                const bPri = Number.isFinite(b && b.sourcePriority) ? b.sourcePriority : 9;
+                if (aPri !== bPri) return aPri - bPri;
+                const aIdx = Number.isFinite(a && a.idx) ? a.idx : 9999;
+                const bIdx = Number.isFinite(b && b.idx) ? b.idx : 9999;
+                if (aIdx !== bIdx) return aIdx - bIdx;
+                const aDms = Number.isFinite(a && a.dms) ? a.dms : 999999;
+                const bDms = Number.isFinite(b && b.dms) ? b.dms : 999999;
+                if (aDms !== bDms) return aDms - bDms;
+                const aRsrp = Number.isFinite(a && a.rsrp) ? a.rsrp : -999;
+                const bRsrp = Number.isFinite(b && b.rsrp) ? b.rsrp : -999;
+                if (aRsrp !== bRsrp) return bRsrp - aRsrp;
+                const aPci = Number.isFinite(a && a.pci) ? a.pci : 9999;
+                const bPci = Number.isFinite(b && b.pci) ? b.pci : 9999;
+                return aPci - bPci;
+            };
+
+            const renderScellRow = (r) => {
+                if (!r || typeof r !== 'object') return '';
+                const parts = [];
+                if (Number.isFinite(r.idx)) {
+                    parts.push(`SCell[${r.idx}]`);
+                } else {
+                    parts.push('SCell(MR)');
+                    if (Number.isFinite(r.sfid)) parts.push(`#${r.sfid}`);
+                }
+                if (Number.isFinite(r.pci) || Number.isFinite(r.earfcn)) {
+                    parts.push(`${Number.isFinite(r.pci) ? r.pci : '-'} / ${Number.isFinite(r.earfcn) ? r.earfcn : '-'}`);
+                }
+                if (Number.isFinite(r.rsrp)) parts.push(`RSRP ${r.rsrp}`);
+                if (Number.isFinite(r.rsrq)) parts.push(`RSRQ ${r.rsrq}`);
+                return parts.join(' ');
+            };
+
+            const allSCells = mergedScells
+                .sort(sortScellRows)
+                .map((row) => renderScellRow(row))
+                .filter(Boolean);
+            return {
+                pcell: pcellDisplay,
+                scell: allSCells.length ? allSCells.slice(0, 8).join(' | ') : 'N/A',
+                scellCount: mergedScells.length
+            };
+        })();
+        const recfgDecodedRankedRows = recfgDecodedRows.map((row) => {
+            const srcPci = toIntOrNull(getEventParamValue(row && row.eventObj, 'rrc_recfg_src_pci'));
+            const srcEarfcn = toIntOrNull(getEventParamValue(row && row.eventObj, 'rrc_recfg_src_earfcn'));
+            const tgtPci = toIntOrNull(getEventParamValue(row && row.eventObj, 'rrc_recfg_tgt_pci'));
+            const tgtEarfcn = toIntOrNull(getEventParamValue(row && row.eventObj, 'rrc_recfg_tgt_earfcn'));
+            const matchesCurrPci = Number.isFinite(currPci) && ((srcPci !== null && srcPci === currPci) || (tgtPci !== null && tgtPci === currPci));
+            const matchesCurrEarfcn = Number.isFinite(currEarfcn) && ((srcEarfcn !== null && srcEarfcn === currEarfcn) || (tgtEarfcn !== null && tgtEarfcn === currEarfcn));
+            const matchesPrevPci = Number.isFinite(prevPci) && ((srcPci !== null && srcPci === prevPci) || (tgtPci !== null && tgtPci === prevPci));
+            const matchesPrevEarfcn = Number.isFinite(prevEarfcn) && ((srcEarfcn !== null && srcEarfcn === prevEarfcn) || (tgtEarfcn !== null && tgtEarfcn === prevEarfcn));
+            let score = 0;
+            if (matchesCurrPci) score += 100;
+            if (matchesCurrEarfcn) score += 80;
+            if (matchesPrevPci) score += 40;
+            if (matchesPrevEarfcn) score += 30;
+            const dms = (Number.isFinite(pointMsForEvents) && Number.isFinite(Number(row && row.ms))) ? Math.abs(Number(row.ms) - pointMsForEvents) : 999999;
+            score += Math.max(0, 20 - Math.floor(dms / 250));
+            return {
+                ...row,
+                srcPci, srcEarfcn, tgtPci, tgtEarfcn,
+                score,
+                dms
+            };
+        });
+        const sortRecfgRowsByBestContext = (a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return a.dms - b.dms;
+        };
+        const recfgDecodedPreferredRows = (() => {
+            if (!recfgDecodedRankedRows.length) return [];
+            const sorted = recfgDecodedRankedRows.slice().sort(sortRecfgRowsByBestContext);
+            const best = sorted[0];
+            if (!best) return [];
+            if (best.score > 0) return [best];
+            return [best]; // fallback to nearest decoded row
+        })();
+        const recfgThresholdSourceRow = (() => {
+            const withThresholdHint = recfgDecodedRankedRows.filter((row) => {
+                if (!row) return false;
+                const hasText = hasValue(row.recfgA3a5Thresholds);
+                const hasNums = Number.isFinite(Number(row.recfgA5ServingThresholdDbm)) || Number.isFinite(Number(row.recfgA5NeighborThresholdDbm));
+                const hasMeasTime = hasValue(row.recfgMeasReportTime);
+                const hasDecodedCfg = hasValue(row.rrcRecfgMeasConfigJson);
+                return hasText || hasNums || hasMeasTime || hasDecodedCfg;
+            });
+            const base = withThresholdHint.length ? withThresholdHint : recfgDecodedPreferredRows;
+            if (!base.length) return null;
+            const sorted = base.slice().sort(sortRecfgRowsByBestContext);
+            return sorted[0] || null;
+        })();
+        const parseJsonSafeLocal = (raw) => {
+            if (raw === undefined || raw === null) return null;
+            if (typeof raw === 'object') return raw;
+            const txt = String(raw || '').trim();
+            if (!txt || txt === '-' || /^n\/?a$/i.test(txt)) return null;
+            try {
+                return JSON.parse(txt);
+            } catch (_e) {
+                return null;
+            }
+        };
+        const decodeA3A5FromMeasConfig = (() => {
+            const cfgRows = recfgDecodedPreferredRows.filter((row) => hasValue(row && row.rrcRecfgMeasConfigJson));
+            if (!cfgRows.length) return { triggers: undefined, thresholds: undefined };
+            const triggers = [];
+            const addTrigger = (v) => {
+                if (!v) return;
+                if (!triggers.includes(v)) triggers.push(v);
+            };
+            const toNum = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
+            };
+            const thresholdsOut = [];
+            const pushThreshold = (txt) => {
+                const s = String(txt || '').trim();
+                if (!s) return;
+                if (!thresholdsOut.includes(s)) thresholdsOut.push(s);
+            };
+            cfgRows.forEach((row) => {
+                const txt = String(row && row.rrcRecfgMeasConfigJson || '');
+                if (!txt) return;
+                const up = txt.toUpperCase();
+                if (up.includes('EVENTA3')) addTrigger('A3');
+                if (up.includes('EVENTA5')) addTrigger('A5');
+                const findNum = (regex) => {
+                    const m = txt.match(regex);
+                    if (!m) return null;
+                    return toNum(m[1]);
+                };
+                const a3Offset = findNum(/a3[-_ ]?offset[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
+                const hysteresis = findNum(/hysteresis[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
+                const ttt = (() => {
+                    const m = txt.match(/time[-_ ]?to[-_ ]?trigger[^a-z0-9]{0,8}(ms\d+|\d+)/i);
+                    return m ? String(m[1]) : null;
+                })();
+                const a5s = findNum(/(?:a5[-_ ]?threshold1|threshold1|serving[^a-z0-9]{0,10}threshold)[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
+                const a5n = findNum(/(?:a5[-_ ]?threshold2|threshold2|neighbor[^a-z0-9]{0,10}threshold)[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
+                if (Number.isFinite(a3Offset)) pushThreshold(`A3 offset≈${a3Offset.toFixed(1)} dB`);
+                if (Number.isFinite(hysteresis)) pushThreshold(`hysteresis≈${hysteresis.toFixed(1)} dB`);
+                if (ttt) pushThreshold(`TTT=${ttt}`);
+                const isValidA5Dbm = (v) => Number.isFinite(v) && v <= -40 && v >= -140;
+                if (isValidA5Dbm(a5s) || isValidA5Dbm(a5n)) {
+                    pushThreshold(`A5 S≈${isValidA5Dbm(a5s) ? a5s.toFixed(1) : '?'} dBm, N≈${isValidA5Dbm(a5n) ? a5n.toFixed(1) : '?'} dBm`);
+                }
+            });
+            if (!triggers.length && !thresholdsOut.length) {
+                // Fallback: keep decoded context visible even if schema variant uses unfamiliar keys.
+                const firstCfg = parseJsonSafeLocal(cfgRows[0] && cfgRows[0].rrcRecfgMeasConfigJson);
+                if (firstCfg && typeof firstCfg === 'object') {
+                    const flat = JSON.stringify(firstCfg);
+                    if (/eventa3/i.test(flat)) addTrigger('A3');
+                    if (/eventa5/i.test(flat)) addTrigger('A5');
+                }
+            }
+            return {
+                triggers: triggers.length ? `${triggers.join('/')} measurement trigger(s) (decoded measConfig)` : undefined,
+                thresholds: thresholdsOut.length ? `${thresholdsOut.join('; ')} (decoded measConfig)` : undefined
+            };
+        })();
+        const hoExecMsInferred = findNearestEventGapMs(hoCommandRowsAll, hoCompleteRowsAll, 30000);
+        const hoExecMsDecoded = (() => {
+            const vals = recfgDecodedPreferredRows
+                .map((row) => Number(row && row.recfgCompleteDelayMs))
+                .filter((v) => Number.isFinite(v) && v >= 0);
+            if (!vals.length) return null;
+            return Math.min(...vals);
+        })();
+        const a3a5Decoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgA3a5 || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const a3a5DecodedDirect = decodeA3A5FromMeasConfig.triggers;
+        const a3a5ThresholdsDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgA3a5Thresholds || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const a3a5ThresholdsDecodedDirect = decodeA3A5FromMeasConfig.thresholds;
+        const bearerDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgBearer || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const drxDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgDrx || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const hoStartCompleteDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgHoStartComplete || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const rrcTransitionDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgRrcTransition || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const cellPciChangeDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgCellPciChange || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const earfcnBandChangeDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .map((row) => String(row && row.recfgEarfcnBandChange || '').trim())
+                .filter(Boolean);
+            return rows.length ? rows[0] : undefined;
+        })();
+        const a3a5TriggersInferred = summarizeNearEventRows(a3a5RowsAll, 2);
+        const hoCommandDecoded = (() => {
+            const rows = recfgDecodedPreferredRows
+                .filter((row) => /^yes$/i.test(String(row && row.hoCommandInferred || '')) || /ho command/i.test(String(row && row.decodedRrcRecfg || '')))
+                .map((row) => String(row && row.decodedRrcRecfg || '').trim())
+                .filter(Boolean);
+            if (!rows.length) return undefined;
+            return rows[0];
+        })();
+        const hoCommandInferred = summarizeNearEventRows(hoCommandRowsAll, 2);
+        const hoFailureInferred = summarizeNearEventRows(hoFailureRowsAll, 2);
+        const rlfInferred = summarizeNearEventRows(rlfRowsAll, 2);
+        const parseReasonBreakdownText = (raw) => {
+            const parsed = parseJsonSafeLocal(raw);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            const parts = Object.entries(parsed)
+                .map(([k, v]) => {
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return null;
+                    return `${k}=${Math.round(n)}`;
+                })
+                .filter(Boolean);
+            return parts.length ? parts.join(' | ') : null;
+        };
+        const rlfDecodedRows = ueInfoRspRowsAll.map((row) => {
+            const summary = parseJsonSafeLocal(row && (row.ueInfoRspSummary || row.rrcMessageSummary));
+            const reasonBreakdownObj = parseJsonSafeLocal(row && row.ueInfoRspReasonBreakdown);
+            const reasonBreakdownFromSummary = (summary && typeof summary === 'object') ? summary.rlfReasonBreakdown : undefined;
+            const reasonBreakdownText = parseReasonBreakdownText(reasonBreakdownObj) ||
+                parseReasonBreakdownText(reasonBreakdownFromSummary);
+            return {
+                row,
+                summary: (summary && typeof summary === 'object') ? summary : null,
+                hasRlfReport: (() => {
+                    const direct = String(row && row.ueInfoRspHasRlfReport || '').toLowerCase();
+                    if (direct === 'yes' || direct === 'true' || direct === '1') return true;
+                    if (direct === 'no' || direct === 'false' || direct === '0') return false;
+                    return Boolean(summary && summary.hasRlfReport);
+                })(),
+                rootCause: String(row && row.ueInfoRspRlfRootCause || (summary && summary.rlfRootCause) || '').trim(),
+                rootCauseDetails: String(row && row.ueInfoRspRlfRootCauseDetails || (summary && summary.rlfRootCauseDetails) || '').trim(),
+                reestTimeline: String(row && row.ueInfoRspReestTimeline || (summary && summary.reestablishmentTimeline) || '').trim(),
+                reasonBreakdownText: reasonBreakdownText ? String(reasonBreakdownText).trim() : '',
+                dms: (Number.isFinite(pointMsForEvents) && Number.isFinite(Number(row && row.ms))) ? Math.abs(Number(row.ms) - pointMsForEvents) : 999999,
+            };
+        }).filter((x) => x && (x.hasRlfReport || hasValue(x.rootCause) || hasValue(x.rootCauseDetails) || hasValue(x.reestTimeline) || hasValue(x.reasonBreakdownText)));
+        const rlfDecodedPreferred = (() => {
+            if (!rlfDecodedRows.length) return null;
+            const sorted = rlfDecodedRows.slice().sort((a, b) => a.dms - b.dms);
+            return sorted[0] || null;
+        })();
+        const rlfRootCauseDetailsDecoded = (() => {
+            if (!rlfDecodedPreferred) return undefined;
+            if (hasValue(rlfDecodedPreferred.rootCauseDetails)) return rlfDecodedPreferred.rootCauseDetails;
+            if (hasValue(rlfDecodedPreferred.rootCause)) return `cause=${rlfDecodedPreferred.rootCause}`;
+            if (rlfDecodedPreferred.hasRlfReport) return 'RLF report present';
+            return undefined;
+        })();
+        const rlfReasonBreakdownDecoded = (() => {
+            if (!rlfDecodedRows.length) return undefined;
+            const counts = new Map();
+            rlfDecodedRows.forEach((x) => {
+                const txt = String(x && x.reasonBreakdownText || '').trim();
+                if (txt) {
+                    txt.split('|').map((p) => String(p || '').trim()).filter(Boolean).forEach((kv) => {
+                        const m = kv.match(/^(.+?)\s*=\s*(-?\d+(?:\.\d+)?)$/);
+                        if (!m) return;
+                        const key = String(m[1] || '').trim();
+                        const val = Number(m[2]);
+                        if (!key || !Number.isFinite(val)) return;
+                        counts.set(key, (counts.get(key) || 0) + val);
+                    });
+                    return;
+                }
+                const cause = String(x && x.rootCause || '').trim();
+                if (cause) counts.set(cause, (counts.get(cause) || 0) + 1);
+            });
+            if (!counts.size) return undefined;
+            return Array.from(counts.entries())
+                .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])))
+                .map(([k, v]) => `${k}=${Math.round(v)}`)
+                .join(' | ');
+        })();
+        const reestablishmentTimelineDecoded = (() => {
+            const parts = [];
+            if (rlfDecodedPreferred && hasValue(rlfDecodedPreferred.reestTimeline)) {
+                parts.push(`UE report: ${rlfDecodedPreferred.reestTimeline}`);
+            }
+            const ueInfoReqToRspMs = findNearestEventGapMs(ueInfoReqRowsAll, ueInfoRspRowsAll, 120000);
+            if (Number.isFinite(ueInfoReqToRspMs)) parts.push(`UEInfoReq->Rsp=${Math.round(ueInfoReqToRspMs)} ms`);
+            const reestReqToCompleteMs = findNearestEventGapMs(reestReqRowsAll, reestCompleteRowsAll, 120000);
+            if (Number.isFinite(reestReqToCompleteMs)) parts.push(`ReestReq->Complete=${Math.round(reestReqToCompleteMs)} ms`);
+            const reestReqToRejectMs = findNearestEventGapMs(reestReqRowsAll, reestRejectRowsAll, 120000);
+            if (Number.isFinite(reestReqToRejectMs)) parts.push(`ReestReq->Reject=${Math.round(reestReqToRejectMs)} ms`);
+            return parts.length ? parts.join(' | ') : undefined;
+        })();
+        const rlfRootCauseDetailsValue = getAny('RLF root-cause details', 'RLF root cause details') ?? rlfRootCauseDetailsDecoded;
+        const reestablishmentTimelineValue = getAny('Reestablishment timeline', 'Reestablishment-related timeline', 'Reestablishment timers') ?? reestablishmentTimelineDecoded;
+        const rlfReasonBreakdownValue = getAny('RLF reason breakdown', 'RLF reason KPI breakdown') ?? rlfReasonBreakdownDecoded;
+        const rlfDecodedSource = hasValue(rlfRootCauseDetailsDecoded) || hasValue(reestablishmentTimelineDecoded) || hasValue(rlfReasonBreakdownDecoded);
+        const hoExecutionTimeInferred = Number.isFinite(hoExecMsDecoded)
+            ? `${(hoExecMsDecoded / 1000).toFixed(2)} s (decoded)`
+            : (Number.isFinite(hoExecMsInferred) ? `${(hoExecMsInferred / 1000).toFixed(2)} s` : undefined);
         const bearerFromEvents = pickNearEventSummary(/bearer|eps|erab|drb|srb/i, 2);
+        const bearerRaw = bearerRawBase ?? bearerDecoded ?? bearerFromEvents;
+        const drxValueFinal = drxValue ?? drxDecoded;
+        const bearerActiveValue = inferBearerActive(bearerRaw);
         const rrcTransitionFromEvents = pickNearEventSummary(/rrc.*(state|transition|setup|release|reconfig|connection)/i, 2);
+        const a3a5TriggersValue = getAny('A3/A5 triggers', 'A3 Trigger', 'A5 Trigger', 'A3A5 Trigger') ?? a3a5DecodedDirect ?? a3a5Decoded ?? a3a5TriggersInferred;
+        const a3a5ThresholdsValue = getAny('A3/A5 event thresholds', 'A3/A5 thresholds', 'A3 threshold', 'A5 threshold') ?? a3a5ThresholdsDecodedDirect ?? a3a5ThresholdsDecoded;
+        const a3a5ThresholdSourceTimeValue = (() => {
+            const direct = getAny('A3/A5 threshold source time', 'A3/A5 source time');
+            if (hasValue(direct)) return direct;
+            const row = recfgThresholdSourceRow;
+            if (!row) return undefined;
+            const measRaw = String(row.recfgMeasReportTime || '').trim();
+            if (measRaw) {
+                const measMs = pointDetailsTsMs(measRaw);
+                if (Number.isFinite(measMs)) return new Date(measMs).toISOString();
+                return measRaw;
+            }
+            return Number.isFinite(Number(row.ms)) ? new Date(Number(row.ms)).toISOString() : undefined;
+        })();
+        const a3a5ThresholdSourcePciValue = (() => {
+            const direct = getAny('A3/A5 threshold source PCI', 'A3/A5 source PCI');
+            if (hasValue(direct)) return direct;
+            const row = recfgThresholdSourceRow;
+            if (!row) return undefined;
+            const src = Number.isFinite(row.srcPci) ? `${row.srcPci}${Number.isFinite(row.srcEarfcn) ? `/${row.srcEarfcn}` : ''}` : null;
+            const tgt = Number.isFinite(row.tgtPci) ? `${row.tgtPci}${Number.isFinite(row.tgtEarfcn) ? `/${row.tgtEarfcn}` : ''}` : null;
+            if (src && tgt) return `serving ${src} -> target ${tgt}`;
+            if (tgt) return `target ${tgt}`;
+            if (src) return `serving ${src}`;
+            return undefined;
+        })();
+        const a3a5ThresholdContextCheckValue = (() => {
+            const direct = getAny('A3/A5 threshold context check', 'A3/A5 context check');
+            if (hasValue(direct)) return direct;
+            const row = recfgThresholdSourceRow;
+            if (!row) return undefined;
+            const servingPciNow = toIntOrNull(sSC);
+            const servingFreqNow = toIntOrNull(sFreq);
+            const servingRsrpNow = toFiniteNum(sRSCP);
+            const n1 = (Array.isArray(neighbors) && neighbors.length) ? neighbors[0] : null;
+            const n1PciNow = toIntOrNull(n1 && (n1.sc ?? n1.pci));
+            const n1FreqNow = toIntOrNull(n1 && n1.freq);
+            const n1RsrpNow = toFiniteNum(n1 && n1.rscp);
+            const thrServRaw = toFiniteNum(row.recfgA5ServingThresholdDbm);
+            const thrNeighRaw = toFiniteNum(row.recfgA5NeighborThresholdDbm);
+            const isValidA5Dbm = (v) => Number.isFinite(v) && v <= -40 && v >= -140;
+            const thrServ = isValidA5Dbm(thrServRaw) ? thrServRaw : null;
+            const thrNeigh = isValidA5Dbm(thrNeighRaw) ? thrNeighRaw : null;
+            const diffs = [];
+            if (Number.isFinite(servingPciNow) && Number.isFinite(row.srcPci) && servingPciNow !== row.srcPci) {
+                diffs.push(`serving PCI now ${servingPciNow} vs source ${row.srcPci}`);
+            }
+            if (Number.isFinite(servingFreqNow) && Number.isFinite(row.srcEarfcn) && servingFreqNow !== row.srcEarfcn) {
+                diffs.push(`serving EARFCN now ${servingFreqNow} vs source ${row.srcEarfcn}`);
+            }
+            if (Number.isFinite(n1PciNow) && Number.isFinite(row.tgtPci) && n1PciNow !== row.tgtPci) {
+                diffs.push(`N1 PCI now ${n1PciNow} vs target ${row.tgtPci}`);
+            }
+            if (Number.isFinite(n1FreqNow) && Number.isFinite(row.tgtEarfcn) && n1FreqNow !== row.tgtEarfcn) {
+                diffs.push(`N1 EARFCN now ${n1FreqNow} vs target ${row.tgtEarfcn}`);
+            }
+            if (diffs.length) return `Context differs: ${diffs.join('; ')}`;
+            const notes = [];
+            if (Number.isFinite(servingRsrpNow) && Number.isFinite(thrServ)) {
+                notes.push(`serving ${servingRsrpNow.toFixed(1)} vs A5 S ${thrServ.toFixed(1)} dBm`);
+            }
+            if (Number.isFinite(n1RsrpNow) && Number.isFinite(thrNeigh)) {
+                notes.push(`N1 ${n1RsrpNow.toFixed(1)} vs A5 N ${thrNeigh.toFixed(1)} dBm`);
+            }
+            return notes.length ? `Aligned (${notes.join(', ')})` : undefined;
+        })();
+        const hoCommandValue = (() => {
+            const direct = getAny('HO command', 'HO Command', 'Handover Command');
+            if (hasValue(direct)) return direct;
+            const row = recfgDecodedPreferredRows[0];
+            if (row && /^yes$/i.test(String(row.rrcRecfgFullDecoded || ''))) {
+                const dec = String(row.rrcRecfgFullDecoder || '').trim();
+                const type = String(row.rrcRecfgFullType || '').trim();
+                const src = Number.isFinite(row.srcPci) ? `${row.srcPci}${Number.isFinite(row.srcEarfcn) ? `/${row.srcEarfcn}` : ''}` : '';
+                const tgt = Number.isFinite(row.tgtPci) ? `${row.tgtPci}${Number.isFinite(row.tgtEarfcn) ? `/${row.tgtEarfcn}` : ''}` : '';
+                const transition = (src || tgt) ? `${src || '?'} -> ${tgt || '?'}` : '';
+                const parts = [
+                    (type || 'RRCConnectionReconfiguration') + ' (decoded' + (dec ? ` ${dec}` : '') + ')',
+                    transition ? `serving ${transition}` : ''
+                ].filter(Boolean);
+                const fullDecodedText = parts.join('; ').trim();
+                if (fullDecodedText) return fullDecodedText;
+            }
+            if (hasValue(hoCommandDecoded)) return hoCommandDecoded;
+            return hoCommandInferred;
+        })();
+        const hoExecutionTimeValue = getAny('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency') ?? hoExecutionTimeInferred;
+        const hoStartCompleteValue = getAny('HO Start/Complete') ?? hoStartCompleteDecoded ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents;
+        const hoFailureValue = getAny('HO failure', 'HO Failure', 'Handover Failure', 'HOF') ?? hoFailureInferred;
+        const rlfValue = getAny('RLF', 'RLF indication', 'Radio Link Failure') ?? rlfInferred;
+        const a3a5TriggersDecodedSource = hasValue(a3a5DecodedDirect) || hasValue(a3a5Decoded);
+        const a3a5ThresholdsDecodedSource = hasValue(a3a5ThresholdsDecodedDirect) || hasValue(a3a5ThresholdsDecoded);
+        const hoCommandDecodedSource = /decoded/i.test(String(hoCommandValue || ''));
+        const hoExecutionTimeDecodedSource = Number.isFinite(hoExecMsDecoded) || /decoded/i.test(String(hoExecutionTimeValue || ''));
+        const hoStartCompleteDecodedSource = hasValue(hoStartCompleteDecoded);
+        const rrcTransitionDecodedSource = hasValue(rrcTransitionDecoded);
         const noOrChange = (prev, curr) => {
             if (!Number.isFinite(prev) || !Number.isFinite(curr)) return undefined;
             if (prev === curr) return 'No';
             return `${prev} -> ${curr}`;
         };
-        const cellPciChangeInferred = noOrChange(prevPci, currPci) ?? pickNearEventSummary(/pci|serving\s*cell|cell\s*id|cell\s*identity/i, 1);
-        const earfcnBandChangeInferred = noOrChange(prevEarfcn, currEarfcn) ?? pickNearEventSummary(/earfcn|band/i, 1);
-        const rrcTransitionInferred = (hasValue(prevRrc) && hasValue(currRrc) && String(prevRrc) !== String(currRrc))
-            ? `${prevRrc} -> ${currRrc}`
-            : (rrcTransitionFromEvents || (hasValue(currRrc) ? 'No' : undefined));
+        const cellPciChangeInferred = cellPciChangeDecoded ?? noOrChange(prevPci, currPci) ?? pickNearEventSummary(/pci|serving\s*cell|cell\s*id|cell\s*identity/i, 1);
+        const earfcnBandChangeInferred = earfcnBandChangeDecoded ?? noOrChange(prevEarfcn, currEarfcn) ?? pickNearEventSummary(/earfcn|band/i, 1);
+        const prevRrcDisplay = normalizeRrcStateLabel(prevRrc) ?? prevRrc;
+        const currRrcDisplay = normalizeRrcStateLabel(currRrc) ?? currRrc;
+        const rrcTransitionInferred = rrcTransitionDecoded ?? ((hasValue(prevRrcDisplay) && hasValue(currRrcDisplay) && String(prevRrcDisplay) !== String(currRrcDisplay))
+            ? `${prevRrcDisplay} -> ${currRrcDisplay}`
+            : (rrcTransitionFromEvents || (hasValue(currRrcDisplay) ? 'No' : undefined)));
         const taJumpInferred = (() => {
             if (Number.isFinite(prevTa) && Number.isFinite(currTa)) {
                 if (Math.abs(currTa - prevTa) >= 1) return `${prevTa} -> ${currTa}`;
@@ -9348,13 +15995,184 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
             return pickNearEventSummary(/\bta\b|timing\s*advance/i, 1);
         })();
+        const rrcReestablishmentValue = (() => {
+            const direct = getAny(
+                'RRC Re-establishment',
+                'RRC Reestablishment',
+                'RRC Connection Reestablishment',
+                'RrcConnectionReestablishmentRequest',
+                'RrcConnectionReestablishmentComplete',
+                'RrcConnectionReestablishmentReject'
+            );
+            if (hasValue(direct)) return direct;
+            const req = reestReqRowsAll.length;
+            const complete = reestCompleteRowsAll.length;
+            const reject = reestRejectRowsAll.length;
+            if (req || complete || reject) {
+                const parts = [];
+                if (req) parts.push(`Request=${req}`);
+                if (complete) parts.push(`Complete=${complete}`);
+                if (reject) parts.push(`Reject=${reject}`);
+                return parts.join(' | ');
+            }
+            return summarizeNearEventRows(reestRowsAll, 2);
+        })();
+        const rrcReestablishmentDecodedSource = (reestReqRowsAll.length + reestCompleteRowsAll.length + reestRejectRowsAll.length) > 0;
 
-        pushMetric('Serving cell name', sName);
+        const caStatusValue = (() => {
+            const direct = getAny(
+                'CA Status',
+                'Carrier Aggregation Status',
+                'CA state',
+                'Radio.Lte.Ca.Status',
+                'Radio.Lte.ServingCellTotal.Ca.Status'
+            ) ?? findByTokens(['carrier', 'aggregation', 'status']) ?? findByTokens(['ca', 'status']);
+            if (hasValue(direct)) return direct;
+            const scCount = Number(pCellSCellInfo && pCellSCellInfo.scellCount);
+            if (Number.isFinite(scCount) && scCount > 0) {
+                return `Active (${scCount} SCell${scCount > 1 ? 's' : ''}) (inferred)`;
+            }
+            const capTxt = String(caCapabilityValue || '').toLowerCase();
+            if (capTxt.includes('capable')) return 'Capable but inactive (inferred)';
+            return 'Inactive (inferred)';
+        })();
+        const caScellAddRemoveValue = (() => {
+            const direct = getAny(
+                'CA SCell Add/Remove',
+                'SCell Add/Remove',
+                'SCell add',
+                'SCell remove',
+                'CA SCell event'
+            );
+            if (hasValue(direct)) return direct;
+            const addCnt = caScellAddRowsAll.length;
+            const removeCnt = caScellRemoveRowsAll.length;
+            if (addCnt || removeCnt) return `Add=${addCnt} | Remove=${removeCnt}`;
+            return undefined;
+        })();
+
+        const formatCodeRatePercent = (raw) => {
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return null;
+            if (n >= 0 && n <= 1) return `${(n * 100).toFixed(1)}%`;
+            if (n > 1 && n <= 100) return `${n.toFixed(1)}%`;
+            return null;
+        };
+        const estimateCodeRateFromMcs = (mcsRaw) => {
+            const m = Number(mcsRaw);
+            if (!Number.isFinite(m) || m < 0) return null;
+            if (m <= 31) return Math.max(3, Math.min(96, ((m + 1) / 32) * 100));
+            if (m <= 64) return Math.max(3, Math.min(96, (m / 64) * 100));
+            return null;
+        };
+        const codeRateValue = (() => {
+            const directGeneric = getByTrpLabel('Code Rate') ?? getAny(
+                'Code Rate',
+                'Coding Rate',
+                'Radio.Lte.ServingCell[8].CodeRate',
+                'Radio.Lte.ServingCellTotal.CodeRate'
+            );
+            if (hasValue(directGeneric)) return directGeneric;
+            const dlRaw = getByTrpLabel('DL Code Rate', 'PDSCH Code Rate') ?? getAny(
+                'DL Code Rate',
+                'PDSCH Code Rate',
+                'Radio.Lte.ServingCell[8].DlCodeRate',
+                'Radio.Lte.ServingCellTotal.DlCodeRate'
+            ) ?? findByTokens(['dl', 'code', 'rate']) ?? findByTokens(['pdsch', 'code', 'rate']);
+            const ulRaw = getByTrpLabel('UL Code Rate', 'PUSCH Code Rate') ?? getAny(
+                'UL Code Rate',
+                'PUSCH Code Rate',
+                'Radio.Lte.ServingCell[8].UlCodeRate',
+                'Radio.Lte.ServingCellTotal.UlCodeRate'
+            ) ?? findByTokens(['ul', 'code', 'rate']) ?? findByTokens(['pusch', 'code', 'rate']);
+            const dlFmt = formatCodeRatePercent(dlRaw);
+            const ulFmt = formatCodeRatePercent(ulRaw);
+            if (dlFmt || ulFmt) return `${dlFmt || 'N/A'} / ${ulFmt || 'N/A'}`;
+            const est = estimateCodeRateFromMcs(dlMcsValue);
+            if (Number.isFinite(est)) return `${est.toFixed(1)}% (est from DL MCS)`;
+            return undefined;
+        })();
+
+        const dataSessionStartStopValue = (() => {
+            const direct = getAny(
+                'Data Session Start/Stop',
+                'Data session start',
+                'Data session stop',
+                'Session start',
+                'Session stop',
+                'PDN connect',
+                'PDN disconnect'
+            );
+            if (hasValue(direct)) return direct;
+            const startTxt = summarizeNearEventRows(dataSessionStartRowsAll, 1);
+            const stopTxt = summarizeNearEventRows(dataSessionStopRowsAll, 1);
+            if (startTxt || stopTxt) return `Start=${startTxt || 'N/A'} | Stop=${stopTxt || 'N/A'}`;
+            return undefined;
+        })();
+
+        const volteCallStartEndValue = (() => {
+            const direct = getAny(
+                'VoLTE Call Start/End',
+                'VoLTE call start',
+                'VoLTE call end',
+                'IMS call start',
+                'IMS call end',
+                'SIP INVITE',
+                'SIP BYE'
+            );
+            if (hasValue(direct)) return direct;
+            const startTxt = summarizeNearEventRows(volteStartRowsAll, 1);
+            const stopTxt = summarizeNearEventRows(volteStopRowsAll, 1);
+            if (startTxt || stopTxt) return `Start=${startTxt || 'N/A'} | End=${stopTxt || 'N/A'}`;
+            return undefined;
+        })();
+
+        const pdcpDiscardReorderingValue = (() => {
+            const direct = getAny(
+                'PDCP Discard / Reordering',
+                'PDCP Discard',
+                'PDCP Reordering',
+                'Radio.Lte.ServingCell[8].Pdcp.Discard',
+                'Radio.Lte.ServingCellTotal.Pdcp.Discard',
+                'Radio.Lte.ServingCell[8].Pdcp.Reordering',
+                'Radio.Lte.ServingCellTotal.Pdcp.Reordering'
+            );
+            if (hasValue(direct)) return direct;
+            const discardVal = getAny(
+                'PDCP Discard',
+                'PDCP Discard Count',
+                'Radio.Lte.ServingCell[8].Pdcp.Discard',
+                'Radio.Lte.ServingCellTotal.Pdcp.Discard'
+            ) ?? findByTokens(['pdcp', 'discard']);
+            const reordVal = getAny(
+                'PDCP Reordering',
+                'PDCP Reorder',
+                'PDCP Reordering Count',
+                'Radio.Lte.ServingCell[8].Pdcp.Reordering',
+                'Radio.Lte.ServingCellTotal.Pdcp.Reordering'
+            ) ?? findByTokens(['pdcp', 'reorder']) ?? findByTokens(['pdcp', 'reordering']);
+            if (hasValue(discardVal) || hasValue(reordVal)) {
+                return `Discard=${normalizeMissing(discardVal)} | Reordering=${normalizeMissing(reordVal)}`;
+            }
+            return summarizeNearEventRows(pdcpRowsAll, 1);
+        })();
+
+        const servingNameMetricDisplay = String(sName || '').replace(/\s+\(est\)$/i, '').trim() || 'Unknown';
+        pushMetric('Serving cell name', servingNameMetricDisplay, { estimated: false });
+        pushMetric('PCell', pCellSCellInfo && pCellSCellInfo.pcell, { estimated: false });
+        pushMetric('SCell', pCellSCellInfo && pCellSCellInfo.scell, { estimated: false });
         pushMetric('Application throughput DL', appThroughputDl);
         pushMetric('Cell ID', cellIdValue);
         pushMetric('Cellid', cellidValue);
         pushMetric('DL throughput', dlThroughput);
         pushMetric('Downlink EARFCN', sFreq);
+        pushMetric('Band', bandValue);
+        pushMetric('BW', bwValue);
+        pushMetric('UE category', ueCategoryValue);
+        pushMetric('MIMO capability', mimoCapabilityValue);
+        pushMetric('CA capability', caCapabilityValue);
+        pushMetric('CA Status', caStatusValue);
+        pushMetric('CA SCell Add/Remove', caScellAddRemoveValue);
         pushMetric('eNodeB ID', enbOnly);
         pushMetric('Physical cell ID', sSC);
         pushMetric('RSRP', sRSCP);
@@ -9362,33 +16180,83 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
         pushMetric('Tracking area code', tacValue);
         pushMetric('UL throughput', ulThroughput);
+        pushMetric('RTT', rttValue);
+        pushMetric('Packet loss (proxy)', packetLossValue);
+        pushMetric('Retransmissions (proxy)', retransmissionsValue);
+        pushMetric('Bearer active', bearerActiveValue);
+        pushMetric('Data Session Start/Stop', dataSessionStartStopValue);
+        pushMetric('VoLTE Call Start/End', volteCallStartEndValue);
+        pushMetric('DRX (DTX)', drxValueFinal);
+        pushMetric('Tx power', txPowerValue);
+        pushMetric('Estimated RB usage', rbUsageDisplay);
+        pushMetric('Allocated RBs', allocatedRbsValueDisplay, allocatedRbsNormInfo.flagged ? { estimated: true } : {});
+        pushMetric('Allocated RBs (raw)', allocatedRbsRawDisplay, { estimated: false });
+        pushMetric('Allocated RBs sanity', allocatedRbsSanityValue, { estimated: true });
+        pushMetric('Allocated RBs UL', allocatedRbsUlValue);
+        pushMetric('Allocated RBs (est)', allocatedRbsEstValue);
+        pushMetric('TBS', tbsValue);
+        pushMetric('TBS UL', tbsUlValue);
+        pushMetric('#layers', layersValue);
         pushMetric('CQI (DL)', cqiDlValue);
         pushMetric('DL MCS', dlMcsValue);
         pushMetric('UL MCS', ulMcsValue);
+        pushMetric('Code Rate', codeRateValue);
         pushMetric('Modulation (DL/UL)', ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'));
         pushMetric('Timing Advance', timingAdvanceValue);
         pushMetric('MIMO/CA', getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation']));
         pushMetric('PMI', pmiValue);
-        pushMetric('Rank/Layers (feedback proxy)', rankLayersValue);
+        pushMetric('Rank (RI)', rankRiValue, rankRiMeta);
+        pushMetric('Rank/Layers (feedback proxy)', rankLayersValue, rankLayersMeta);
+        pushMetric('HARQ process-level', harqProcessValue);
+        pushMetric('MAC retransmissions', macRetxValue);
+        pushMetric('RLC retransmissions', rlcRetxValue);
+        pushMetric('PDCP Discard / Reordering', pdcpDiscardReorderingValue);
+        pushMetric('L1/L2 per-TTI exact', l1l2PerTtiExactValue);
+        pushMetric('L1/L2 decode note', l1l2DecodeNoteValue);
 
         pushHeader('RELIABILITY');
+        pushMetric(harqHasDirect ? 'HARQ' : 'HARQ (proxy)', harqDisplay);
         pushMetric('BLER DL', blerDlValue);
+        pushMetric('BLER UL', blerUlValue);
 
         pushHeader('EVENTS');
-        pushMetric('RRC State', currRrc ?? rrcFromEvents);
-        pushMetric('HO Start/Complete', getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents);
+        pushMetric('RRC State (decoded exact)', rrcStateExactDisplay, rrcStateExactSource ? { source: rrcStateExactSource } : {});
+        pushMetric('RRC State', rrcStateFinal);
+        pushMetric('RRC Re-establishment', rrcReestablishmentValue, rrcReestablishmentDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('A3/A5 threshold source time', a3a5ThresholdSourceTimeValue);
+        pushMetric('A3/A5 threshold source PCI', a3a5ThresholdSourcePciValue);
+        pushMetric('A3/A5 threshold context check', a3a5ThresholdContextCheckValue);
+        pushMetric('HO command', hoCommandValue, hoCommandDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('HO execution time', hoExecutionTimeValue, hoExecutionTimeDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('HO failure', hoFailureValue);
+        pushMetric('RLF', rlfValue);
+        pushMetric('RLF root-cause details', rlfRootCauseDetailsValue, rlfDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('Reestablishment timeline', reestablishmentTimelineValue, rlfDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('RLF reason breakdown', rlfReasonBreakdownValue, rlfDecodedSource ? { source: 'decoded' } : {});
         pushMetric('Cell/PCI Change (inferred)', getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']) ?? cellPciChangeInferred);
         pushMetric('EARFCN/Band Change (inferred)', getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']) ?? earfcnBandChangeInferred);
-        pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred);
-        pushMetric('Bearer / EPS Bearer', getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']) ?? bearerFromEvents);
+        pushMetric('RRC State Transition', getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred, rrcTransitionDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('Bearer / EPS Bearer', bearerRaw);
         pushMetric('TA Jumps', getAny('TA Jumps') ?? findByTokens(['ta', 'jump']) ?? taJumpInferred);
         const pointDetailsMetricsSnapshot = {
             'Serving cell name': sName,
+            'PCell': (pCellSCellInfo && pCellSCellInfo.pcell),
+            'SCell': (pCellSCellInfo && pCellSCellInfo.scell),
             'Application throughput DL': appThroughputDl,
             'Cell ID': cellIdValue,
             'Cellid': cellidValue,
             'DL throughput': dlThroughput,
             'Downlink EARFCN': sFreq,
+            'Band': bandValue,
+            'BW': bwValue,
+            'UE category': ueCategoryValue,
+            'MIMO capability': mimoCapabilityValue,
+            'CA capability': caCapabilityValue,
+            'CA Status': caStatusValue,
+            'CA SCell Add/Remove': caScellAddRemoveValue,
             'eNodeB ID': enbOnly,
             'Physical cell ID': sSC,
             'RSRP': sRSCP,
@@ -9396,21 +16264,65 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'SINR': (getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr'])),
             'Tracking area code': tacValue,
             'UL throughput': ulThroughput,
+            'RTT': rttValue,
+            'Packet loss': packetLossValue,
+            'Retransmissions': retransmissionsValue,
+            'Packet loss (proxy)': packetLossValue,
+            'Retransmissions (proxy)': retransmissionsValue,
+            'Bearer active': bearerActiveValue,
+            'Data Session Start/Stop': dataSessionStartStopValue,
+            'VoLTE Call Start/End': volteCallStartEndValue,
+            'DRX (DTX)': drxValueFinal,
+            'Tx power': txPowerValue,
+            'Estimated RB usage': rbUsageDisplay,
+            'Allocated RBs': allocatedRbsValueDisplay,
+            'Allocated RBs (raw)': allocatedRbsRawDisplay,
+            'Allocated RBs sanity': allocatedRbsSanityValue,
+            'Allocated RBs UL': allocatedRbsUlValue,
+            'Allocated RBs (est)': allocatedRbsEstValue,
+            'TBS': tbsValue,
+            'TBS UL': tbsUlValue,
+            '#layers': layersValue,
             'CQI (DL)': cqiDlValue,
             'DL MCS': dlMcsValue,
             'UL MCS': ulMcsValue,
+            'Code Rate': codeRateValue,
             'Modulation (DL/UL)': ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'),
             'Timing Advance': timingAdvanceValue,
             'MIMO/CA': (getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation'])),
             'PMI': pmiValue,
+            'Rank (RI)': rankRiValue,
             'Rank/Layers (feedback proxy)': rankLayersValue,
+            'HARQ process-level': harqProcessValue,
+            'MAC retransmissions': macRetxValue,
+            'RLC retransmissions': rlcRetxValue,
+            'PDCP Discard / Reordering': pdcpDiscardReorderingValue,
+            'L1/L2 per-TTI exact': l1l2PerTtiExactValue,
+            'L1/L2 decode note': l1l2DecodeNoteValue,
+            'HARQ': harqDisplay,
+            'HARQ (proxy)': harqProxyDisplay,
             'BLER DL': blerDlValue,
-            'RRC State': (currRrc ?? rrcFromEvents),
-            'HO Start/Complete': (getAny('HO Start/Complete') ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents),
+            'BLER UL': blerUlValue,
+            'RRC State (decoded exact)': rrcStateExactDisplay,
+            'RRC State': rrcStateFinal,
+            'RRC Re-establishment': rrcReestablishmentValue,
+            'HO Start/Complete': hoStartCompleteValue,
+            'A3/A5 triggers': a3a5TriggersValue,
+            'A3/A5 event thresholds': a3a5ThresholdsValue,
+            'A3/A5 threshold source time': a3a5ThresholdSourceTimeValue,
+            'A3/A5 threshold source PCI': a3a5ThresholdSourcePciValue,
+            'A3/A5 threshold context check': a3a5ThresholdContextCheckValue,
+            'HO command': hoCommandValue,
+            'HO execution time': hoExecutionTimeValue,
+            'HO failure': hoFailureValue,
+            'RLF': rlfValue,
+            'RLF root-cause details': rlfRootCauseDetailsValue,
+            'Reestablishment timeline': reestablishmentTimelineValue,
+            'RLF reason breakdown': rlfReasonBreakdownValue,
             'Cell/PCI Change (inferred)': (getAny('Cell/PCI Change (inferred)') ?? findByTokens(['pci', 'change']) ?? findByTokens(['cell', 'change']) ?? cellPciChangeInferred),
             'EARFCN/Band Change (inferred)': (getAny('EARFCN/Band Change (inferred)') ?? findByTokens(['earfcn', 'change']) ?? findByTokens(['band', 'change']) ?? earfcnBandChangeInferred),
             'RRC State Transition': (getAny('RRC State Transition') ?? findByTokens(['rrc', 'transition']) ?? rrcTransitionInferred),
-            'Bearer / EPS Bearer': (getAny('Bearer / EPS Bearer', 'EPS Bearer') ?? findByTokens(['eps', 'bearer']) ?? findByTokens(['bearer']) ?? bearerFromEvents),
+            'Bearer / EPS Bearer': bearerRaw,
             'TA Jumps': (getAny('TA Jumps') ?? findByTokens(['ta', 'jump']) ?? taJumpInferred)
         };
         const stashDataLog = buildPointAnalysisStash(p, {
@@ -9425,7 +16337,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         pushHeader('Neighbors');
         for (let i = 1; i <= 4; i++) {
             const n = neighbors[i - 1] || {};
-            pushMetric(`N${i} cell name`, n.name || 'N/A');
+            const srcTag = String(n && n.source_kind || '').toLowerCase();
+            const nameWithSource = (n.name || 'N/A') + (srcTag ? ` [${srcTag}]` : '');
+            pushMetric(`N${i} cell name`, nameWithSource);
             pushMetric(`N${i} RSRP`, n.rscp);
             pushMetric(`N${i} RSRQ`, n.ecno);
             pushMetric(`N${i} SINR`, n.sinr ?? 'N/A');
@@ -9440,8 +16354,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     '</div>';
                 return;
             }
+            const infoPayload = encodeURIComponent(JSON.stringify(getPointDetailsMetricInfoPayload(row)));
+            const infoBadgeHtml =
+                '<button type="button" class="metric-info-badge" data-metric-info="' + infoPayload + '" data-metric-label="' + escapeHtml(row.label || '') + '" ' +
+                'style="margin-left:6px; width:14px; height:14px; border-radius:50%; border:1px solid #475569; background:#0f172a; color:#93c5fd; font-size:10px; line-height:12px; padding:0; cursor:pointer;">i</button>';
             extraMetricsHtml += '<div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; font-size:11px; padding:3px 0;">' +
-                '<span style="color:#aaa; margin-right: 10px;">' + row.label + '</span>' +
+                '<span style="color:#aaa; margin-right: 10px; display:inline-flex; align-items:center;">' + row.label + infoBadgeHtml + '</span>' +
                 '<span style="color:#fff; font-weight:bold; text-align: right;">' + row.value + '</span>' +
                 '</div>';
         });
@@ -9472,6 +16390,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (rawId) enbIdDisplay = `<div style="font-size:11px; color:#e5e7eb;"><b>ID:</b> ${rawId}</div>`;
         }
 
+        const neighborFilterBtnHtml = isLteTrp
+            ? ('<button class="btn" onclick="window.togglePointDetailsNeighborSourceFilter(event)" style="padding:2px 8px; font-size:10px; border:1px solid #334155; color:#cbd5e1; background:#0f172a;">Neighbors: ' + getNeighborSourceFilterLabel() + '</button>')
+            : '';
         const html = '<div class="log-view-container">' +
             '<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">' +
             '<div>' +
@@ -9480,7 +16401,10 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             enbIdDisplay +
             '<div style="color:#aaa; font-size:11px; margin-top:2px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
             '</div>' +
+            '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">' +
             '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
+            neighborFilterBtnHtml +
+            '</div>' +
             '</div>' +
 
             '<table class="log-details-table">' +
@@ -9563,6 +16487,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const headerDom = document.getElementById('infoPanelHeader');
 
             if (!panel || !content) return;
+            bindPointDetailsMetricInfoBadges(content);
 
             if (panel.style.display !== 'block') panel.style.display = 'block';
             content.innerHTML = ''; // Clear
@@ -9584,6 +16509,11 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 // Insert before close button
                 headerDom.insertBefore(toggleBtn, closeBtn);
             }
+
+            const showLteSettings = Array.isArray(hits) && hits.some((h) => pointDetailsIsLtePoint(h && h.point, h && h.log));
+            upsertPointDetailsLteSettingsButton(headerDom, showLteSettings, () => {
+                window.openDtLteEpisodeSettings();
+            });
 
             let allConnectionTargets = [];
             let aggregatedData = [];
@@ -9633,7 +16563,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
 
     window.globalSync = (logId, index, source, skipPanel = false) => {
-        const log = loadedLogs.find(l => l.id === logId);
+        const log = loadedLogs.find(l => String(l.id) === String(logId));
         if (!log || !log.points[index]) return;
 
         const point = log.points[index];
@@ -9753,7 +16683,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
     window.addEventListener('map-point-clicked', (e) => {
         const { logId, point, source } = e.detail;
 
-        const log = loadedLogs.find(l => l.id === logId);
+        let log = loadedLogs.find(l => String(l.id) === String(logId));
+        if (!log && point) {
+            // Fallback when event logId type differs/missing: infer owning log from point identity/time/coords.
+            log = getOwningLogForPoint(point, window.__activePointLog);
+        }
+        if (!log && point && window.updateFloatingInfoPanel) {
+            // Last-resort: still render details from point payload to avoid empty panel.
+            window.updateFloatingInfoPanel(point, '#3b82f6', window.__activePointLog || null);
+            return;
+        }
 
         // --- PROBE REDIRECTION: Click on Rabat Excel -> Click on SmartCare ---
         if (log && log.type === 'excel' && point['Analyze point'] && window.findNearestSmartCarePointAndLog) {
@@ -9795,7 +16734,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 // The Coordinator: globalSync
                 // Logic: catches map-point-clicked and calls window.globalSync(). 
                 // It specifically invokes window.updateFloatingInfoPanel(point) (via skipPanel=false default)
-                window.globalSync(logId, index, source || 'map');
+                window.globalSync(log.id, index, source || 'map');
             } else {
                 console.warn("[App] Sync Index not found for clicked point.");
                 // Fallback: If we can't sync index, just update the panel directly
@@ -9904,6 +16843,203 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         }
     });
 
+    const autoCleanNemoExcelBuffer = (arrayBuffer, originalFileName = 'import.xlsx') => {
+        if (typeof XLSX === 'undefined') return null;
+        const wb = XLSX.read(arrayBuffer, { type: 'array' });
+        const sheetName = Array.isArray(wb.SheetNames) && wb.SheetNames.length ? wb.SheetNames[0] : null;
+        if (!sheetName) return null;
+        const ws = wb.Sheets[sheetName];
+        if (!ws) return null;
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+        if (!rows.length) return null;
+
+        const headers = Object.keys(rows[0] || {});
+        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const keyByNorm = new Map();
+        headers.forEach((h) => {
+            const k = norm(h);
+            if (k && !keyByNorm.has(k)) keyByNorm.set(k, h);
+        });
+        const hasToken = (...aliases) => aliases.some((a) => keyByNorm.has(norm(a)));
+        const looksLikeNemoExport =
+            hasToken('ts') &&
+            hasToken('lat', 'latitude') &&
+            hasToken('lon', 'lng', 'longitude') &&
+            hasToken('rat') &&
+            hasToken('serving_sc') &&
+            (hasToken('a1_rscp') || hasToken('m1_rscp') || hasToken('d1_rscp'));
+        if (!looksLikeNemoExport) return null;
+
+        const getRaw = (row, ...aliases) => {
+            for (const alias of aliases) {
+                const key = keyByNorm.get(norm(alias));
+                if (!key) continue;
+                if (row[key] !== undefined) return row[key];
+            }
+            return '';
+        };
+        const isMissing = (v) => {
+            if (v === undefined || v === null) return true;
+            const s = String(v).trim().toLowerCase();
+            return s === '' || s === 'none' || s === 'n/a' || s === 'na' || s === 'nan' || s === 'null' || s === 'undefined' || s === '-';
+        };
+        const toNum = (v) => {
+            if (isMissing(v)) return null;
+            if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+            const s = String(v).trim().replace(',', '.');
+            const n = Number(s);
+            return Number.isFinite(n) ? n : null;
+        };
+        const toOutNum = (v) => (Number.isFinite(v) ? v : '');
+
+        const getSetVal = (row, prefix, idx, metric) => getRaw(row, `${prefix}${idx}_${metric}`, `${prefix}${idx} ${metric}`);
+        const pickServingFromSets = (row, servingSc) => {
+            const candidates = [];
+            const prioMap = { a: 0, m: 1, d: 2 };
+            for (const p of ['a', 'm', 'd']) {
+                for (let i = 1; i <= 16; i++) {
+                    const sc = toNum(getSetVal(row, p, i, 'sc'));
+                    const rscp = toNum(getSetVal(row, p, i, 'rscp'));
+                    const ecno = toNum(getSetVal(row, p, i, 'ecno'));
+                    const freq = toNum(getSetVal(row, p, i, 'uarfcn')) ?? toNum(getSetVal(row, p, i, 'freq'));
+                    if (!Number.isFinite(sc) && !Number.isFinite(rscp) && !Number.isFinite(ecno)) continue;
+                    candidates.push({
+                        p,
+                        i,
+                        prio: prioMap[p],
+                        sc,
+                        rscp,
+                        ecno,
+                        freq,
+                        matchServing: Number.isFinite(servingSc) && Number.isFinite(sc) && Number(sc) === Number(servingSc)
+                    });
+                }
+            }
+            if (!candidates.length) return null;
+            candidates.sort((a, b) => {
+                if (a.matchServing !== b.matchServing) return a.matchServing ? -1 : 1;
+                if (a.prio !== b.prio) return a.prio - b.prio;
+                return a.i - b.i;
+            });
+            const exactRscp = candidates.find((c) => c.matchServing && Number.isFinite(c.rscp));
+            if (exactRscp) return exactRscp;
+            const exactAny = candidates.find((c) => c.matchServing && (Number.isFinite(c.rscp) || Number.isFinite(c.ecno)));
+            if (exactAny) return exactAny;
+            const fallbackOrder = [['a', 1], ['m', 1], ['d', 1]];
+            for (const [p, i] of fallbackOrder) {
+                const hit = candidates.find((c) => c.p === p && c.i === i && (Number.isFinite(c.rscp) || Number.isFinite(c.ecno)));
+                if (hit) return hit;
+            }
+            return candidates.find((c) => Number.isFinite(c.rscp) || Number.isFinite(c.ecno)) || null;
+        };
+
+        const cleanedHeaders = [
+            'Time',
+            'lat',
+            'lng',
+            'Tech',
+            'file_id',
+            'lr_id',
+            'Subscriber ID',
+            'Equipment ID',
+            'Serving Cell ID',
+            'Serving Freq',
+            'Serving SC',
+            'Serving RSCP',
+            'Serving EcNo',
+            'Active Set Size',
+            'Monitored Set Count',
+            'Detected Set Count',
+            'UE Tx Power',
+            'BLER DL',
+            'BLER UL',
+            'event_cause',
+            'event_details'
+        ];
+        for (const p of ['A', 'M', 'D']) {
+            for (let i = 1; i <= 16; i++) {
+                cleanedHeaders.push(`${p}${i} SC`);
+                cleanedHeaders.push(`${p}${i} Freq`);
+                cleanedHeaders.push(`${p}${i} RSCP`);
+                cleanedHeaders.push(`${p}${i} EcNo`);
+            }
+        }
+
+        let matchedServingRows = 0;
+        let derivedServingRows = 0;
+        const cleanedRows = rows.map((row) => {
+            const servingSc = toNum(getRaw(row, 'serving_sc'));
+            const servingFreq = toNum(getRaw(row, 'serving_uarfcn', 'serving_freq', 'serving_freq_uarfcn'));
+            const servingPick = pickServingFromSets(row, servingSc);
+            if (servingPick && servingPick.matchServing) matchedServingRows += 1;
+            if (servingPick && (Number.isFinite(servingPick.rscp) || Number.isFinite(servingPick.ecno))) derivedServingRows += 1;
+
+            const out = {
+                'Time': getRaw(row, 'ts', 'time', 'timestamp'),
+                'lat': toOutNum(toNum(getRaw(row, 'lat', 'latitude'))),
+                'lng': toOutNum(toNum(getRaw(row, 'lon', 'lng', 'longitude'))),
+                'Tech': getRaw(row, 'rat', 'tech'),
+                'file_id': getRaw(row, 'file_id'),
+                'lr_id': getRaw(row, 'lr_id'),
+                'Subscriber ID': getRaw(row, 'Subscriber ID', 'subscriber_id'),
+                'Equipment ID': getRaw(row, 'Equipment ID', 'equipment_id'),
+                'Serving Cell ID': getRaw(row, 'serving_cell_id', 'cell_id'),
+                'Serving Freq': toOutNum(Number.isFinite(servingFreq) ? servingFreq : (servingPick && Number.isFinite(servingPick.freq) ? servingPick.freq : null)),
+                'Serving SC': toOutNum(servingSc),
+                'Serving RSCP': toOutNum(servingPick ? servingPick.rscp : null),
+                'Serving EcNo': toOutNum(servingPick ? servingPick.ecno : null),
+                'Active Set Size': toOutNum(toNum(getRaw(row, 'as_count', 'active_set_size', 'as_size'))),
+                'Monitored Set Count': toOutNum(toNum(getRaw(row, 'mon_count', 'monitored_count'))),
+                'Detected Set Count': toOutNum(toNum(getRaw(row, 'det_count', 'detected_count'))),
+                'UE Tx Power': toOutNum(toNum(getRaw(row, 'ue_tx_power', 'ue tx power', 'ue_tx'))),
+                'BLER DL': toOutNum(toNum(getRaw(row, 'bler_dl', 'bler'))),
+                'BLER UL': toOutNum(toNum(getRaw(row, 'bler_ul'))),
+                'event_cause': getRaw(row, 'event_cause'),
+                'event_details': getRaw(row, 'event_details')
+            };
+
+            for (const p of ['A', 'M', 'D']) {
+                const src = p.toLowerCase();
+                for (let i = 1; i <= 16; i++) {
+                    out[`${p}${i} SC`] = toOutNum(toNum(getSetVal(row, src, i, 'sc')));
+                    out[`${p}${i} Freq`] = toOutNum(toNum(getSetVal(row, src, i, 'uarfcn')) ?? toNum(getSetVal(row, src, i, 'freq')));
+                    out[`${p}${i} RSCP`] = toOutNum(toNum(getSetVal(row, src, i, 'rscp')));
+                    out[`${p}${i} EcNo`] = toOutNum(toNum(getSetVal(row, src, i, 'ecno')));
+                }
+            }
+            return out;
+        });
+
+        const outWb = XLSX.utils.book_new();
+        const outWs = XLSX.utils.json_to_sheet(cleanedRows, { header: cleanedHeaders, skipHeader: false });
+        XLSX.utils.book_append_sheet(outWb, outWs, 'Cleaned');
+        const cleanedArray = XLSX.write(outWb, { type: 'array', bookType: 'xlsx' });
+        const baseName = String(originalFileName || 'import').replace(/\.[^/.]+$/, '');
+        return {
+            arrayBuffer: cleanedArray,
+            fileName: `${baseName}_cleaned.xlsx`,
+            totalRows: cleanedRows.length,
+            matchedServingRows,
+            derivedServingRows
+        };
+    };
+
+    const downloadArrayBufferAsFile = (arrayBuffer, fileName, mimeType) => {
+        try {
+            const blob = new Blob([arrayBuffer], { type: mimeType || 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName || 'download.bin';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            console.warn('[Import] Failed to auto-download cleaned file:', err);
+        }
+    };
+
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -9917,44 +17053,101 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             return;
         }
 
-        // NMFS Binary Check
-        if (file.name.toLowerCase().endsWith('.nmfs')) {
-            const headerReader = new FileReader();
-            headerReader.onload = (event) => {
-                const arr = new Uint8Array(event.target.result);
-                // ASCII for NMFS is 78 77 70 83 (0x4e 0x4d 0x46 0x53)
-                // Check if starts with NMFS
-                let isNMFS = false;
-                if (arr.length >= 4) {
-                    if (arr[0] === 0x4e && arr[1] === 0x4d && arr[2] === 0x46 && arr[3] === 0x53) {
-                        isNMFS = true;
-                    }
-                }
+        async function decodeNmfsViaBackend(fileObj) {
+            const form = new FormData();
+            form.append('file', fileObj, fileObj.name || 'upload.nmfs');
+            const res = await fetch('/api/nmfs/decode', {
+                method: 'POST',
+                body: form
+            });
+            let data = null;
+            try { data = await res.json(); } catch (_e) { data = null; }
+            if (!res.ok || !data || data.status !== 'success') {
+                const msg = (data && data.message) ? data.message : ('HTTP ' + res.status);
+                throw new Error(msg);
+            }
+            return data;
+        }
 
-                if (isNMFS) {
-                    alert("⚠️ SECURE FILE DETECTED\n\nThis is a proprietary Keysight Nemo 'Secure' Binary file (.nmfs).\n\nThis application can only parse TEXT log files (.nmf or .csv).\n\nPlease open this file in Nemo Outdoor/Analyze and export it as 'Nemo File Format (Text)'.");
-                    fileStatus.textContent = 'Error: Encrypted NMFS file.';
-                    e.target.value = ''; // Reset
-                    return;
-                } else {
-                    // Fallback: Maybe it's a text file named .nmfs? Try parsing as text.
-                    console.warn("File named .nmfs but missing signature. Attempting text parse...");
-                    parseTextLog(file);
+        // NMFS Binary Decode
+        if (file.name.toLowerCase().endsWith('.nmfs')) {
+            const nmfsReader = new FileReader();
+            nmfsReader.onload = async (event) => {
+                try {
+                    fileStatus.textContent = 'Parsing NMFS...';
+                    const buffer = event.target.result;
+                    const localResult = (NMFParser && typeof NMFParser.parseNmfs === 'function')
+                        ? NMFParser.parseNmfs(buffer)
+                        : NMFParser.parse(new TextDecoder('utf-8').decode(buffer || new ArrayBuffer(0)));
+
+                    const nmfsMeta = (localResult && localResult.nmfs) ? localResult.nmfs : null;
+                    const localSecureOnly = nmfsMeta && nmfsMeta.decodeMode === 'metadata_only_secure_payload';
+                    if (localSecureOnly) {
+                        fileStatus.textContent = 'NMFS secure payload detected. Trying backend converter...';
+                        try {
+                            const remote = await decodeNmfsViaBackend(file);
+                            const remoteText = String((remote && remote.text) || '');
+                            if (remoteText.trim()) {
+                                const converted = NMFParser.parse(remoteText);
+                                converted.nmfs = {
+                                    ...(nmfsMeta || {}),
+                                    decodeMode: 'external_converter',
+                                    externalTextLen: remoteText.length
+                                };
+                                converted.signaling = (converted.signaling || []).concat([{
+                                    time: 'N/A',
+                                    type: 'SIGNALING',
+                                    event: 'NMFS External Decode',
+                                    message: 'NMFS converted using backend external parser bridge.',
+                                    properties: {
+                                        'Time': 'N/A',
+                                        'Type': 'SIGNALING',
+                                        'Event': 'NMFS External Decode',
+                                        'Decode Source': 'Backend converter',
+                                        'Decoded Text Length': remoteText.length
+                                    }
+                                }]);
+                                handleParsedResult(converted, file.name);
+                                e.target.value = '';
+                                return;
+                            }
+                        } catch (convErr) {
+                            console.warn('[NMFS] Backend decode failed:', convErr);
+                            localResult.signaling = (localResult.signaling || []).concat([{
+                                time: 'N/A',
+                                type: 'SIGNALING',
+                                event: 'NMFS External Decode',
+                                message: 'Backend converter unavailable or failed: ' + convErr.message,
+                                properties: {
+                                    'Time': 'N/A',
+                                    'Type': 'SIGNALING',
+                                    'Event': 'NMFS External Decode',
+                                    'Decode Source': 'Backend converter',
+                                    'Result': 'Failed'
+                                }
+                            }]);
+                        }
+                    }
+
+                    handleParsedResult(localResult, file.name);
+                } catch (err) {
+                    console.error('NMFS Parse Error:', err);
+                    fileStatus.textContent = 'Error parsing NMFS: ' + err.message;
                 }
+                e.target.value = '';
             };
-            headerReader.readAsArrayBuffer(file.slice(0, 10));
+            nmfsReader.readAsArrayBuffer(file);
             return;
         }
 
         // Excel / CSV Detection (Binary Read)
-        if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
+        if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls') || file.name.toLowerCase().endsWith('.csv')) {
             const reader = new FileReader();
             reader.onload = (event) => {
                 try {
                     fileStatus.textContent = 'Parsing Excel...';
                     const data = event.target.result;
                     const result = ExcelParser.parse(data);
-
                     handleParsedResult(result, file.name);
 
                 } catch (err) {
@@ -10003,6 +17196,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             // Handle new parser return format (object vs array)
             const parsedData = Array.isArray(result) ? result : result.points;
             const technology = Array.isArray(result) ? 'Unknown' : result.tech;
+            const nmfsSummary = !Array.isArray(result) ? (result.nmfs || null) : null;
             const signalingData = !Array.isArray(result) ? result.signaling : [];
             const eventsData = !Array.isArray(result) ? result.events : [];
             const callSessionsData = !Array.isArray(result) ? (result.callSessions || []) : [];
@@ -10093,6 +17287,16 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 }
 
                 fileStatus.textContent = 'Loaded: ' + name + '(' + parsedData.length + ' pts)';
+                if (nmfsSummary) {
+                    const mode = String(nmfsSummary.decodeMode || 'unknown');
+                    const rec = Number(nmfsSummary.recordLineCount || 0);
+                    if (parsedData.length <= 0 && mode !== 'external_converter') {
+                        fileStatus.textContent = 'NMFS loaded (metadata only). Configure NMFS converter in 🧩 NMFS settings.';
+                        console.warn('[NMFS] No decoded points. mode=' + mode + ', recordLineCount=' + rec);
+                    } else {
+                        fileStatus.textContent = 'NMFS loaded: ' + parsedData.length + ' pts (mode: ' + mode + ')';
+                    }
+                }
 
 
             } else {
@@ -12018,6 +19222,80 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             .replace(/\bN\/A\b/g, okNokBadgeHtml('N/A'));
     }
 
+    function escapeRegex(text) {
+        return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function decorateEvidenceText(rawText) {
+        let out = escapeHtml(rawText);
+        const addBadge = (label, fg, bg, border) =>
+            '<span style="display:inline-block; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:800; color:' + fg + '; background:' + bg + '; border:1px solid ' + border + '; vertical-align:1px;">' + label + '</span>';
+        const replaceToken = (token, html) => {
+            const re = new RegExp(escapeRegex(token), 'g');
+            out = out.replace(re, html);
+        };
+
+        // Risk words
+        out = out.replace(/\bHigh\b/g, addBadge('High', '#fecaca', 'rgba(220,38,38,0.22)', 'rgba(248,113,113,0.45)'));
+        out = out.replace(/\bModerate\b/g, addBadge('Moderate', '#fde68a', 'rgba(217,119,6,0.22)', 'rgba(251,191,36,0.45)'));
+        out = out.replace(/\bLow\b/g, addBadge('Low', '#bbf7d0', 'rgba(22,163,74,0.20)', 'rgba(74,222,128,0.45)'));
+
+        // Important tokens
+        replaceToken('ΔRSCP', '<span style="color:#fca5a5; font-weight:800;">ΔRSCP</span>');
+        replaceToken('RSCP', '<span style="color:#93c5fd; font-weight:700;">RSCP</span>');
+        replaceToken('EcNo', '<span style="color:#fcd34d; font-weight:700;">EcNo</span>');
+        replaceToken('BLER', '<span style="color:#c4b5fd; font-weight:700;">BLER</span>');
+        replaceToken('UE Tx', '<span style="color:#fdba74; font-weight:700;">UE Tx</span>');
+        replaceToken('MIMOMEAS', '<span style="color:#67e8f9; font-weight:800;">MIMOMEAS</span>');
+        replaceToken('CELLMEAS', '<span style="color:#93c5fd; font-weight:800;">CELLMEAS</span>');
+        replaceToken('Subtype A', '<span style="color:#86efac; font-weight:700;">Subtype A</span>');
+        replaceToken('Subtype B', '<span style="color:#fda4af; font-weight:700;">Subtype B</span>');
+        replaceToken('Dominance source', '<span style="color:#a5b4fc; font-weight:800;">Dominance source</span>');
+        replaceToken('Final classification', '<span style="color:#bfdbfe; font-weight:800;">Final classification</span>');
+        replaceToken('Overlap / dominance risk', '<span style="color:#fca5a5; font-weight:800;">Overlap / dominance risk</span>');
+        replaceToken('Interference-under-strong-signal risk', '<span style="color:#fde68a; font-weight:800;">Interference-under-strong-signal risk</span>');
+        replaceToken('Overall label', '<span style="color:#c7d2fe; font-weight:800;">Overall label</span>');
+        replaceToken('Serving stability', '<span style="color:#93c5fd; font-weight:800;">Serving stability</span>');
+        replaceToken('Active-set proxy', '<span style="color:#93c5fd; font-weight:800;">Active-set proxy</span>');
+
+        out = out
+            .replace(/\bNOK\b/g, okNokBadgeHtml('NOK'))
+            .replace(/\bOK\b/g, okNokBadgeHtml('OK'))
+            .replace(/\bN\/A\b/g, okNokBadgeHtml('N/A'));
+        return out;
+    }
+
+    function renderEvidenceCards(lines) {
+        const arr = Array.isArray(lines) ? lines : [];
+        if (!arr.length) return '<div style="color:#9ca3af;">No detailed evidence available.</div>';
+        const rowBadge = (txt, fg, bg, border) =>
+            '<span style="display:inline-block; min-width:68px; text-align:center; padding:2px 8px; border-radius:999px; font-size:10px; font-weight:800; color:' + fg + '; background:' + bg + '; border:1px solid ' + border + ';">' + txt + '</span>';
+        return arr.map((line) => {
+            const raw = String(line || '').trim();
+            if (!raw) return '';
+            const isBullet = /^•\s*/.test(raw);
+            const textOnly = raw.replace(/^•\s*/, '');
+            const isSection = /:\s*$/.test(textOnly);
+            let badge = isSection
+                ? rowBadge('SECTION', '#dbeafe', 'rgba(30,64,175,0.25)', 'rgba(96,165,250,0.35)')
+                : (isBullet
+                    ? rowBadge('EVIDENCE', '#dbeafe', 'rgba(30,64,175,0.25)', 'rgba(96,165,250,0.35)')
+                    : '');
+            if (/Final classification/i.test(textOnly)) badge = rowBadge('RESULT', '#fecaca', 'rgba(127,29,29,0.35)', 'rgba(248,113,113,0.45)');
+            else if (/Overlap \/ dominance risk/i.test(textOnly)) badge = rowBadge('DOM', '#fecaca', 'rgba(153,27,27,0.30)', 'rgba(248,113,113,0.45)');
+            else if (/Interference-under-strong-signal risk/i.test(textOnly)) badge = rowBadge('INTF', '#fde68a', 'rgba(120,53,15,0.30)', 'rgba(251,191,36,0.45)');
+            else if (/Dominance source/i.test(textOnly)) badge = rowBadge('SOURCE', '#bfdbfe', 'rgba(30,58,138,0.30)', 'rgba(96,165,250,0.40)');
+            const accent = isSection
+                ? 'border-left:3px solid rgba(96,165,250,0.55);'
+                : (isBullet ? 'border-left:3px solid rgba(148,163,184,0.45);' : 'border-left:3px solid rgba(30,64,175,0.45);');
+            const gap = badge ? '8px' : '0px';
+            return '<div style="display:flex; gap:' + gap + '; align-items:flex-start; padding:7px 8px; margin:6px 0; border-radius:10px; background:rgba(15,23,42,0.65); border:1px solid rgba(148,163,184,0.20); ' + accent + '">' +
+                (badge || '') +
+                '<div style="color:#dbeafe; line-height:1.55; font-size:12.5px;">' + decorateEvidenceText(textOnly) + '</div>' +
+                '</div>';
+        }).join('');
+    }
+
     function openPilotPollutionDetails(session) {
         ensureActionModal();
         const overlay = document.getElementById('actionModalOverlay');
@@ -12035,7 +19313,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         bodyEl.innerHTML = '' +
             '<div style="padding:14px; border-radius:14px; background: linear-gradient(135deg, rgba(30,64,175,0.18), rgba(2,132,199,0.10)); border:1px solid rgba(96,165,250,0.25);">' +
             '<div style="font-size:13px; font-weight:800; color:#bfdbfe; margin-bottom:8px;">Analyzer Evidence</div>' +
-            '<div style="white-space:pre-line; color:#dbeafe; line-height:1.55; font-size:12.5px;">' + lines.map(x => decorateOkNokText(x)).join('\n') + '</div>' +
+            '<div>' + renderEvidenceCards(lines) + '</div>' +
             '</div>';
         if (typeof overlay.__openActionModal === 'function') overlay.__openActionModal();
         else overlay.style.display = 'flex';
@@ -12469,6 +19747,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             if (Number.isFinite(ppDelta.samplesWith2Pilots) && Number.isFinite(ppDelta.totalMimoSamples)) {
                 pilotPollutionEvidence.push(`Dominance denominator (>=2 pilots): ${ppDelta.samplesWith2Pilots}/${ppDelta.totalMimoSamples}`);
             }
+            if (pilotPollution?.strongDominanceGuard) {
+                pilotPollutionEvidence.push('Dominance guard: strong best-server dominance, overlap classification suppressed');
+            }
             const strongB = Number.isFinite(ppStrong.denomBestValid) ? ppStrong.denomBestValid : 0;
             const strongN = Number.isFinite(ppStrong.denomTotalMimo) ? ppStrong.denomTotalMimo : 0;
             const strongS = Number.isFinite(ppStrong.strongCount) ? ppStrong.strongCount : 0;
@@ -12864,14 +20145,14 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                         '</div>')
                     : '') +
                 (pilotPollutionEvidence.length
-                    ? ('  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + ('- ' + pilotPollutionEvidence.join('<br>- ')) + '</div>')
+                    ? ('  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + renderEvidenceCards(pilotPollutionEvidence) + '</div>')
                     : '') +
                 '  <div style=\"font-size:12px; color:#d1d5db; margin-bottom:6px;\">' + explanationMetricStatusesHtml.join('<br>') + '</div>' +
-                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (whyWeThinkSo.length ? ('- ' + whyWeThinkSo.map(x => decorateOkNokText(x)).join('<br>- ')) : 'No detailed evidence bullets.') + '</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (whyWeThinkSo.length ? renderEvidenceCards(whyWeThinkSo) : 'No detailed evidence bullets.') + '</div>' +
                 '</div>' +
                 '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
                 '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Evidence</div>' +
-                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (evidence.length ? ('- ' + evidence.join('<br>- ')) : 'No evidence provided.') + '</div>' +
+                '  <div style=\"font-size:12px; color:#d1d5db;\">' + (evidence.length ? renderEvidenceCards(evidence) : 'No evidence provided.') + '</div>' +
                 '</div>' +
                 '<div style=\"padding:8px; background:#111827; border:1px solid #334155; border-radius:6px; margin-bottom:10px;\">' +
                 '  <div style=\"font-size:12px; font-weight:600; color:#bfdbfe; margin-bottom:6px;\">Recommended Actions</div>' +
@@ -13172,6 +20453,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const hasServingFreq = forceUmtsServing ? false : (toNum(p?.freq) !== null || toNum(p?.parsed?.serving?.freq) !== null || toNum(p?.properties?.['Serving Freq']) !== null);
             const hasServingRscp = forceUmtsServing ? false : (toNum(p?.rscp) !== null || toNum(p?.level) !== null || toNum(p?.parsed?.serving?.rscp) !== null || toNum(p?.properties?.['Serving RSCP']) !== null);
             const hasServingEcno = forceUmtsServing ? false : (toNum(p?.ecno) !== null || toNum(p?.parsed?.serving?.ecno) !== null || toNum(p?.properties?.['Serving EcNo']) !== null || toNum(p?.properties?.['EcNo']) !== null);
+            const rawCellmeasServing = {
+                sc: p?.properties?.['Serving SC'] ?? p?.parsed?.serving?.sc ?? p?.sc,
+                freq: p?.properties?.['Serving Freq'] ?? p?.properties?.['Freq'] ?? p?.parsed?.serving?.freq ?? p?.freq,
+                rscp: p?.properties?.['Serving RSCP'] ?? p?.parsed?.serving?.rscp ?? p?.level ?? p?.rscp,
+                ecno: p?.properties?.['Serving EcNo'] ?? p?.properties?.['EcNo'] ?? p?.parsed?.serving?.ecno ?? p?.ecno
+            };
 
             const parsed = Object.assign({}, p.parsed || {});
             parsed.serving = Object.assign({}, parsed.serving || {});
@@ -13184,6 +20471,10 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const props = Object.assign({}, p.properties || {}, {
                 'Cell ID': p?.properties?.['Cell ID'] ?? lbs.cellId
             });
+            if (rawCellmeasServing.sc !== undefined && rawCellmeasServing.sc !== null) props['CELLMEAS Serving SC'] = rawCellmeasServing.sc;
+            if (rawCellmeasServing.freq !== undefined && rawCellmeasServing.freq !== null) props['CELLMEAS Serving Freq'] = rawCellmeasServing.freq;
+            if (rawCellmeasServing.rscp !== undefined && rawCellmeasServing.rscp !== null) props['CELLMEAS Serving RSCP'] = rawCellmeasServing.rscp;
+            if (rawCellmeasServing.ecno !== undefined && rawCellmeasServing.ecno !== null) props['CELLMEAS Serving EcNo'] = rawCellmeasServing.ecno;
             if (!hasServingSc && Number.isFinite(lbs.psc) && props['Serving SC'] === undefined) props['Serving SC'] = lbs.psc;
             if (!hasServingFreq && Number.isFinite(lbs.uarfcn) && props['Serving Freq'] === undefined) props['Serving Freq'] = lbs.uarfcn;
             if (!hasServingRscp && Number.isFinite(lbs.rscp) && props['Serving RSCP'] === undefined) props['Serving RSCP'] = lbs.rscp;
@@ -14000,14 +21291,18 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 const btn = document.createElement('div');
                 btn.textContent = label;
                 btn.className = 'param-item'; // Add class for styling if needed
-                btn.draggable = true; // Make Draggable
-                btn.style.cssText = 'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;';
+                const specialThroughput = type === 'throughput_degradation';
+                btn.draggable = !specialThroughput; // Make Draggable except actions that are not map metrics
+                btn.style.cssText = specialThroughput
+                    ? 'padding:4px 8px; background:#7f1d1d; color:#fecaca; font-size:11px; border:1px solid #ef4444; border-radius:3px; cursor:pointer; transition:background 0.2s;'
+                    : 'padding:4px 8px; background:#333; color:#ccc; font-size:11px; border-radius:3px; cursor:pointer; hover:background:#444; transition:background 0.2s;';
 
-                btn.onmouseover = () => btn.style.background = '#444';
-                btn.onmouseout = () => btn.style.background = '#333';
+                btn.onmouseover = () => { btn.style.background = specialThroughput ? '#991b1b' : '#444'; };
+                btn.onmouseout = () => { btn.style.background = specialThroughput ? '#7f1d1d' : '#333'; };
 
                 // Drag Start Handler
                 btn.ondragstart = (e) => {
+                    if (!btn.draggable) return;
                     e.dataTransfer.setData('application/json', JSON.stringify({
                         logId: log.id,
                         param: param,
@@ -14041,8 +21336,52 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                                 if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
                                 if (window.applyDTLayerOrder) window.applyDTLayerOrder();
                                 if (window.updateLegend) window.updateLegend();
-                            } else 
-                            if (param === '3g_dropcall') {
+                            } else if (param === 'a3a5_event') {
+                                const a3a5 = window.filterA3A5Events(log, { maxDeltaMs: 15000 });
+                                const layerId = 'event__' + log.id + '__a3a5_event';
+                                window.mapRenderer.addEventsLayer(layerId, a3a5, {
+                                    useFlag: true,
+                                    flagColor: '#ef4444'
+                                });
+                                if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                                const eventKey = log.id + '::a3a5_event';
+                                window.eventLegendEntries[eventKey] = {
+                                    title: 'A3/A5 event',
+                                    iconUrl: null,
+                                    color: '#ef4444',
+                                    count: a3a5.length,
+                                    logId: log.id,
+                                    points: a3a5,
+                                    layerId: layerId,
+                                    visible: true
+                                };
+                                if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                                if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                                if (window.updateLegend) window.updateLegend();
+                            } else if (param === 'rlf_event') {
+                                const rlf = window.filterRLFEvents(log, { maxDeltaMs: 15000 });
+                                const layerId = 'event__' + log.id + '__rlf_event';
+                                window.mapRenderer.addEventsLayer(layerId, rlf, {
+                                    useFlag: true,
+                                    flagStyle: 'tall',
+                                    flagColor: '#dc2626'
+                                });
+                                if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                                const eventKey = log.id + '::rlf_event';
+                                window.eventLegendEntries[eventKey] = {
+                                    title: 'RLF',
+                                    iconUrl: null,
+                                    color: '#dc2626',
+                                    count: rlf.length,
+                                    logId: log.id,
+                                    points: rlf,
+                                    layerId: layerId,
+                                    visible: true
+                                };
+                                if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                                if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                                if (window.updateLegend) window.updateLegend();
+                            } else if (param === '3g_dropcall') {
                                 const drops = window.filter3gDropCalls(log);
                                 const layerId = 'event__' + log.id + '__3g_dropcall';
                                 window.mapRenderer.addEventsLayer(layerId, drops, {
@@ -14130,6 +21469,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                         if (window.openThroughputAnalysisPanel) {
                             window.openThroughputAnalysisPanel(log, String(param || 'dl'));
                         }
+                    } else if (type === 'throughput_degradation') {
+                        window.showThroughputDegradationEpisodes(null, log);
                     } else if (type === 'driver_entry') {
                         window.showMetricOptions(e, log.id, param, 'driver_entry');
                     } else {
@@ -14156,6 +21497,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 empty.textContent = 'No valid KPI samples decoded';
                 empty.style.cssText = 'font-size:11px;color:#fca5a5;padding:4px 6px;';
                 actions.appendChild(empty);
+                actions.appendChild(addAction('Throughput Degradation', '__throughput_degradation__', 'throughput_degradation'));
                 const neighborsHeader = addHeader('Neighbors');
                 actions.appendChild(neighborsHeader);
                 const noN = document.createElement('div');
@@ -14245,63 +21587,104 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                     // 1) import run, inspect console -> "[Neighbors] found X neighbor signals"
                     // 2) click N1 RSRP -> request /api/runs/<id>/kpi?name=Radio.Lte.Neighbor[1].Rsrp
                     // 3) map/grid/chart should render when samples exist
+                    actions.appendChild(addAction('Throughput Degradation', '__throughput_degradation__', 'throughput_degradation'));
                     const neighborsHeader = addHeader('Neighbors');
                     actions.appendChild(neighborsHeader);
                     const sampleNeighborRows = Array.isArray(log.trpNeighborMetrics)
                         ? log.trpNeighborMetrics
                         : [];
+                    const hasSampleIndexRows = sampleNeighborRows.some((row) => {
+                        const arr = row && row.sample_indexes;
+                        return Array.isArray(arr) && arr.length > 0;
+                    });
                     const neighborIdxPattern = /^Radio\.Lte\.Neighbor\[(\d+)\]\./i;
-                    const fieldOrder = ['pci', 'rsrp', 'rsrq', 'earfcn'];
-                    const fieldLabel = { pci: 'PCI', rsrp: 'RSRP', rsrq: 'RSRQ', earfcn: 'Freq' };
+                    const parseMetricWithIdxQualifier = (rawMetric) => {
+                        const txt = String(rawMetric || '').trim();
+                        const m = txt.match(/^(.*?)(?:\|idx=(-?\d+))?$/i);
+                        if (!m) return { baseMetric: txt, idx: null };
+                        const baseMetric = String(m[1] || '').trim();
+                        const idx = (m[2] !== undefined) ? Number(m[2]) : null;
+                        return {
+                            baseMetric,
+                            idx: Number.isFinite(idx) ? Math.trunc(idx) : null
+                        };
+                    };
+                    const fieldOrder = ['pci', 'rsrp', 'rsrq', 'cinr', 'earfcn'];
+                    const fieldLabel = { pci: 'PCI', rsrp: 'RSRP', rsrq: 'RSRQ', cinr: 'SINR', earfcn: 'Freq' };
                     const subgroupDefs = [
                         { field: 'pci', title: 'PCI neighbors' },
                         { field: 'rsrp', title: 'RSRP neighbors' },
                         { field: 'rsrq', title: 'RSRQ neighbors' },
+                        { field: 'cinr', title: 'SINR neighbors' },
                         { field: 'earfcn', title: 'Freq neighbors' }
                     ];
                     const byNeighbor = new Map();
+                    let hasSampleIndexRefs = false;
                     const upsert = (metricName, sampleCountHint) => {
-                        const metric = String(metricName || '');
+                        const parsedMetric = parseMetricWithIdxQualifier(metricName);
+                        const metric = String(parsedMetric.baseMetric || '');
                         const m = neighborIdxPattern.exec(metric);
                         if (!m) return;
-                        const idx = Number(m[1]);
+                        const idx = Number.isFinite(parsedMetric.idx) ? Number(parsedMetric.idx) : Number(m[1]);
                         if (!Number.isFinite(idx)) return;
                         const low = metric.toLowerCase();
                         let field = null;
                         if (/(\.|_)pci\b/.test(low) || low.includes('physicalcellid')) field = 'pci';
                         else if (/(\.|_)rsrp\b/.test(low)) field = 'rsrp';
                         else if (/(\.|_)rsrq\b/.test(low)) field = 'rsrq';
+                        else if (/(\.|_)cinr\b/.test(low) || /(\.|_)sinr\b/.test(low)) field = 'cinr';
                         else if (/earfcn\b/.test(low) || /frequency\b/.test(low)) field = 'earfcn';
                         if (!fieldOrder.includes(field)) return;
                         const sc = Number(sampleCountHint);
                         if (Number.isFinite(sc) && sc <= 0) return;
                         if (!byNeighbor.has(idx)) byNeighbor.set(idx, {});
                         const slot = byNeighbor.get(idx);
+                        if (Number.isFinite(parsedMetric.idx)) {
+                            hasSampleIndexRefs = true;
+                            slot.__source = 'sample_idx';
+                        }
                         const prev = slot[field];
                         const exactScore = (name) => {
-                            const n = String(name || '').toLowerCase();
+                            const n = String(name || '').toLowerCase().replace(/\|idx=-?\d+$/i, '');
                             if (field === 'pci') return n.endsWith('.pci') ? 3 : (n.includes('physicalcellid') ? 2 : 1);
                             if (field === 'rsrp') return n.endsWith('.rsrp') ? 3 : 1;
                             if (field === 'rsrq') return n.endsWith('.rsrq') ? 3 : 1;
+                            if (field === 'cinr') return n.endsWith('.cinr') ? 3 : (n.endsWith('.sinr') ? 2 : 1);
                             if (field === 'earfcn') return n.endsWith('.earfcn') ? 3 : (n.endsWith('.frequency') ? 2 : 1);
                             return 0;
                         };
                         const prevScore = prev ? exactScore(prev.name) : -1;
-                        const currScore = exactScore(metricName);
+                        const currScore = exactScore(metric);
                         // Prefer better semantic match and higher sample_count.
                         if (!prev || currScore > prevScore || (currScore === prevScore && (Number(sc) || 0) > (Number(prev.sampleCount) || 0))) {
-                            slot[field] = { name: metric, sampleCount: Number.isFinite(sc) ? sc : null };
+                            slot[field] = { name: String(metricName || metric), sampleCount: Number.isFinite(sc) ? sc : null };
                         }
                     };
                     // Primary source: decoded TRP neighbor samples pushed via /api/runs/<id>/sidebar.
                     // This avoids /catalog-driven neighbor discovery and keeps only sample-backed neighbors.
-                    sampleNeighborRows.forEach(row => upsert(row && row.name, row && row.sample_count));
+                    sampleNeighborRows.forEach(row => {
+                        const metricName = row && row.name;
+                        const sampleCount = row && row.sample_count;
+                        const rawIndexes = Array.isArray(row && row.sample_indexes) ? row.sample_indexes : [];
+                        const parsedIndexes = rawIndexes
+                            .map(v => Number(v))
+                            .filter(v => Number.isFinite(v))
+                            .map(v => Math.trunc(v));
+                        if (parsedIndexes.length) {
+                            parsedIndexes.forEach(idx => upsert(String(metricName || '') + '|idx=' + idx, sampleCount));
+                        } else {
+                            upsert(metricName, sampleCount);
+                        }
+                    });
 
-                    const neighborByField = { pci: [], rsrp: [], rsrq: [], earfcn: [] };
+                    const neighborByField = { pci: [], rsrp: [], rsrq: [], cinr: [], earfcn: [] };
                     const sortedNeighborIdx = Array.from(byNeighbor.keys()).sort((a, b) => a - b);
+                    const minNeighborIdx = sortedNeighborIdx.length ? sortedNeighborIdx[0] : 0;
                     sortedNeighborIdx.forEach((idx, ord) => {
-                        const displayIndex = ord + 1; // UI compact index: N1, N2, ...
                         const slot = byNeighbor.get(idx) || {};
+                        const displayIndex = hasSampleIndexRefs
+                            ? (minNeighborIdx === 0 ? idx + 1 : idx)
+                            : (ord + 1);
                         fieldOrder.forEach(f => {
                             if (!slot[f]) return;
                             neighborByField[f].push({
@@ -14311,8 +21694,34 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                             });
                         });
                     });
+                    // If TRP only exposes rotating Neighbor[64] (no explicit per-sample idx),
+                    // provide synthetic N1..N# controls from precomputed neighbor window ranking.
+                    if (!hasSampleIndexRows && sortedNeighborIdx.length <= 1) {
+                        let maxRank = 0;
+                        (Array.isArray(log.points) ? log.points : []).forEach((pt) => {
+                            const arr = pt && pt.__lteTrpNeighborWindow && Array.isArray(pt.__lteTrpNeighborWindow.neighbors)
+                                ? pt.__lteTrpNeighborWindow.neighbors
+                                : [];
+                            if (arr.length > maxRank) maxRank = arr.length;
+                        });
+                        maxRank = Math.max(0, Math.min(8, maxRank));
+                        if (maxRank > 1) {
+                            fieldOrder.forEach((f) => {
+                                neighborByField[f] = [];
+                                for (let r = 1; r <= maxRank; r++) {
+                                    neighborByField[f].push({
+                                        label: `N${r} ${fieldLabel[f]}`,
+                                        metric: `__lte_neighbor_window_n${r}_${f}`,
+                                        originalIndex: r,
+                                        synthetic: true
+                                    });
+                                }
+                            });
+                        }
+                    }
                     const neighborSignals = fieldOrder.reduce((acc, f) => acc + (neighborByField[f] ? neighborByField[f].length : 0), 0);
-                    console.log('[Neighbors] found', neighborSignals, 'neighbor signals across', sortedNeighborIdx.length, 'neighbor indexes (from sidebar/TRP samples)');
+                    const syntheticMode = Boolean(neighborByField.pci && neighborByField.pci[0] && neighborByField.pci[0].synthetic);
+                    console.log('[Neighbors] found', neighborSignals, 'neighbor signals across', sortedNeighborIdx.length, 'neighbor indexes', syntheticMode ? '(from window-ranked synthetic neighbors)' : '(from sidebar/TRP samples)');
 
                     if (!neighborSignals) {
                         const noN = document.createElement('div');
@@ -14346,7 +21755,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                             } else {
                                 rows.forEach(ns => {
                                     const btn = addAction(ns.label, ns.metric, 'metric');
-                                    if (Number.isFinite(Number(ns.originalIndex))) {
+                                    if (ns.synthetic) {
+                                        btn.title = `${ns.label} (derived from neighbor window rank)`;
+                                    } else if (Number.isFinite(Number(ns.originalIndex))) {
                                         btn.title = `${ns.label} (source Neighbor[${ns.originalIndex}])`;
                                     }
                                     body.appendChild(btn);
@@ -14603,7 +22014,12 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
             }
 
-            // Left sidebar Events group removed by request.
+            // Global events entry (kept lightweight): always expose A3/A5 event button when events exist.
+            if (Array.isArray(log.events) && log.events.length > 0) {
+                actions.appendChild(addHeader('EVENTS'));
+                actions.appendChild(addAction('A3/A5 event', 'a3a5_event', 'event'));
+                actions.appendChild(addAction('RLF', 'rlf_event', 'event'));
+            }
 
             // Resurrected Signaling Modal Button
             const sigBtn = document.createElement('div');
@@ -15187,6 +22603,65 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
 
     async function openDriverEntryInView(log, entryKey, viewMode) {
         const entry = (window.TRP_METRIC_REGISTRY || []).find(x => x.key === entryKey);
+        if (entryKey === 'ev_a3a5') {
+            const mappedEvents = window.filterA3A5Events(log, { maxDeltaMs: 15000 });
+            if (viewMode === 'map') {
+                const layerId = 'event__' + log.id + '__a3a5_event';
+                if (window.mapRenderer && typeof window.mapRenderer.addEventsLayer === 'function') {
+                    window.mapRenderer.addEventsLayer(layerId, mappedEvents, {
+                        useFlag: true,
+                        flagColor: '#ef4444'
+                    });
+                }
+                if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                const eventKey = log.id + '::a3a5_event';
+                window.eventLegendEntries[eventKey] = {
+                    title: 'A3/A5 event',
+                    iconUrl: null,
+                    color: '#ef4444',
+                    count: mappedEvents.length,
+                    logId: log.id,
+                    points: mappedEvents,
+                    layerId: layerId,
+                    visible: true
+                };
+                if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                if (window.updateLegend) window.updateLegend();
+                if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+                return;
+            }
+        }
+        if (entryKey === 'ev_rlf') {
+            const mappedEvents = window.filterRLFEvents(log, { maxDeltaMs: 15000 });
+            if (viewMode === 'map') {
+                const layerId = 'event__' + log.id + '__rlf_event';
+                if (window.mapRenderer && typeof window.mapRenderer.addEventsLayer === 'function') {
+                    window.mapRenderer.addEventsLayer(layerId, mappedEvents, {
+                        useFlag: true,
+                        flagStyle: 'tall',
+                        flagColor: '#dc2626'
+                    });
+                }
+                if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                const eventKey = log.id + '::rlf_event';
+                window.eventLegendEntries[eventKey] = {
+                    title: 'RLF',
+                    iconUrl: null,
+                    color: '#dc2626',
+                    count: mappedEvents.length,
+                    logId: log.id,
+                    points: mappedEvents,
+                    layerId: layerId,
+                    visible: true
+                };
+                if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                if (window.updateLegend) window.updateLegend();
+                if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+                return;
+            }
+        }
         try {
             const prepared = await prepareDriverMetricOnLog(log, entryKey);
             if (viewMode === 'map') {

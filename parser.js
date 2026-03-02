@@ -719,7 +719,15 @@ const UmtsCallAnalyzer = {
         const tsState = { baseUtcMs: null, prevTodMs: null, dayOffset: 0 };
         const setBaseDate = (dmy) => {
             if (!dmy) return;
-            tsState.baseUtcMs = Date.UTC(dmy.year, dmy.month - 1, dmy.day, 0, 0, 0, 0);
+            if (dmy.month < 1 || dmy.month > 12) return;
+            if (dmy.day < 1 || dmy.day > 31) return;
+
+            const newBase = Date.UTC(dmy.year, dmy.month - 1, dmy.day, 0, 0, 0, 0);
+
+            // Protect against periodic duplicate headers rewinding the timeline
+            if (tsState.baseUtcMs && newBase <= tsState.baseUtcMs) return;
+
+            tsState.baseUtcMs = newBase;
             tsState.prevTodMs = null;
             tsState.dayOffset = 0;
         };
@@ -727,8 +735,9 @@ const UmtsCallAnalyzer = {
             if (!Number.isFinite(tsState.baseUtcMs)) return null;
             const todMs = parseTodMs(todText);
             if (!Number.isFinite(todMs)) return null;
-            const rolloverThreshold = 6 * 3600 * 1000;
-            if (Number.isFinite(tsState.prevTodMs) && todMs < (tsState.prevTodMs - rolloverThreshold)) {
+            const nearEnd = tsState.prevTodMs > 18 * 3600 * 1000;
+            const nearStart = todMs < 6 * 3600 * 1000;
+            if (Number.isFinite(tsState.prevTodMs) && nearEnd && nearStart && todMs < tsState.prevTodMs) {
                 tsState.dayOffset += 1;
             }
             tsState.prevTodMs = todMs;
@@ -748,7 +757,7 @@ const UmtsCallAnalyzer = {
             const key = String(deviceId || '');
             let dev = radioStore.byDevice.get(key);
             if (!dev) {
-                dev = { mimoRows: [], txpcRows: [], rlcRows: [] };
+                dev = { mimoRows: [], txpcRows: [], rlcRows: [], cellmeasRows: [] };
                 radioStore.byDevice.set(key, dev);
             }
             return dev;
@@ -762,7 +771,7 @@ const UmtsCallAnalyzer = {
             }
             arr.push({ ts, header, raw: parts.join(',') });
         };
-        const parseMimoSamples = (parts) => {
+        const parseMimoSamples = (parts, techId) => {
             const start = 7;
             const remaining = parts.length - start;
             if (remaining <= 0) return [];
@@ -780,7 +789,19 @@ const UmtsCallAnalyzer = {
                 const ecno = parseNumber(parts[i + 6]);
                 const rssi = parseNumber(parts[i + 7]);
                 if (psc === null || rscp === null || ecno === null) continue;
-                out.push({ psc, rscp, ecno, rssi, cellId, uarfcn });
+
+                // Unify sc, rscp, ecno for both technologies
+                out.push({
+                    sc: psc,
+                    psc: techId === 5 ? psc : null,
+                    pci: techId === 7 ? psc : null,
+                    rscp,
+                    ecno,
+                    rssi,
+                    cellId,
+                    uarfcn,
+                    earfcn: techId === 7 ? uarfcn : null
+                });
             }
             return out;
         };
@@ -802,11 +823,83 @@ const UmtsCallAnalyzer = {
                 blerMean: nums.reduce((a, b) => a + b, 0) / nums.length
             };
         };
-        const addRadio = (header, parts, ts, deviceId) => {
+        const parseUmtsCellmeasDominance = (parts) => {
+            const techId = parseInt(parts[3], 10);
+            if (techId !== 5) return null;
+            const looksLikePlmn = (v) => /^[0-9]{5}$/.test(String(v || '').trim());
+            const validSc = (v) => Number.isFinite(v) && v >= 0 && v <= 511;
+            const looksLikeRefPower = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+            const looksLikeQuality = (v) => Number.isFinite(v) && v <= 0 && v >= -30;
+            const looksLikeRscp = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+            const blockMap = new Map();
+            for (let k = 0; k < parts.length - 6; k++) {
+                const setType = parseInt(parts[k], 10);
+                if (!Number.isFinite(setType) || setType < 0 || setType > 3) continue;
+                const plmn = String(parts[k + 1] || '').trim();
+                const freq = parseNumber(parts[k + 2]);
+                const sc = parseInt(parts[k + 3], 10);
+                const x1 = parseNumber(parts[k + 4]);
+                const x2 = parseNumber(parts[k + 5]);
+                const x3 = parseNumber(parts[k + 6]);
+                if (!looksLikePlmn(plmn) || !Number.isFinite(freq) || freq <= 2000 || !validSc(sc)) continue;
+
+                let subtype = null;
+                let rscp = null;
+                if (looksLikeRefPower(x1) && looksLikeQuality(x3)) {
+                    subtype = 'A';
+                    rscp = x1;
+                } else if (looksLikeQuality(x1) && looksLikeRscp(x3)) {
+                    subtype = 'B';
+                    rscp = x3;
+                } else {
+                    continue;
+                }
+
+                const key = `${Math.round(freq)}:${sc}`;
+                const existing = blockMap.get(key);
+                const prio = setType <= 1 ? 0 : setType;
+                const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                const hasRscp = Number.isFinite(rscp);
+                const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                if (!existing || prio < existingPrio || (prio === existingPrio && hasRscp && !existingHasRscp)) {
+                    blockMap.set(key, { setType, freq, sc, subtype, rscp });
+                }
+            }
+
+            const blocks = Array.from(blockMap.values());
+            const subtypeAcount = blocks.filter((b) => b.subtype === 'A').length;
+            const subtypeBcount = blocks.filter((b) => b.subtype === 'B').length;
+            // Dominance from CELLMEAS is valid only for subtype-A (RSCP-bearing) rows.
+            const rscpVals = blocks
+                .filter((b) => b && b.subtype === 'A')
+                .map((b) => b.rscp)
+                .filter((v) => Number.isFinite(v))
+                .sort((a, b) => b - a);
+            const delta = rscpVals.length >= 2 ? (rscpVals[0] - rscpVals[1]) : null;
+            return {
+                techId,
+                subtypeAcount,
+                subtypeBcount,
+                totalNeighbors: blocks.length,
+                rscpNeighborCount: rscpVals.length,
+                delta
+            };
+        };
+        const addRadio = (header, parts, ts, deviceId, currentRatState) => {
             const dev = getDeviceStore(deviceId);
+            const techId = parseInt(parts[3], 10);
+            const isTechIdValid = Number.isFinite(techId);
+
             if (header === 'MIMOMEAS') {
-                const samples = parseMimoSamples(parts);
-                if (samples.length) dev.mimoRows.push({ ts, samples });
+                const samples = parseMimoSamples(parts, techId);
+                if (samples.length) {
+                    dev.mimoRows.push({
+                        ts,
+                        rat: currentRatState || 'UNKNOWN',
+                        techId: isTechIdValid ? techId : null,
+                        samples
+                    });
+                }
                 return;
             }
             if (header === 'TXPC') {
@@ -817,6 +910,17 @@ const UmtsCallAnalyzer = {
             if (header === 'RLCBLER') {
                 const row = parseRlcBler(parts);
                 if (row) dev.rlcRows.push({ ts, blerMax: row.blerMax, blerMean: row.blerMean });
+                return;
+            }
+            if (header === 'CELLMEAS') {
+                const row = parseUmtsCellmeasDominance(parts);
+                if (row) {
+                    dev.cellmeasRows.push({
+                        ts,
+                        rat: currentRatState || 'UNKNOWN',
+                        ...row
+                    });
+                }
             }
         };
         const buildSnapshot = (endTs, deviceId) => {
@@ -862,17 +966,76 @@ const UmtsCallAnalyzer = {
                 pilotPollutionDetected: null,
                 pilotPollutionEvidence: []
             };
+            let localRatState = 'UNKNOWN';
+            let lastRatChangeTs = null;
+            const TRANSITION_WINDOW_MS = 500;
+
             const mFrom = lowerBound(dev.mimoRows, fromTs);
             const mTo = upperBound(dev.mimoRows, endTs);
             const best = [];
             const dominanceDeltas = [];
-            const activeSetSizes = [];
-            for (let i = mFrom; i < mTo; i++) {
+            const simultaneousPilotCounts = [];
+            let validUmtsMimoSamples = 0;
+
+            const lteDominanceDeltas = [];
+            let validLteMimoSamples = 0;
+
+            let dominantRatAtEnd = 'UNKNOWN';
+            // First search primary CHI track, it perfectly anchors the RAT at failure
+            if (dev.chiRows && dev.chiRows.length > 0) {
+                for (let i = dev.chiRows.length - 1; i >= 0; i--) {
+                    const r = dev.chiRows[i];
+                    if (r.ts <= endTs && r.state && (r.state.rat === 'UMTS' || r.state.rat === 'LTE')) {
+                        dominantRatAtEnd = r.state.rat;
+                        break;
+                    }
+                }
+            }
+            // Fallback to mimoRows measurement tracking if CHI did not yield one
+            if (dominantRatAtEnd === 'UNKNOWN') {
+                for (let i = dev.mimoRows.length - 1; i >= 0; i--) {
+                    const r = dev.mimoRows[i];
+                    if (r.ts <= endTs && (r.rat === 'UMTS' || r.rat === 'LTE')) {
+                        dominantRatAtEnd = r.rat;
+                        break;
+                    }
+                }
+            }
+
+            for (let i = 0; i < dev.mimoRows.length; i++) {
+                // We track RAT changes globally through all mimoRows
                 const row = dev.mimoRows[i];
+                const rat = (row.rat === 'UMTS' || row.rat === 'LTE')
+                    ? row.rat
+                    : (row.techId === 5 ? 'UMTS' : row.techId === 7 ? 'LTE' : null);
+
+                if (rat && rat !== localRatState) {
+                    localRatState = rat;
+                    lastRatChangeTs = row.ts;
+                }
+
+                // But only process rows within our window bounds for metrics
+                if (i < mFrom || i >= mTo) continue;
+
+                // Validate transition window: Do not compute pollution if we recently transitioned
+                const isTransitioning = lastRatChangeTs && (row.ts - lastRatChangeTs) < TRANSITION_WINDOW_MS;
+                if (isTransitioning) continue;
+
+                // Restrict pollution logic to either UMTS or LTE
+                if (localRatState !== 'UMTS' && localRatState !== 'LTE') continue;
+
+                // Ignore stub rows without actual cell payload data
+                if (!row.samples || row.samples.length === 0) continue;
+
                 const byPsc = new Map();
                 row.samples.forEach(s => {
-                    const key = String(s.psc);
-                    const cur = byPsc.get(key) || { psc: s.psc, rscpSum: 0, ecnoSum: 0, rssiSum: 0, rssiCount: 0, count: 0, cellId: s.cellId, uarfcn: s.uarfcn };
+                    const id = s.sc ?? s.pci ?? s.psc;
+                    const key = String(id);
+                    const cur = byPsc.get(key) || {
+                        id,
+                        rscpSum: 0, ecnoSum: 0, rssiSum: 0, rssiCount: 0, count: 0,
+                        cellId: s.cellId, freq: s.uarfcn ?? s.earfcn
+                    };
                     cur.rscpSum += s.rscp;
                     cur.ecnoSum += s.ecno;
                     if (Number.isFinite(s.rssi)) {
@@ -885,16 +1048,41 @@ const UmtsCallAnalyzer = {
                 const blocks = [];
                 byPsc.forEach(v => {
                     const avgRscp = v.rscpSum / v.count;
-                    blocks.push({ ts: row.ts, rscp: avgRscp, ecno: v.ecnoSum / v.count, rssi: v.rssiCount > 0 ? (v.rssiSum / v.rssiCount) : null, psc: v.psc, cellId: v.cellId, uarfcn: v.uarfcn });
+                    if (Number.isFinite(avgRscp)) {
+                        blocks.push({
+                            ts: row.ts,
+                            sc: v.id,
+                            freq: v.freq,
+                            rscp: avgRscp,
+                            ecno: v.ecnoSum / v.count,
+                            rssi: v.rssiCount > 0 ? (v.rssiSum / v.rssiCount) : null,
+                            cellId: v.cellId
+                        });
+                    }
                 });
-                if (blocks.length) activeSetSizes.push(blocks.length);
-                if (blocks.length >= 2) {
-                    const sorted = blocks.slice().sort((a, b) => b.rscp - a.rscp);
-                    const delta = sorted[0].rscp - sorted[1].rscp;
-                    if (Number.isFinite(delta)) dominanceDeltas.push(delta);
+
+                if (blocks.length > 0) {
+                    if (localRatState === 'UMTS') validUmtsMimoSamples += 1;
+                    else if (localRatState === 'LTE') validLteMimoSamples += 1;
+                }
+                if (localRatState === 'UMTS') {
+                    if (blocks.length) simultaneousPilotCounts.push(blocks.length);
+                    if (blocks.length >= 2) {
+                        const sorted = blocks.slice().sort((a, b) => b.rscp - a.rscp);
+                        const delta = sorted[0].rscp - sorted[1].rscp;
+                        if (Number.isFinite(delta)) dominanceDeltas.push(delta);
+                    }
+                } else if (localRatState === 'LTE') {
+                    if (blocks.length >= 2) {
+                        const sortedLte = blocks.slice().sort((a, b) => b.rscp - a.rscp); // using rscp field which mapped rsrp actually
+                        const deltaLte = sortedLte[0].rscp - sortedLte[1].rscp;
+                        if (Number.isFinite(deltaLte)) lteDominanceDeltas.push(deltaLte);
+                    }
                 }
                 const bestSample = getBestServerFromMimo(blocks);
-                if (bestSample) best.push(bestSample);
+                if (bestSample) {
+                    best.push({ ...bestSample, rat: localRatState });
+                }
             }
             if (best.length) {
                 const rscpVals = best.map(x => x.rscp);
@@ -906,15 +1094,15 @@ const UmtsCallAnalyzer = {
                 snap.ecnoMedian = median(ecnoVals);
                 snap.ecnoMin = Math.min(...ecnoVals);
                 snap.ecnoLast = last.ecno;
-                snap.lastPsc = last.psc;
+                snap.lastPsc = last.sc;
                 snap.lastCellId = last.cellId;
-                snap.lastUarfcn = last.uarfcn;
+                snap.lastUarfcn = last.freq;
                 snap.bestServerSamples = best;
-                snap.uniquePscCount = new Set(best.map(x => String(x.psc))).size;
+                snap.uniquePscCount = new Set(best.map(x => String(x.sc))).size;
                 snap.lastMimoTs = last.ts;
                 snap.lastBestServer = {
-                    psc: last.psc,
-                    uarfcn: last.uarfcn,
+                    psc: last.sc,
+                    uarfcn: last.freq,
                     cellId: last.cellId,
                     rscp: last.rscp,
                     ecno: last.ecno,
@@ -931,7 +1119,7 @@ const UmtsCallAnalyzer = {
                 snap.badEcnoStrongRscpRatio = strongRscpCount ? (strongBadCount / strongRscpCount) : null;
                 let switches = 0;
                 for (let i = 1; i < best.length; i++) {
-                    if (best[i].psc !== best[i - 1].psc) switches += 1;
+                    if (best[i].sc !== best[i - 1].sc) switches += 1;
                 }
                 snap.pscSwitchCount = switches;
             }
@@ -942,9 +1130,15 @@ const UmtsCallAnalyzer = {
                 snap.pilotDominanceLowCount = dominanceDeltas.filter(d => Number.isFinite(d) && d < 3).length;
                 snap.pilotDominanceLowRatio = snap.pilotDominanceLowCount / dominanceDeltas.length;
             }
-            if (activeSetSizes.length) {
-                snap.activeSetSizeMean = activeSetSizes.reduce((a, b) => a + b, 0) / activeSetSizes.length;
-                snap.activeSetSizeMax = Math.max(...activeSetSizes);
+            if (lteDominanceDeltas.length) {
+                snap.lteDominanceSampleCount = lteDominanceDeltas.length;
+                snap.lteDominanceDeltaMedian = median(lteDominanceDeltas);
+                snap.lteDominanceLowCount = lteDominanceDeltas.filter(d => Number.isFinite(d) && d < 3).length;
+                snap.lteDominanceLowRatio = snap.lteDominanceLowCount / lteDominanceDeltas.length;
+            }
+            if (simultaneousPilotCounts.length) {
+                snap.activeSetSizeMean = simultaneousPilotCounts.reduce((a, b) => a + b, 0) / simultaneousPilotCounts.length;
+                snap.activeSetSizeMax = Math.max(...simultaneousPilotCounts);
             }
             // Preload TX/BLER so interference scoring can use finalized metrics.
             const preTxFrom = lowerBound(dev.txpcRows, fromTs);
@@ -962,22 +1156,58 @@ const UmtsCallAnalyzer = {
             if (preRTo > preRFrom) {
                 const blerRowsPre = dev.rlcRows.slice(preRFrom, preRTo);
                 snap.blerMax = blerRowsPre.reduce((m, r) => (r.blerMax > m ? r.blerMax : m), -Infinity);
-                snap.blerMean = blerRowsPre.reduce((sum, r) => sum + r.blerMean, 0) / blerRowsPre.length;
+                snap.blerMean = blerRowsPre.reduce((a, b) => a + b, 0) / blerRowsPre.length;
             }
-            const deltaMedianRaw = Number.isFinite(snap.pilotDominanceDeltaMedian) ? snap.pilotDominanceDeltaMedian : null;
-            const deltaRatioRaw = Number.isFinite(snap.pilotDominanceLowRatio) ? snap.pilotDominanceLowRatio : null;
-            const deltaStdRaw = Number.isFinite(snap.pilotDominanceDeltaStd) ? snap.pilotDominanceDeltaStd : null;
+            const cellmeasRows = Array.isArray(dev.cellmeasRows) ? dev.cellmeasRows : [];
+            const cFrom = lowerBound(cellmeasRows, fromTs);
+            const cTo = upperBound(cellmeasRows, endTs);
+            const cellmeasDeltas = [];
+            let cellmeasUmtsRows = 0;
+            let cellmeasSubtypeARows = 0;
+            let cellmeasSubtypeBOnlyRows = 0;
+            for (let i = cFrom; i < cTo; i++) {
+                const row = cellmeasRows[i];
+                if (!row || row.techId !== 5) continue;
+                cellmeasUmtsRows += 1;
+                if (row.subtypeAcount > 0) cellmeasSubtypeARows += 1;
+                if (row.subtypeAcount === 0 && row.subtypeBcount > 0) cellmeasSubtypeBOnlyRows += 1;
+                if (row.subtypeAcount > 0 && Number.isFinite(row.delta)) cellmeasDeltas.push(row.delta);
+            }
+            const cellmeasDominanceAvailable = cellmeasDeltas.length > 0;
+            const cellmeasDeltaMedian = cellmeasDominanceAvailable ? median(cellmeasDeltas) : null;
+            const cellmeasLt3dbRatio = cellmeasDominanceAvailable
+                ? (cellmeasDeltas.filter((d) => Number.isFinite(d) && d < 3).length / cellmeasDeltas.length)
+                : null;
+            const cellmeasCoverageRatio = cellmeasUmtsRows > 0 ? (cellmeasDeltas.length / cellmeasUmtsRows) : null;
+            const cellmeasSubtypeACoverageRatio = cellmeasSubtypeARows > 0 ? (cellmeasDeltas.length / cellmeasSubtypeARows) : null;
+            const cellmeasLowCoverage = !Number.isFinite(cellmeasCoverageRatio) || cellmeasCoverageRatio < 0.30;
+            const cellmeasUnavailableReason = cellmeasUmtsRows === 0
+                ? 'no UMTS CELLMEAS rows in window'
+                : (cellmeasSubtypeARows === 0 && cellmeasSubtypeBOnlyRows > 0)
+                    ? 'neighbor RSCP unavailable (unsupported CELLMEAS subtype)'
+                    : 'no >=2 subtype-A pilots per timestamp';
+            const dominanceSourceLine = (!cellmeasDominanceAvailable && cellmeasUnavailableReason === 'neighbor RSCP unavailable (unsupported CELLMEAS subtype)')
+                ? 'Dominance source: MIMOMEAS-only (CELLMEAS RSCP unavailable).'
+                : null;
+            const deltaMedianRaw = dominantRatAtEnd === 'LTE' ? (Number.isFinite(snap.lteDominanceDeltaMedian) ? snap.lteDominanceDeltaMedian : null) : (Number.isFinite(snap.pilotDominanceDeltaMedian) ? snap.pilotDominanceDeltaMedian : null);
+            const deltaRatioRaw = dominantRatAtEnd === 'LTE' ? (Number.isFinite(snap.lteDominanceLowRatio) ? snap.lteDominanceLowRatio : null) : (Number.isFinite(snap.pilotDominanceLowRatio) ? snap.pilotDominanceLowRatio : null);
+            const deltaStdRaw = dominantRatAtEnd === 'LTE' ? null : (Number.isFinite(snap.pilotDominanceDeltaStd) ? snap.pilotDominanceDeltaStd : null);
+
             const pscSwitchCount = Number.isFinite(snap.pscSwitchCount) ? snap.pscSwitchCount : 0;
-            const activeSetMean = Number.isFinite(snap.activeSetSizeMean) ? snap.activeSetSizeMean : 0;
-            const activeSetMax = Number.isFinite(snap.activeSetSizeMax) ? snap.activeSetSizeMax : 0;
+            const observedPilotMean = Number.isFinite(snap.activeSetSizeMean) ? snap.activeSetSizeMean : 0;
+            const observedPilotMax = Number.isFinite(snap.activeSetSizeMax) ? snap.activeSetSizeMax : 0;
             const totalMimoSamples = best.length;
-            const samplesWith2Pilots = dominanceDeltas.length;
-            const deltaCoverageRatio = totalMimoSamples > 0 ? (samplesWith2Pilots / totalMimoSamples) : null;
+
+            const samplesWith2Pilots = dominantRatAtEnd === 'LTE' ? lteDominanceDeltas.length : dominanceDeltas.length;
+            const validDenominator = dominantRatAtEnd === 'LTE' ? validLteMimoSamples : validUmtsMimoSamples;
+            const dominanceCoverageRatio = totalMimoSamples > 0 ? (samplesWith2Pilots / totalMimoSamples) : null;
+            const deltaCoverageRatio = validDenominator > 0 ? (samplesWith2Pilots / validDenominator) : null;
             const deltaLowConfidence = !Number.isFinite(deltaCoverageRatio) || deltaCoverageRatio < 0.30;
-            const validBest = best.filter(v => Number.isFinite(v.rscp) && Number.isFinite(v.ecno));
+            const validBest = dominantRatAtEnd === 'LTE' ? best.filter(v => Number.isFinite(v.rscp)) : best.filter(v => Number.isFinite(v.rscp) && Number.isFinite(v.ecno));
             const validBestCount = Number.isFinite(snap.validBestCount) ? snap.validBestCount : validBest.length;
-            const strongBadCount = Number.isFinite(snap.strongBadCount) ? snap.strongBadCount : validBest.filter(v => v.rscp > -85 && v.ecno < -14).length;
-            const bestPsc = modeNumber(best.map(v => v.psc));
+            let computedStrongBadCount = dominantRatAtEnd === 'LTE' ? 0 : validBest.filter(v => v.rscp > -85 && v.ecno < -14).length;
+            const strongBadCount = Number.isFinite(snap.strongBadCount) ? snap.strongBadCount : computedStrongBadCount;
+            const bestPsc = modeNumber(best.map(v => v.sc));
             const rscpValidValues = validBest.map(v => v.rscp);
             const ecnoValidValues = validBest.map(v => v.ecno);
             const levelFromScore = (v) => v >= 60 ? 'High' : (v >= 35 ? 'Moderate' : 'Low');
@@ -985,24 +1215,53 @@ const UmtsCallAnalyzer = {
             const ratioStrongShare = validBestCount > 0 ? (strongRscpCount / validBestCount) : null;
             const ratioBad = strongRscpCount > 0 ? (strongBadCount / strongRscpCount) : null;
             const strongRscpShare = ratioStrongShare;
+            const coverageBucket = (() => {
+                if (!Number.isFinite(snap.rscpMedian)) return 'unknown';
+                if (snap.rscpMedian > -85) return 'strong';
+                if (snap.rscpMedian > -95) return 'fair';
+                return 'weak';
+            })();
+            const overlapCoverageLabel = coverageBucket === 'strong'
+                ? 'under strong coverage'
+                : (coverageBucket === 'fair' ? 'under fair coverage' : 'under weak coverage');
             const dominanceAvailable = samplesWith2Pilots > 0;
             const hasStrongDominanceEvidence = dominanceAvailable && !deltaLowConfidence;
             const deltaMedian = dominanceAvailable ? deltaMedianRaw : null;
             const deltaRatio = dominanceAvailable ? deltaRatioRaw : null;
             const deltaStd = dominanceAvailable ? deltaStdRaw : null;
+            const weakDominanceSignature = hasStrongDominanceEvidence
+                && Number.isFinite(deltaMedian)
+                && Number.isFinite(deltaRatio)
+                && deltaMedian < 3
+                && deltaRatio > 0.30;
+            const strongDominanceGuard = hasStrongDominanceEvidence
+                && Number.isFinite(deltaMedian)
+                && Number.isFinite(deltaRatio)
+                && deltaMedian >= 6
+                && deltaRatio <= 0.20;
+            const cellmeasAgreement = (dominanceAvailable && cellmeasDominanceAvailable && Number.isFinite(cellmeasDeltaMedian) && Number.isFinite(deltaMedian))
+                ? ((Math.abs(cellmeasDeltaMedian - deltaMedian) <= 1.5
+                    && Number.isFinite(cellmeasLt3dbRatio) && Number.isFinite(deltaRatio)
+                    && Math.abs(cellmeasLt3dbRatio - deltaRatio) <= 0.20) ? 'agree' : 'disagree')
+                : 'n/a';
             let dominanceScore = 0;
             if (hasStrongDominanceEvidence) {
                 if (deltaMedian !== null && deltaMedian < 2) dominanceScore += 30;
                 if (Number.isFinite(deltaRatio) && deltaRatio > 0.70) dominanceScore += 30;
                 if (Number.isFinite(deltaStd) && deltaStd > 2) dominanceScore += 10;
             }
-            if (dominanceAvailable) {
-                if (activeSetMax >= 3) dominanceScore += 20;
-                if (activeSetMean >= 2) dominanceScore += 10;
-                if (pscSwitchCount > 2) dominanceScore += 20;
-                dominanceScore = Math.max(0, Math.min(100, dominanceScore));
-            } else {
+            if (dominanceAvailable && dominantRatAtEnd === 'UMTS') {
+                if (observedPilotMax >= 3) dominanceScore += 10;
+                if (observedPilotMean >= 2.5) dominanceScore += 5;
+            }
+            if (pscSwitchCount > 3) dominanceScore += 15;
+            dominanceScore = Math.max(0, Math.min(100, dominanceScore));
+            if (!dominanceAvailable) {
                 dominanceScore = null;
+            }
+            if (strongDominanceGuard && Number.isFinite(dominanceScore)) {
+                // Strong dominance means overlap is unlikely even with quality issues.
+                dominanceScore = Math.min(dominanceScore, 20);
             }
 
             let interferenceScore = 0;
@@ -1020,18 +1279,26 @@ const UmtsCallAnalyzer = {
             const explicitDlInterferenceSignature = Number.isFinite(snap.blerMax) && snap.blerMax >= 80 &&
                 Number.isFinite(snap.rscpMedian) && snap.rscpMedian >= -90 &&
                 Number.isFinite(snap.txP90) && snap.txP90 <= 18;
-            if (interferenceScore >= 60 && ((Number.isFinite(strongRscpShare) && strongRscpShare >= 0.30) || explicitDlInterferenceSignature)) {
+            if (interferenceScore >= 60 && strongDominanceGuard) {
+                finalLabel = 'DL Interference (strong dominance, overlap unlikely)';
+                pollutionScore = Number.isFinite(dominanceScore) ? dominanceScore : 20;
+                pollutionLevel = 'Low';
+            } else if (interferenceScore >= 60 && ((Number.isFinite(strongRscpShare) && strongRscpShare >= 0.30) || explicitDlInterferenceSignature)) {
                 finalLabel = hasStrongDominanceEvidence ? 'Pilot Pollution / DL Interference' : 'DL Interference (dominance evidence unavailable)';
                 pollutionScore = interferenceScore;
                 pollutionLevel = interferenceLevel;
-            } else if (hasStrongDominanceEvidence && dominanceScore >= 60 && Number.isFinite(strongRscpShare) && strongRscpShare < 0.30) {
-                finalLabel = 'High overlap / poor dominance under weak coverage';
+            } else if (weakDominanceSignature && dominanceScore >= 60 && Number.isFinite(strongRscpShare) && strongRscpShare < 0.30) {
+                finalLabel = `High overlap / poor dominance ${overlapCoverageLabel}`;
                 pollutionScore = dominanceScore;
                 pollutionLevel = dominanceLevel;
-            } else if (hasStrongDominanceEvidence && dominanceScore >= 35) {
+            } else if (weakDominanceSignature && dominanceScore >= 35) {
                 finalLabel = 'Overlap risk';
                 pollutionScore = dominanceScore;
                 pollutionLevel = dominanceLevel;
+            } else if (strongDominanceGuard) {
+                finalLabel = 'Low overlap risk (strong dominance)';
+                pollutionScore = Number.isFinite(dominanceScore) ? dominanceScore : 20;
+                pollutionLevel = 'Low';
             } else if (!hasStrongDominanceEvidence && interferenceScore < 60) {
                 finalLabel = 'Dominance unavailable / low interference risk';
                 pollutionScore = interferenceScore;
@@ -1044,6 +1311,10 @@ const UmtsCallAnalyzer = {
             const deltaStdText = samplesWith2Pilots > 0 && Number.isFinite(deltaStd) ? `${deltaStd.toFixed(2)} dB` : 'n/a';
             const deltaRatioPct = (samplesWith2Pilots > 0 && Number.isFinite(deltaRatio)) ? (deltaRatio * 100).toFixed(0) : 'n/a';
             const deltaRatioDen = samplesWith2Pilots > 0 ? `${countBelow3}/${samplesWith2Pilots}` : '0/0';
+            const cellDeltaMedText = cellmeasDominanceAvailable && Number.isFinite(cellmeasDeltaMedian) ? `${cellmeasDeltaMedian.toFixed(2)} dB` : 'n/a';
+            const cellDeltaRatioText = cellmeasDominanceAvailable && Number.isFinite(cellmeasLt3dbRatio) ? `${(cellmeasLt3dbRatio * 100).toFixed(0)}%` : 'n/a';
+            const cellDeltaCoverageText = Number.isFinite(cellmeasCoverageRatio) ? `${(cellmeasCoverageRatio * 100).toFixed(0)}%` : 'n/a';
+            const deltaCoverageText = Number.isFinite(dominanceCoverageRatio) ? `${(dominanceCoverageRatio * 100).toFixed(0)}%` : 'n/a';
             const strongSharePct = validBestCount > 0 && Number.isFinite(ratioStrongShare) ? (ratioStrongShare * 100).toFixed(0) : 'n/a';
             const strongBadPct = strongRscpCount > 0 && Number.isFinite(ratioBad) ? (ratioBad * 100).toFixed(0) : 'n/a';
             const detailsText = [
@@ -1052,10 +1323,13 @@ const UmtsCallAnalyzer = {
                 `Overlap / dominance risk: ${hasStrongDominanceEvidence ? `${dominanceLevel} (${dominanceScore}/100)` : `N/A (0/${totalMimoSamples} >=2-pilot)`}.`,
                 `Interference-under-strong-signal risk: ${interferenceLevel} (${interferenceScore}/100).`,
                 `Overall label: ${finalLabel}.`,
-                `ΔRSCP(best-2nd): computed only on timestamps with >=2 pilots (${samplesWith2Pilots}/${totalMimoSamples}).`,
-                `• ΔRSCP median: ${deltaMedianText}`,
-                `• ΔRSCP <3 dB ratio: ${deltaRatioPct}${deltaRatioPct === 'n/a' ? '' : '%'} (${deltaRatioDen})`,
+                `Dominance gap (best-2nd): ${deltaMedianText}.`,
+                `• <3 dB ratio: ${deltaRatioPct}${deltaRatioPct === 'n/a' ? '' : '%'} of samples (${deltaRatioDen})`,
+                `• Coverage ratio (dominance measurable): ${deltaCoverageText} (${samplesWith2Pilots}/${totalMimoSamples})`,
                 `• ΔRSCP std: ${deltaStdText}`,
+                `CELLMEAS corroboration (Subtype A only): ${cellmeasDominanceAvailable ? `Dominance gap median ${cellDeltaMedText}, <3 dB ratio ${cellDeltaRatioText}, coverage ratio ${cellDeltaCoverageText}, agreement=${cellmeasAgreement}` : `N/A (${cellmeasUnavailableReason})`}.`,
+                ...(dominanceSourceLine ? [dominanceSourceLine] : []),
+                `• CELLMEAS subtype-A rows: ${cellmeasSubtypeARows}/${cellmeasUmtsRows}, subtype-B-only rows: ${cellmeasSubtypeBOnlyRows}/${cellmeasUmtsRows}, dominance rows: ${cellmeasDeltas.length}/${cellmeasUmtsRows}`,
                 'Strong RSCP + bad EcNo (best server):',
                 '• Thresholds: RSCP > -85 dBm AND EcNo < -14 dB',
                 `• Strong RSCP share computed on ${strongRscpCount}/${validBestCount} best-server samples (RSCP > -85): ${strongSharePct}${strongSharePct === 'n/a' ? '' : '%'}`,
@@ -1067,12 +1341,15 @@ const UmtsCallAnalyzer = {
                 `• Best PSC switches: ${pscSwitchCount}${Number.isFinite(bestPsc) ? ` (best PSC: ${bestPsc})` : ''}`,
                 'Active-set proxy (<=3 dB):',
                 '• Definition: pilots within 3 dB of best RSCP per timestamp',
-                `• Mean/max: ${activeSetMean.toFixed(2)} / ${activeSetMax}`
+                `• Mean/max: ${observedPilotMean.toFixed(2)} / ${observedPilotMax}`
             ];
             if (!dominanceAvailable) {
                 detailsText.push('Dominance evidence unavailable: no timestamps with >=2 pilots were found in this window.');
             } else if (deltaLowConfidence) {
                 detailsText.push(`Dominance evidence is low-confidence: only ${samplesWith2Pilots}/${totalMimoSamples} timestamps have >=2 pilots.`);
+            }
+            if (strongDominanceGuard) {
+                detailsText.push('Dominance guard applied: strong best-server dominance (high ΔRSCP, low <3 dB ratio) suppresses pilot-overlap classification.');
             }
             if (deltaLowConfidence) {
                 detailsText.push(
@@ -1087,33 +1364,45 @@ const UmtsCallAnalyzer = {
                 dominanceScore,
                 dominanceLevel,
                 dominanceAvailable,
+                strongDominanceGuard,
+                weakDominanceSignature,
+                dominantRatAtEnd,
                 interferenceScore,
                 interferenceLevel,
                 strongRscpShare,
                 finalLabel,
+                cellmeasDominance: {
+                    available: cellmeasDominanceAvailable,
+                    medianDb: cellmeasDeltaMedian,
+                    lt3dbRatio: cellmeasLt3dbRatio,
+                    coverageRatio: cellmeasCoverageRatio,
+                    coverageRatioSubtypeA: cellmeasSubtypeACoverageRatio,
+                    confidenceLow: cellmeasLowCoverage,
+                    agreementWithMimo: cellmeasAgreement,
+                    samplesWith2Pilots: cellmeasDeltas.length,
+                    totalSubtypeARows: cellmeasSubtypeARows,
+                    totalUmtsRows: cellmeasUmtsRows,
+                    subtypeBOnlyRows: cellmeasSubtypeBOnlyRows,
+                    unavailableReason: cellmeasDominanceAvailable ? null : cellmeasUnavailableReason
+                },
                 deltaStats: {
                     medianDb: deltaMedian,
                     stdDb: deltaStd,
                     lt3dbRatio: deltaRatio,
                     samplesWith2Pilots,
                     totalMimoSamples,
+                    coverageRatio: dominanceCoverageRatio,
+                    validDenominator,
+                    validCoverageRatio: deltaCoverageRatio,
                     computedCount: samplesWith2Pilots,
                     confidenceLow: deltaLowConfidence,
                     deltaUnavailableReason: dominanceAvailable ? null : 'no >=2 pilot timestamps',
-                    deltas: dominanceDeltas.slice()
+                    deltas: dominantRatAtEnd === 'LTE' ? lteDominanceDeltas.slice() : dominanceDeltas.slice()
                 },
                 strongRscpBadEcno: {
                     ratio: ratioBad,
-                    ratioStrongShare,
-                    ratioBad,
-                    strongCount: strongRscpCount,
-                    strongBadCount,
-                    denomBestValid: validBestCount,
-                    denomTotalMimo: totalMimoSamples,
-                    rscpThresholdDbm: -85,
-                    ecnoThresholdDb: -14,
-                    rscpMinDbm: rscpValidValues.length ? Math.min(...rscpValidValues) : null,
-                    rscpMaxDbm: rscpValidValues.length ? Math.max(...rscpValidValues) : null,
+                    count: strongBadCount,
+                    totalAboveRscpThresh: strongRscpCount,
                     ecnoMinDb: ecnoValidValues.length ? Math.min(...ecnoValidValues) : null,
                     ecnoMaxDb: ecnoValidValues.length ? Math.max(...ecnoValidValues) : null
                 },
@@ -1121,8 +1410,8 @@ const UmtsCallAnalyzer = {
                 bestPsc,
                 activeSet: {
                     definition: 'count of pilots within 3 dB of best RSCP per timestamp',
-                    mean: activeSetMean,
-                    max: activeSetMax
+                    mean: observedPilotMean,
+                    max: observedPilotMax
                 },
                 detailsText,
                 details: {
@@ -1132,8 +1421,8 @@ const UmtsCallAnalyzer = {
                     deltaConfidenceLow: deltaLowConfidence,
                     badEcnoStrongRscpRatio: ratioBad,
                     pscSwitchCount,
-                    activeSetMean,
-                    activeSetMax
+                    activeSetMean: observedPilotMean,
+                    activeSetMax: observedPilotMax
                 }
             };
             snap.pilotPollutionDetected = pollutionScore >= 35;
@@ -1142,9 +1431,11 @@ const UmtsCallAnalyzer = {
                 `Dominance denominator (>=2 pilots): ${samplesWith2Pilots}/${totalMimoSamples}`,
                 `Strong RSCP share=${Number.isFinite(ratioStrongShare) ? `${(ratioStrongShare * 100).toFixed(0)}%` : 'n/a'} (${strongRscpCount}/${validBestCount})`,
                 (deltaLowConfidence ? 'ΔRSCP confidence is low (<30% of samples have >=2 pilots), excluded from primary root-cause scoring.' : 'ΔRSCP confidence is acceptable for scoring.'),
+                (strongDominanceGuard ? 'Strong-dominance guard active: overlap score capped/suppressed for this window.' : 'Strong-dominance guard inactive.'),
                 `ΔRSCP median=${deltaMedian !== null ? deltaMedian.toFixed(2) : 'n/a'} dB, ΔRSCP<3dB ratio=${Number.isFinite(deltaRatio) ? `${(deltaRatio * 100).toFixed(0)}%` : 'n/a'}, ΔRSCP std=${Number.isFinite(deltaStd) ? deltaStd.toFixed(2) : 'n/a'} dB`,
+                `CELLMEAS corroboration=${cellmeasDominanceAvailable ? `available (median=${cellDeltaMedText}, <3dB=${cellDeltaRatioText}, coverage=${cellDeltaCoverageText}, agreement=${cellmeasAgreement})` : `unavailable (${cellmeasUnavailableReason})`}`,
                 `Strong-RSCP with bad EcNo ratio=${Number.isFinite(ratioBad) ? `${(ratioBad * 100).toFixed(0)}%` : 'n/a'} (${strongBadCount}/${strongRscpCount})`,
-                `Best PSC switches=${pscSwitchCount}, activeSet mean=${activeSetMean.toFixed(2)}, max=${activeSetMax}`
+                `Best PSC switches=${pscSwitchCount}, activeSet mean=${observedPilotMean.toFixed(2)}, max=${observedPilotMax}`
             ];
 
             const txFrom = lowerBound(dev.txpcRows, fromTs);
@@ -1499,10 +1790,10 @@ const UmtsCallAnalyzer = {
                             ? 'Setup timer expired before call connection (CAD cause 102: timer expiry); explicit release/reject marker observed near setup end.'
                             : 'Setup timer expired before call connection (CAD cause 102: timer expiry); no explicit release/reject marker was decoded near setup end.')
                         : ((hasDirectTransfer && !releaseNearEnd && terminalMarker === 'CAF')
-                        ? `Signaling progressed into NAS/CC exchange (e.g., SETUP + IDENTITY), but no explicit L3 RELEASE/REJECT cause was decoded near the end; the termination marker is CAF(reason=${session?.cafReason ?? 'N/A'} - ${cafReasonLabel}). Attribution therefore relies primarily on radio DL evidence for this case.`
-                        : (releaseNearEnd
-                            ? 'An explicit L3 release/reject was observed near the end, which strengthens core/signaling attribution (especially under healthy radio conditions).'
-                            : 'No explicit L3 release/reject cause was decoded near setup end.'))
+                            ? `Signaling progressed into NAS/CC exchange (e.g., SETUP + IDENTITY), but no explicit L3 RELEASE/REJECT cause was decoded near the end; the termination marker is CAF(reason=${session?.cafReason ?? 'N/A'} - ${cafReasonLabel}). Attribution therefore relies primarily on radio DL evidence for this case.`
+                            : (releaseNearEnd
+                                ? 'An explicit L3 release/reject was observed near the end, which strengthens core/signaling attribution (especially under healthy radio conditions).'
+                                : 'No explicit L3 release/reject cause was decoded near setup end.'))
                 },
                 interpretation: {
                     summary: interpretation
@@ -1590,7 +1881,10 @@ const UmtsCallAnalyzer = {
                 const fmt = (v, d = 1) => Number.isFinite(v) ? Number(v).toFixed(d) : 'n/a';
                 const k = Number.isFinite(pp?.deltaStats?.samplesWith2Pilots) ? pp.deltaStats.samplesWith2Pilots : 0;
                 const y = Number.isFinite(pp?.deltaStats?.totalMimoSamples) ? pp.deltaStats.totalMimoSamples : totalMimo;
-                const deltaLine = `ΔRSCP computed on ${k}/${y} timestamps meeting the ≥2-pilot criterion.`;
+                const deltaMedian = Number.isFinite(pp?.deltaStats?.medianDb) ? `${Number(pp.deltaStats.medianDb).toFixed(2)} dB` : 'n/a';
+                const lt3 = Number.isFinite(pp?.deltaStats?.lt3dbRatio) ? `${Math.round(Number(pp.deltaStats.lt3dbRatio) * 100)}%` : 'n/a';
+                const cov = Number.isFinite(pp?.deltaStats?.coverageRatio) ? `${Math.round(Number(pp.deltaStats.coverageRatio) * 100)}%` : 'n/a';
+                const deltaLine = `Dominance gap (best-2nd): ${deltaMedian}; <3 dB ratio: ${lt3}; coverage ratio: ${cov} (${k}/${y}).`;
                 const deltaUnavailable = k === 0 ? `ΔRSCP not computable (0/${y} ≥2-pilot timestamps). Dominance inference disabled.` : null;
                 return [
                     'DL interference-under-strong-signal verification:',
@@ -1701,7 +1995,8 @@ const UmtsCallAnalyzer = {
                     if (!ds || !Number.isFinite(ds.totalMimoSamples) || ds.totalMimoSamples <= 0) return false;
                     const ratio = (Number(ds.samplesWith2Pilots) || 0) / ds.totalMimoSamples;
                     const level = String(pilotPollution?.riskLevel || pilotPollution?.pollutionLevel || '').trim();
-                    return (level === 'High' || level === 'Moderate') && ratio >= 0.30;
+                    const guarded = Boolean(pilotPollution?.strongDominanceGuard);
+                    return !guarded && (level === 'High' || level === 'Moderate') && ratio >= 0.30;
                 };
                 const allowResolvePilot = shouldRecommendPollution(pp);
                 if (allowResolvePilot) {
@@ -1963,6 +2258,12 @@ const UmtsCallAnalyzer = {
         };
 
         const lines = String(content || '').split(/\r?\n/);
+        // State for initial identification phases
+        const state = {
+            imsi: null,
+            cid: null,
+            rat: 'UNKNOWN'
+        };
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
@@ -1973,13 +2274,27 @@ const UmtsCallAnalyzer = {
                 setBaseDate(parseStartDate(parts));
                 continue;
             }
+            // Initial identification phase
+            if (header === 'IMSI') {
+                state.imsi = String(parts[3] || '').trim();
+                continue;
+            }
+            if (header === 'CID') {
+                state.cid = String(parts[3] || '').trim();
+                continue;
+            }
+            if (header === 'RAT') {
+                state.rat = String(parts[3] || '').trim().toUpperCase();
+                continue;
+            }
+
             if (!parts[1]) continue;
             const ts = buildAbsMs(parts[1]);
             if (!Number.isFinite(ts)) continue;
 
-            if (header === 'MIMOMEAS' || header === 'TXPC' || header === 'RLCBLER') {
-                const deviceId = String(parts[3] || '').trim();
-                addRadio(header, parts, ts, deviceId);
+            if (header === 'MIMOMEAS' || header === 'TXPC' || header === 'RLCBLER' || header === 'CELLMEAS') {
+                const deviceId = String(parts[3] || '').trim(); // Use deviceId from parts[3] as it's more reliable for radio events
+                addRadio(header, parts, ts, deviceId, state.rat);
                 addDeviceEvent(deviceId, ts, header, parts);
                 continue;
             }
@@ -2170,15 +2485,243 @@ const UmtsCallAnalyzer = {
 };
 
 const NMFParser = {
+    _toByteArray(input) {
+        if (!input) throw new Error('NMFS parser: empty input.');
+        if (input instanceof Uint8Array) return input;
+        if (input instanceof ArrayBuffer) return new Uint8Array(input);
+        if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(input)) {
+            return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        }
+        throw new Error('NMFS parser: unsupported binary input type.');
+    },
+    _decodeLatin1(bytes) {
+        const arr = this._toByteArray(bytes);
+        let out = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < arr.length; i += chunkSize) {
+            const chunk = arr.subarray(i, i + chunkSize);
+            out += String.fromCharCode.apply(null, chunk);
+        }
+        return out;
+    },
+    _normalizeNmfsLine(raw) {
+        return String(raw || '')
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+            .trim();
+    },
+    _parseNmfsMetaLine(line) {
+        const clean = this._normalizeNmfsLine(line);
+        if (!clean.startsWith('#')) return null;
+        const body = clean.slice(1);
+        const parts = body.split(',');
+        const tag = String(parts[0] || '').trim();
+        if (!/^[A-Z][A-Z0-9_]{1,24}$/.test(tag)) return null;
+        const values = parts
+            .slice(1)
+            .map(v => String(v || '').trim().replace(/^"(.*)"$/, '$1'))
+            .filter(v => v !== '');
+        return {
+            tag,
+            values,
+            raw: clean
+        };
+    },
+    _isLikelyNmfRecordLine(line) {
+        const clean = this._normalizeNmfsLine(line);
+        if (!clean || clean.startsWith('#')) return false;
+        if (!clean.includes(',')) return false;
+        const first = String(clean.split(',', 1)[0] || '').trim();
+        if (!/^[A-Z][A-Z0-9@]{1,15}$/.test(first)) return false;
+        const commaCount = (clean.match(/,/g) || []).length;
+        if (commaCount < 2) return false;
+        return true;
+    },
+    _extractNmfsDateTime(meta) {
+        if (!meta) return null;
+        const vals = Array.isArray(meta.values) ? meta.values : [];
+        const time = vals.find(v => /^\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?$/.test(String(v)));
+        const date = vals.find(v => /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(String(v)));
+        if (date && time) return `${date} ${time}`;
+        return time || date || null;
+    },
+    parseNmfs(input) {
+        const bytes = this._toByteArray(input);
+        const signature = bytes.length >= 4
+            ? String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
+            : '';
+        const rawText = this._decodeLatin1(bytes);
+        const lines = rawText.split(/\r?\n/);
+
+        // Fallback for non-secure / mislabeled files: treat as text NMF.
+        if (signature !== 'NMFS') {
+            const parsedText = this.parse(rawText);
+            return {
+                ...parsedText,
+                nmfs: {
+                    signature,
+                    decodeMode: 'text_fallback',
+                    metadataCount: 0,
+                    recordLineCount: 0,
+                    hasStartTag: false,
+                    hasStopTag: false
+                }
+            };
+        }
+
+        const metaEntries = [];
+        const recordLines = [];
+        let hasStartTag = false;
+        let hasStopTag = false;
+        let inPayload = false;
+
+        for (const raw of lines) {
+            const line = this._normalizeNmfsLine(raw);
+            if (!line) continue;
+            const markerIdx = line.indexOf('#');
+            const markerLine = markerIdx >= 0 ? line.slice(markerIdx) : '';
+            if (markerLine) {
+                const markerUpper = markerLine.toUpperCase();
+                if (markerUpper.startsWith('#START')) {
+                    hasStartTag = true;
+                    inPayload = true;
+                }
+                if (markerUpper.startsWith('#STOP')) {
+                    hasStopTag = true;
+                    inPayload = false;
+                }
+                const meta = this._parseNmfsMetaLine(markerLine);
+                if (meta) metaEntries.push(meta);
+            }
+            if (inPayload && this._isLikelyNmfRecordLine(line)) {
+                recordLines.push(line);
+            }
+        }
+
+        const decodeMode = recordLines.length > 0
+            ? 'metadata_plus_plaintext'
+            : 'metadata_only_secure_payload';
+        const nmfsSummary = {
+            signature,
+            decodeMode,
+            metadataCount: metaEntries.length,
+            recordLineCount: recordLines.length,
+            hasStartTag,
+            hasStopTag,
+            metadata: metaEntries.slice(0, 200)
+        };
+
+        const parsedBase = recordLines.length > 0
+            ? this.parse(recordLines.join('\n'))
+            : {
+                points: [],
+                signaling: [],
+                events: [],
+                callSessions: [],
+                umtsCallAnalysis: null,
+                tech: 'Nemo NMFS',
+                config: null,
+                configHistory: [],
+                customMetrics: []
+            };
+
+        const metaByTag = new Map();
+        for (const meta of metaEntries) {
+            if (!meta || !meta.tag) continue;
+            if (!metaByTag.has(meta.tag)) metaByTag.set(meta.tag, []);
+            metaByTag.get(meta.tag).push(meta);
+        }
+        const startMeta = (metaByTag.get('START') || [])[0] || null;
+        const stopMeta = (metaByTag.get('STOP') || [])[0] || null;
+        const summaryTime = this._extractNmfsDateTime(startMeta) || this._extractNmfsDateTime(stopMeta) || 'N/A';
+        const summarySignal = {
+            time: summaryTime,
+            type: 'SIGNALING',
+            event: 'NMFS Secure Container',
+            message: `NMFS decoded as ${decodeMode}: ${recordLines.length} plaintext record lines recovered, ${metaEntries.length} metadata lines.`,
+            properties: {
+                Time: summaryTime,
+                Type: 'SIGNALING',
+                Event: 'NMFS Secure Container',
+                'NMFS Decode Mode': decodeMode,
+                'NMFS Metadata Lines': metaEntries.length,
+                'NMFS Plaintext Record Lines': recordLines.length,
+                'NMFS Start Tag': hasStartTag ? 'Yes' : 'No',
+                'NMFS Stop Tag': hasStopTag ? 'Yes' : 'No'
+            }
+        };
+
+        return {
+            ...parsedBase,
+            tech: parsedBase.tech || 'Nemo NMFS',
+            signaling: (parsedBase.signaling || []).concat([summarySignal]),
+            customMetrics: Array.from(new Set([...(parsedBase.customMetrics || []), 'NMFS Decode Mode', 'NMFS Metadata Lines', 'NMFS Plaintext Record Lines'])),
+            nmfs: nmfsSummary
+        };
+    },
     parse(content) {
         const lines = content.split(/\r?\n/);
         const uniqueHeaders = new Set();
+
+        // Fast optimized timestamp parser as recommended 
+        const parseTodMs = (t) => {
+            if (!t) return NaN;
+            const parts = t.split(/[:.]/);
+            if (parts.length < 3) return NaN;
+            const h = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            const s = parseInt(parts[2], 10);
+            const ms = parts.length > 3 ? parseInt(parts[3], 10) : 0;
+            return ((h * 60 + m) * 60 + s) * 1000 + ms;
+        };
+
+        const tsState = { baseUtcMs: null, prevTodMs: null, dayOffset: 0 };
+        const resetAbsMs = () => { tsState.prevTodMs = null; tsState.dayOffset = 0; };
+
+        const parseStartDate = (parts) => {
+            for (const raw of parts) {
+                const txt = String(raw || '').trim().replace(/^"|"$/g, '');
+                const m = txt.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+                if (!m) continue;
+                return {
+                    day: parseInt(m[1], 10),
+                    month: parseInt(m[2], 10),
+                    year: parseInt(m[3], 10)
+                };
+            }
+            return null;
+        };
+
+        const setBaseDate = (dmy) => {
+            if (!dmy) return;
+            if (dmy.month < 1 || dmy.month > 12) return;
+            if (dmy.day < 1 || dmy.day > 31) return;
+            const newBase = Date.UTC(dmy.year, dmy.month - 1, dmy.day, 0, 0, 0, 0);
+            if (tsState.baseUtcMs && newBase <= tsState.baseUtcMs) return;
+            tsState.baseUtcMs = newBase;
+            tsState.prevTodMs = null;
+            tsState.dayOffset = 0;
+        };
+        const buildAbsMs = (timeText) => {
+            const todMs = parseTodMs(timeText);
+            if (!Number.isFinite(todMs)) return NaN;
+
+            const nearEnd = tsState.prevTodMs > 18 * 3600 * 1000;
+            const nearStart = todMs < 6 * 3600 * 1000;
+            if (Number.isFinite(tsState.prevTodMs) && nearEnd && nearStart && todMs < tsState.prevTodMs) {
+                tsState.dayOffset += 1;
+            }
+            tsState.prevTodMs = todMs;
+            const base = tsState.baseUtcMs || 0;
+            return base + tsState.dayOffset * 24 * 3600 * 1000 + todMs;
+        };
 
         // Pass 1: State Tracking Structures
         const identityTrack = []; // [{time, cid, rnc, lac, psc}]
         const gpsTrack = [];      // [{time, lat, lng, alt, speed}]
 
         // --- PASS 1: Collection ---
+        resetAbsMs();
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line || line.startsWith('#')) continue;
@@ -2187,9 +2730,17 @@ const NMFParser = {
             const time = parts[1];
             if (!time) continue;
 
+            if (header === '#START') {
+                setBaseDate(parseStartDate(parts));
+                continue;
+            }
+
             if (header === 'CHI') {
                 const tech = parseInt(parts[3]);
-                let state = { time, cid: null, rnc: null, lac: null, psc: null };
+                let statRat = 'UNKNOWN';
+                if (tech === 5) statRat = 'UMTS';
+                if (tech === 7) statRat = 'LTE';
+                let state = { time, cid: null, rnc: null, lac: null, psc: null, rat: statRat };
 
                 if (tech === 5) {
                     // Refined 3G Search
@@ -2277,7 +2828,7 @@ const NMFParser = {
                         state.lac = parseInt(parts[10]);
                     }
                 }
-                if (state.cid) identityTrack.push(state);
+                if (state.cid || statRat !== 'UNKNOWN') identityTrack.push({ ...state, tMs: buildAbsMs(state.time) });
 
             } else if (header === 'GPS') {
                 if (parts.length > 4) {
@@ -2286,6 +2837,7 @@ const NMFParser = {
                     if (!isNaN(lat) && !isNaN(lng)) {
                         gpsTrack.push({
                             time,
+                            tMs: buildAbsMs(time),
                             lat, lng,
                             alt: parseFloat(parts[5]),
                             speed: parseFloat(parts[8])
@@ -2302,6 +2854,7 @@ const NMFParser = {
                         // Create a partial identity state if we don't have a full UCID yet
                         identityTrack.push({
                             time,
+                            tMs: buildAbsMs(time),
                             freq: freq,
                             psc: psc,
                             source: header
@@ -2354,9 +2907,11 @@ const NMFParser = {
 
                                 identityTrack.push({
                                     time,
+                                    tMs: buildAbsMs(time),
                                     cid: synthesizedCid,
                                     rnc: matchedRnc,
                                     psc: parseInt(parts[8]),
+                                    rat: 'UMTS',
                                     source: 'signaling_rrc',
                                     isSignaling: true
                                 });
@@ -2366,18 +2921,23 @@ const NMFParser = {
                 }
             } else if (header === 'CHI') {
                 const tech = parseInt(parts[3]);
+                const statRat = tech === 5 ? 'UMTS' : (tech === 7 ? 'LTE' : 'UNKNOWN');
                 if (tech === 5) {
                     const ucid = parseInt(parts[7]);
                     const rnc = parseInt(parts[8]);
                     const lac = parseInt(parts[9]);
                     if (!isNaN(rnc) && !isNaN(ucid)) {
-                        identityTrack.push({ time, cid: ucid, rnc: rnc, lac: lac, source: 'CHI', isSignaling: true });
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: ucid, rnc: rnc, lac: lac, rat: statRat, source: 'CHI', isSignaling: true });
+                    } else {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: null, rnc: null, lac: null, rat: statRat, source: 'CHI' });
                     }
                 } else if (tech === 7) {
                     const eci = parseInt(parts[9]);
                     const tac = parseInt(parts[10]);
                     if (!isNaN(eci)) {
-                        identityTrack.push({ time, cid: eci, lac: tac, source: 'CHI', isSignaling: true });
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: eci, lac: tac, rat: statRat, source: 'CHI', isSignaling: true });
+                    } else {
+                        identityTrack.push({ time, tMs: buildAbsMs(time), cid: null, lac: null, rat: statRat, source: 'CHI' });
                     }
                 }
             } else if (header === 'CREL') {
@@ -2385,13 +2945,14 @@ const NMFParser = {
                 const rnc = parseInt(parts[12]);
                 const ucid = parseInt(parts[13]);
                 if (tech === 5 && !isNaN(rnc) && !isNaN(ucid)) {
-                    identityTrack.push({ time, cid: ucid, rnc: rnc, source: 'CREL', isSignaling: true });
+                    identityTrack.push({ time, tMs: buildAbsMs(time), cid: ucid, rnc: rnc, rat: 'UMTS', source: 'CREL', isSignaling: true });
                 }
             } else if (header === 'RRD') {
                 const cause = parts[6];
                 if (cause === '1' || cause === '5') {
                     identityTrack.push({
                         time,
+                        tMs: buildAbsMs(time),
                         source: 'RRD_EVENT',
                         isEvent: true,
                         eventType: cause === '1' ? 'Call Drop' : 'Call Fail',
@@ -2402,29 +2963,32 @@ const NMFParser = {
         }
 
         // Sort tracks to ensure lookup works
-        const timeSort = (a, b) => a.time.localeCompare(b.time);
-        identityTrack.sort(timeSort);
-        gpsTrack.sort(timeSort);
-
-        // --- Helper: Find State at Time ---
-        const findLastAt = (track, time) => {
-            if (!track.length) return null;
-            let last = null;
-            for (let item of track) {
-                if (item.time.localeCompare(time) <= 0) last = item;
-                else break;
-            }
-            return last;
+        const timeMsSort = (a, b) => {
+            if (Number.isNaN(a.tMs) && Number.isNaN(b.tMs)) return a.time.localeCompare(b.time);
+            if (Number.isNaN(a.tMs)) return 1;
+            if (Number.isNaN(b.tMs)) return -1;
+            return a.tMs - b.tMs;
         };
+        identityTrack.sort(timeMsSort);
 
         // --- PASS 2: Processing ---
+        resetAbsMs();
+        // Reset state from Pass 1 to prevent carry-over if concatenated
         let allPoints = [];
-        let currentNeighbors = []; // Global state for signaling snapshot
-        let currentRrcState = 'IDLE'; // Default Initial State
+        let currentNeighbors = [];
+        let currentRrcState = 'IDLE';
         let latestUeTxPower = null;
         let latestNodeBTxPower = null;
         let latestTpc = null;
         let lastAsSize = null;
+        // Re-init RAT/serving state
+        let state = { imsi: null, cid: null, rat: 'UNKNOWN' };
+
+        let idIdx = 0;
+        let lastIdState = null;
+
+        let gpsIdx = 0;
+        let lastGpsState = null;
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i].trim();
@@ -2434,8 +2998,32 @@ const NMFParser = {
             const time = parts[1];
             if (!time) continue;
 
-            const state = findLastAt(identityTrack, time) || { cid: 'N/A', rnc: null, lac: 'N/A', psc: null };
-            const gps = findLastAt(gpsTrack, time);
+            if (header === '#START') {
+                setBaseDate(parseStartDate(parts));
+                // Clear active transient status on log segment boundary
+                currentNeighbors = [];
+                currentRrcState = 'IDLE';
+                state.cid = null;
+                state.rat = 'UNKNOWN';
+                continue;
+            }
+
+            const currentMs = buildAbsMs(time);
+
+            // Forward-only O(1) state resolution tracker for linear O(N) scaling
+            if (!Number.isNaN(currentMs)) {
+                while (idIdx < identityTrack.length && identityTrack[idIdx].tMs <= currentMs) {
+                    lastIdState = identityTrack[idIdx];
+                    idIdx++;
+                }
+                while (gpsIdx < gpsTrack.length && gpsTrack[gpsIdx].tMs <= currentMs) {
+                    lastGpsState = gpsTrack[gpsIdx];
+                    gpsIdx++;
+                }
+            }
+
+            const state = lastIdState || { cid: 'N/A', rnc: null, lac: 'N/A', psc: null, rat: 'UNKNOWN' };
+            const gps = lastGpsState;
 
             // RRC State State Machine (Simple Heuristic)
             const upperHeader = header.toUpperCase();
@@ -2719,6 +3307,7 @@ const NMFParser = {
                 let activeSetCount = 1;
                 let monitoredSetCount = 0;
                 let neighbors = [];
+                let umtsCellmeasSubtypeStats = null;
 
                 if (techId === 5) {
                     // UMTS (Tech 5)
@@ -2733,71 +3322,124 @@ const NMFParser = {
                     const looksLikePlmn = (v) => /^[0-9]{5}$/.test(String(v || '').trim());
                     const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 1;
                     const validSc = (v) => Number.isFinite(v) && v >= 0 && v <= 512;
+                    const looksLikeRefPower = (v) => Number.isFinite(v) && v <= -50 && v >= -120;
+                    const looksLikeQuality = (v) => Number.isFinite(v) && v <= 0 && v >= -30;
+                    const looksLikeRssi = (v) => Number.isFinite(v) && v <= -50 && v >= -130;
+                    const parseUmtsNeighborTuple = (arr, k, requirePlmn = true) => {
+                        const setType = toIntCell(arr[k]);
+                        if (setType === null || setType < 0 || setType > 3) return null;
+                        const plmn = String(arr[k + 1] || '').trim();
+                        const uarfcn = toNumCell(arr[k + 2]);
+                        const psc = toIntCell(arr[k + 3]);
+                        const x1 = toNumCell(arr[k + 4]);
+                        const x2 = toNumCell(arr[k + 5]);
+                        const x3 = toNumCell(arr[k + 6]);
+                        if ((requirePlmn && !looksLikePlmn(plmn)) || uarfcn === null || uarfcn <= 2000 || !validSc(psc)) return null;
+
+                        // Subtype A: freq,sc,refPower,widebandPower,quality
+                        if (looksLikeRefPower(x1) && looksLikeQuality(x3)) {
+                            return {
+                                setType,
+                                freq: uarfcn,
+                                sc: psc,
+                                ecno: x3,
+                                rscp: x1,
+                                rssi: looksLikeRssi(x2) ? x2 : null,
+                                subtype: 'A',
+                                _k: k
+                            };
+                        }
+                        // Subtype B: freq,sc,ecno,(blank),rscp,...
+                        if (looksLikeQuality(x1) && looksLikeRefPower(x3)) {
+                            return {
+                                setType,
+                                freq: uarfcn,
+                                sc: psc,
+                                ecno: x1,
+                                rscp: x3,
+                                rssi: looksLikeRssi(x2) ? x2 : null,
+                                subtype: 'B',
+                                _k: k
+                            };
+                        }
+                        return null;
+                    };
                     const scanUmtsServing = (arr, sfreq) => {
                         for (let i = 0; i < arr.length - 3; i++) {
                             if (!looksLikePlmn(arr[i])) continue;
                             const freq = toNumCell(arr[i + 1]);
                             const sc = toIntCell(arr[i + 2]);
-                            if (!near(freq, sfreq) || !validSc(sc)) continue;
-                            return { sc, ecno: toNumCell(arr[i + 3]) };
+                            const ecno = toNumCell(arr[i + 3]);
+                            // Sanity: SC 0..511, ECNO 0..-32
+                            if (!near(freq, sfreq) || !validSc(sc) || ecno === null || ecno < -35) continue;
+                            return { sc, ecno };
                         }
                         return null;
                     };
                     const scanUmtsCellBlocks = (arr) => {
-                        const blocks = [];
-                        const seen = new Set();
+                        const blocksMap = new Map();
                         for (let k = 0; k < arr.length - 6; k++) {
-                            const setType = toIntCell(arr[k]);
-                            if (setType === null || setType < 0 || setType > 3) continue;
-                            const plmn = String(arr[k + 1] || '').trim();
-                            const uarfcn = toNumCell(arr[k + 2]);
-                            const psc = toIntCell(arr[k + 3]);
-                            const ecno = toNumCell(arr[k + 4]);
-                            const rscp = toNumCell(arr[k + 6]);
-                            const ok =
-                                looksLikePlmn(plmn) &&
-                                uarfcn !== null && uarfcn > 2000 &&
-                                psc !== null && psc >= 0 && psc <= 512 &&
-                                rscp !== null && rscp < -20 && rscp > -140;
-                            if (!ok) continue;
-                            const key = `${Math.round(uarfcn)}:${psc}:${setType}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
-                            blocks.push({ setType, freq: uarfcn, psc, ecno, rscp, _k: k });
+                            const block = parseUmtsNeighborTuple(arr, k, true);
+                            if (!block) continue;
+                            const key = `${Math.round(block.freq)}:${block.sc}`;
+                            const existing = blocksMap.get(key);
+                            const prio = block.setType <= 1 ? 0 : block.setType;
+                            const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                            const blockHasRscp = Number.isFinite(block.rscp);
+                            const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                            if (!existing || prio < existingPrio || (prio === existingPrio && blockHasRscp && !existingHasRscp)) {
+                                blocksMap.set(key, block);
+                            }
                         }
-                        return blocks;
+                        return Array.from(blocksMap.values());
                     };
                     const scanUmtsCellBlocksFallback = (arr) => {
-                        const blocks = [];
-                        const seen = new Set();
+                        const blocksMap = new Map();
                         for (let k = 15; k < arr.length - 6; k += 8) {
-                            const setType = toIntCell(arr[k]);
-                            if (setType === null || setType < 0 || setType > 3) continue;
-                            const uarfcn = toNumCell(arr[k + 2]);
-                            const psc = toIntCell(arr[k + 3]);
-                            const ecno = toNumCell(arr[k + 4]);
-                            const rscp = toNumCell(arr[k + 6]);
-                            const ok =
-                                uarfcn !== null && uarfcn > 2000 &&
-                                psc !== null && psc >= 0 && psc <= 512 &&
-                                rscp !== null && rscp < -20 && rscp > -140;
-                            if (!ok) continue;
-                            const key = `${Math.round(uarfcn)}:${psc}:${setType}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
-                            blocks.push({ setType, freq: uarfcn, psc, ecno, rscp, _k: k });
+                            const block = parseUmtsNeighborTuple(arr, k, false);
+                            if (!block) continue;
+                            const key = `${Math.round(block.freq)}:${block.sc}`;
+                            const existing = blocksMap.get(key);
+                            const prio = block.setType <= 1 ? 0 : block.setType;
+                            const existingPrio = existing ? (existing.setType <= 1 ? 0 : existing.setType) : 999;
+                            const blockHasRscp = Number.isFinite(block.rscp);
+                            const existingHasRscp = existing ? Number.isFinite(existing.rscp) : false;
+                            if (!existing || prio < existingPrio || (prio === existingPrio && blockHasRscp && !existingHasRscp)) {
+                                blocksMap.set(key, block);
+                            }
                         }
-                        return blocks;
+                        return Array.from(blocksMap.values());
                     };
                     const labelUmtsNeighbors = (inNeighbors, sfreq, actCount, monCount) => {
                         const cleanNeighbors = (inNeighbors || []).filter(n => !n.isServing);
                         const rscpDesc = (a, b) => (Number(b?.rscp) || -999) - (Number(a?.rscp) || -999);
+                        const byInputOrder = (a, b) => {
+                            const ka = Number.isFinite(Number(a?._k)) ? Number(a._k) : Number.POSITIVE_INFINITY;
+                            const kb = Number.isFinite(Number(b?._k)) ? Number(b._k) : Number.POSITIVE_INFINITY;
+                            if (ka !== kb) return ka - kb;
+                            return rscpDesc(a, b);
+                        };
                         const isInterFreq = (n) =>
                             Number.isFinite(Number(n?.freq)) &&
                             Number.isFinite(Number(sfreq)) &&
                             Math.abs(Number(n.freq) - Number(sfreq)) >= 1;
+                        const treatSetType1AsMonitored = Number(actCount || 0) <= 1;
 
-                        const activeSlots = Math.max(0, (actCount || 1) - 1);
+                        const activeCandidatesInferred = (inNeighbors || []).filter((n) => {
+                            if (!n || n.isServing) return false;
+                            const st = Number(n.setType);
+                            if (!Number.isFinite(st)) return false;
+                            if (st === 0) return true;
+                            if (!treatSetType1AsMonitored && st === 1) return true;
+                            return false;
+                        });
+                        const inferredActiveSlots = activeCandidatesInferred.length;
+
+                        // actCount=1 means only serving is in AS, so activeSlots for neighbors = 0
+                        // Fallback: if actCount is missing/ambiguous, rely on setType-derived active candidates.
+                        let activeSlots = Math.max(0, (actCount || 1) - 1);
+                        if (inferredActiveSlots > activeSlots) activeSlots = inferredActiveSlots;
+
                         const hasMonitoredContext = Math.max(0, monCount || 0) > 0;
 
                         const activeCandidates = [];
@@ -2807,16 +3449,17 @@ const NMFParser = {
 
                         for (const n of cleanNeighbors) {
                             const st = Number.isFinite(Number(n?.setType)) ? Number(n.setType) : null;
-                            if (st === 0 || st === 1) activeCandidates.push(n);
-                            else if (st === 2) monitored.push(n);
+                            if (st === 0 || (!treatSetType1AsMonitored && st === 1)) activeCandidates.push(n);
+                            else if (treatSetType1AsMonitored && st === 1) monitored.push(n);
+                            else if (st === 2) detected.push(n);
                             else if (st !== null && st > 2) detected.push(n);
                             else unknown.push(n);
                         }
 
                         activeCandidates.sort(rscpDesc);
-                        monitored.sort(rscpDesc);
-                        detected.sort(rscpDesc);
-                        unknown.sort(rscpDesc);
+                        monitored.sort(byInputOrder);
+                        detected.sort(byInputOrder);
+                        unknown.sort(byInputOrder);
 
                         // Keep only the configured active set size in A*, overflow goes to monitored/detected.
                         const active = activeCandidates.slice(0, activeSlots);
@@ -2833,8 +3476,8 @@ const NMFParser = {
                         }
 
                         active.sort(rscpDesc);
-                        monitored.sort(rscpDesc);
-                        detected.sort(rscpDesc);
+                        monitored.sort(byInputOrder);
+                        detected.sort(byInputOrder);
 
                         const activeLabeled = active.slice(0, 16);
                         const monitoredLabeled = monitored.slice(0, 16);
@@ -2860,7 +3503,8 @@ const NMFParser = {
                     };
 
                     servingFreq = toNumCell(parts[7]);
-                    servingLevel = toNumCell(parts[8]); // RSCP
+                    const servingFieldRaw = toNumCell(parts[8]); // may be RSCP or wideband-derived field depending on subtype
+                    servingLevel = servingFieldRaw;
                     servingSc = null;
                     servingEcNo = null;
                     activeSetCount = parseInt(parts[5]) || 1;
@@ -2882,14 +3526,43 @@ const NMFParser = {
                     if (!blocks.length) {
                         blocks = scanUmtsCellBlocksFallback(parts);
                     }
+                    const servingBlockByTuple = (() => {
+                        const pool = blocks.filter((b) => Number.isFinite(b && b.rscp));
+                        if (!pool.length) return null;
+                        if (validSc(servingSc)) {
+                            const exactOnFreq = pool.find((b) => near(b.freq, servingFreq) && b.sc === servingSc);
+                            if (exactOnFreq) return exactOnFreq;
+                            const exactAnyFreq = pool.find((b) => b.sc === servingSc);
+                            if (exactAnyFreq) return exactAnyFreq;
+                        }
+                        const onServingFreq = pool.filter((b) => near(b.freq, servingFreq));
+                        const base = onServingFreq.length ? onServingFreq : pool;
+                        return base.reduce((best, b) => (!best || b.rscp > best.rscp) ? b : best, null);
+                    })();
+                    if (servingBlockByTuple) {
+                        if (Number.isFinite(servingBlockByTuple.rscp)) servingLevel = servingBlockByTuple.rscp;
+                        if (servingEcNo === null && Number.isFinite(servingBlockByTuple.ecno)) servingEcNo = servingBlockByTuple.ecno;
+                        if (!validSc(servingSc) && validSc(servingBlockByTuple.sc)) servingSc = servingBlockByTuple.sc;
+                    }
+                    const subtypeAcount = blocks.filter((b) => b.subtype === 'A').length;
+                    const subtypeBcount = blocks.filter((b) => b.subtype === 'B').length;
+                    umtsCellmeasSubtypeStats = {
+                        subtypeAcount,
+                        subtypeBcount,
+                        rscpAvailable: blocks.some((b) => Number.isFinite(b && b.rscp))
+                    };
 
                     neighbors = blocks.map((b) => {
-                        const isServing = near(b.freq, servingFreq) && validSc(servingSc) && b.psc === servingSc;
+                        const isServing = near(b.freq, servingFreq) && validSc(servingSc) && b.sc === servingSc;
                         return {
                             freq: b.freq,
-                            pci: b.psc,
+                            sc: b.sc, // unified
+                            psc: b.sc,
                             ecno: b.ecno,
                             rscp: b.rscp,
+                            rssi: b.rssi,
+                            cellmeasSubtype: b.subtype,
+                            _k: b._k,
                             setType: b.setType,
                             isServing
                         };
@@ -2897,13 +3570,15 @@ const NMFParser = {
 
                     if (!validSc(servingSc) && neighbors.length) {
                         const onServingFreq = neighbors.filter((n) => near(n.freq, servingFreq));
-                        const fallbackServing = (onServingFreq.length ? onServingFreq : neighbors)
+                        const fallbackPool = (onServingFreq.length ? onServingFreq : neighbors).filter((n) => Number.isFinite(n.rscp));
+                        const fallbackServing = fallbackPool
                             .reduce((best, n) => (!best || n.rscp > best.rscp) ? n : best, null);
                         if (fallbackServing) {
-                            servingSc = fallbackServing.pci;
+                            servingSc = fallbackServing.sc;
                             if (servingEcNo === null) servingEcNo = fallbackServing.ecno;
+                            if (Number.isFinite(fallbackServing.rscp)) servingLevel = fallbackServing.rscp;
                             neighbors.forEach((n) => {
-                                n.isServing = near(n.freq, servingFreq) && n.pci === servingSc;
+                                n.isServing = near(n.freq, servingFreq) && n.sc === servingSc;
                             });
                         }
                     }
@@ -2911,8 +3586,14 @@ const NMFParser = {
                     const labeled = labelUmtsNeighbors(neighbors, servingFreq, activeSetCount, monitoredSetCount);
                     neighbors = labeled.neighbors;
 
-                    // RSSI calculation for 3G
-                    if (Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
+                    // RSSI calculation for 3G: prefer raw field when it matches RSCP-EcNo relationship.
+                    if (Number.isFinite(servingFieldRaw) && Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
+                        const derivedWideband = servingLevel - servingEcNo;
+                        if (Math.abs(servingFieldRaw - derivedWideband) <= 4) {
+                            valRssi = servingFieldRaw;
+                        }
+                    }
+                    if (valRssi === null && Number.isFinite(servingLevel) && Number.isFinite(servingEcNo)) {
                         valRssi = servingLevel - servingEcNo;
                     }
                 } else if (techId === 7) {
@@ -2928,31 +3609,52 @@ const NMFParser = {
                     activeSetCount = 1;
                     monitoredSetCount = parseInt(parts[6]) || 0;
 
-                    // Neighbors: Robust Scanning (Tech 7)
-                    for (let k = 15; k < parts.length - 6; k++) {
-                        const type = parseInt(parts[k]);
-                        const freq = parseFloat(parts[k + 2]);
-                        const pci = parseInt(parts[k + 3]);
-                        const rsrp = parseFloat(parts[k + 4]);
-                        const rssi = parseFloat(parts[k + 5]);
-                        const rsrq = parseFloat(parts[k + 6]);
+                    // Neighbors: Robust Pattern-Based Sliding Scan (Tech 7)
+                    const lteNeighborsMap = new Map();
+                    let activeContextActive = false;
 
-                        const isValidType = !isNaN(type) && type >= 0 && type <= 3;
-                        const isValidFreq = !isNaN(freq) && freq > 100;
-                        const isValidPci = !isNaN(pci) && pci >= 0 && pci <= 1008;
-                        const isValidRsrp = !isNaN(rsrp) && rsrp < -20 && rsrp > -200;
-
-                        if (isValidType && isValidFreq && isValidPci && isValidRsrp) {
-                            neighbors.push({
-                                freq: freq,
-                                pci: pci,
-                                ecno: rsrq, // RSRQ
-                                rscp: rsrp,  // RSRP
-                                rssi: rssi
-                            });
-                            k += 8; // Advance
+                    // Pre-scan for "Active" context marker in the header/preamble
+                    for (let j = 0; j < Math.min(parts.length, 20); j++) {
+                        if (String(parts[j]).toUpperCase().includes('ACTIVE')) {
+                            activeContextActive = true;
+                            break;
                         }
                     }
+
+                    for (let k = 15; k < parts.length - 3; k++) {
+                        const freq = parseFloat(parts[k]);
+                        const pci = parseInt(parts[k + 1]);
+                        const rsrp = parseFloat(parts[k + 2]);
+                        const rsrq = parseFloat(parts[k + 3]);
+
+                        // SANITY: validate 4-field LTE tuple shape (EARFCN, PCI, RSRP, RSRQ)
+                        // Frequency must be integer-ish EARFCN
+                        const valFreq = Number.isFinite(freq) && freq > 0 && freq < 100000 && Math.abs(freq - Math.round(freq)) < 0.01;
+                        const valPci = !isNaN(pci) && pci >= 0 && pci <= 503;
+                        const valRsrp = !isNaN(rsrp) && rsrp < -20 && rsrp > -140;
+                        const valRsrq = !isNaN(rsrq) && rsrq <= 0 && rsrq > -30;
+
+                        if (valFreq && valPci && valRsrp && valRsrq) {
+                            const key = `${Math.round(freq)}:${pci}`;
+                            const type = activeContextActive ? 1 : 3; // Active context or fallback to Detected
+                            const prio = type <= 1 ? 0 : type;
+                            const existing = lteNeighborsMap.get(key);
+                            const existingPrio = existing ? (existing.type <= 1 ? 0 : existing.type) : 999;
+
+                            if (!existing || prio < existingPrio) {
+                                lteNeighborsMap.set(key, {
+                                    type,
+                                    freq: Math.round(freq),
+                                    sc: pci,
+                                    pci: pci,
+                                    ecno: rsrq,
+                                    rscp: rsrp
+                                });
+                            }
+                            k += 3; // Successfully consumed 4 fields, skip ahead (for loop does +1)
+                        }
+                    }
+                    neighbors = Array.from(lteNeighborsMap.values());
                 } else {
                     // Fallback
                     servingFreq = parseFloat(parts[7]);
@@ -2976,16 +3678,23 @@ const NMFParser = {
                     lat: gps.lat, lng: gps.lng, time,
                     type: 'MEASUREMENT', level: servingLevel, ecno: servingEcNo, sc: servingSc, freq: servingFreq,
                     cellId: state.cid, rnc: rnc, cid: cid, lac: state.lac,
-                    parsed: {
-                        serving: {
-                            freq: servingFreq, [techId === 5 ? 'rscp' : 'rsrp']: servingLevel, band: servingBand, sc: servingSc,
-                            [techId === 5 ? 'ecno' : 'rsrq']: servingEcNo, lac: state.lac, cellId: state.cid, rnc: rnc, cid: cid
+                        parsed: {
+                            serving: {
+                                freq: servingFreq, [techId === 5 ? 'rscp' : 'rsrp']: servingLevel, band: servingBand, sc: servingSc,
+                                [techId === 5 ? 'ecno' : 'rsrq']: servingEcNo, lac: state.lac, cellId: state.cid, rnc: rnc, cid: cid
+                            },
+                            neighbors,
+                            ...(techId === 5 && umtsCellmeasSubtypeStats ? {
+                                cellmeas: {
+                                    neighborSubtypeAcount: umtsCellmeasSubtypeStats.subtypeAcount,
+                                    neighborSubtypeBcount: umtsCellmeasSubtypeStats.subtypeBcount,
+                                    neighborRscpAvailable: umtsCellmeasSubtypeStats.rscpAvailable
+                                }
+                            } : {})
                         },
-                        neighbors
-                    },
-                    properties: {
-                        'Time': time,
-                        'Tech': techId === 5 ? 'UMTS' : (techId === 7 ? 'LTE' : 'Unknown'),
+                        properties: {
+                            'Time': time,
+                            'Tech': techId === 5 ? 'UMTS' : (techId === 7 ? 'LTE' : 'Unknown'),
                         'Cell ID': state.cid,
                         'RNC': rnc,
                         'CID': cid,
@@ -2997,11 +3706,17 @@ const NMFParser = {
                         [techId === 5 ? 'EcNo' : 'RSRQ']: servingEcNo,
                         'RRC State': currentRrcState,
                         'RSSI': valRssi,
-                        'UE Tx Power': latestUeTxPower,
-                        'NodeB Tx Power': latestNodeBTxPower,
-                        'TPC': latestTpc
-                    }
-                };
+                            'UE Tx Power': latestUeTxPower,
+                            'NodeB Tx Power': latestNodeBTxPower,
+                            'TPC': latestTpc
+                        }
+                    };
+                if (techId === 5 && umtsCellmeasSubtypeStats) {
+                    point.properties['CELLMEAS Neighbor RSCP'] = umtsCellmeasSubtypeStats.rscpAvailable
+                        ? 'Available (Subtype A/B present)'
+                        : 'Unavailable (unsupported CELLMEAS subtype)';
+                    point.properties['CELLMEAS Neighbor Subtypes'] = `A:${umtsCellmeasSubtypeStats.subtypeAcount}, B:${umtsCellmeasSubtypeStats.subtypeBcount}`;
+                }
 
                 // Detect AS Add / Remove Events
                 if (lastAsSize !== null && activeSetCount !== lastAsSize) {
@@ -3065,16 +3780,29 @@ const NMFParser = {
                         if (num > 16) return;
 
                         const keyBase = `${prefix}${num}`;
+                        const sc = Number.isFinite(n.sc) ? n.sc : (Number.isFinite(n.pci) ? n.pci : (Number.isFinite(n.psc) ? n.psc : null));
 
                         point[`${keyBase}_rscp`] = n.rscp;
                         point[`${keyBase}_ecno`] = n.ecno;
-                        point[`${keyBase}_sc`] = n.pci;
+                        point[`${keyBase}_sc`] = sc;
                         point[`${keyBase}_freq`] = n.freq;
 
+                        // Add aliases for UI Trend Charts (N1, N2, N3)
+                        if (idx < 3) {
+                            const cIdx = idx + 1;
+                            point[`n${cIdx}_sc`] = sc;
+                            point[`n${cIdx}_rscp`] = n.rscp;
+                            point[`n${cIdx}_ecno`] = n.ecno;
+                            point[`n${cIdx}_freq`] = n.freq;
+                        }
+
                         // Add to properties for Popup
-                        point.properties[`${prefix.toUpperCase()}${num} SC`] = n.pci;
+                        point.properties[`${prefix.toUpperCase()}${num} SC`] = sc;
                         point.properties[`${prefix.toUpperCase()}${num} RSCP`] = n.rscp;
                         point.properties[`${prefix.toUpperCase()}${num} EcNo`] = n.ecno;
+                        if (Number.isFinite(n.rssi)) {
+                            point.properties[`${prefix.toUpperCase()}${num} RSSI`] = n.rssi;
+                        }
                     });
                 }
 
@@ -3353,7 +4081,7 @@ const ExcelParser = {
         }
         const keys = Array.from(keysSet);
 
-        const normalize = k => k.toLowerCase().replace(/[\s_]/g, '');
+        const normalize = k => k.toLowerCase().replace(/[\s_\.]/g, '');
 
         let timeKey = keys.find(k => /^(time|timestamp|date|datetime)$/i.test(normalize(k)) || /time/i.test(normalize(k))); // Prioritize exact, then loose
         let latKey = keys.find(k => /^(lat|latitude|y_coord|y|cgpslat|cgpslatitude)$/i.test(normalize(k)) || /latitude/i.test(normalize(k)));
@@ -3367,7 +4095,7 @@ const ExcelParser = {
         const detectBestColumn = (candidates, exclusions = []) => {
             // Enhanced exclusion check
             const isExcluded = (n) => {
-                if (n.includes('serving')) return false; // Always trust 'serving'
+                if (n.includes('serving') || n.includes('bestactive')) return false; // Always trust 'serving' or Nemo 'bestactive'
                 if (exclusions.some(ex => n.includes(ex))) return true;
 
                 // Strict 'AS' and 'Neighbor' patterns
@@ -3398,9 +4126,9 @@ const ExcelParser = {
         };
 
         const scCol = detectBestColumn(['servingcellsc', 'servingsc', 'primarysc', 'primarypci', 'dl_pci', 'dl_sc', 'bestsc', 'bestpci', 'sc', 'pci', 'psc', 'scramblingcode', 'physicalcellid', 'physicalcellidentity', 'phycellid'], ['active', 'set', 'neighbor', 'target', 'candidate']);
-        const levelCol = detectBestColumn(['servingcellrsrp', 'servingrsrp', 'rsrp', 'rscp', 'level'], ['active', 'set', 'neighbor']);
-        const ecnoCol = detectBestColumn(['servingcellrsrq', 'servingrsrq', 'rsrq', 'ecno', 'sinr'], ['active', 'set', 'neighbor']);
-        const freqCol = detectBestColumn(['servingcelldlearfcn', 'earfcn', 'uarfcn', 'freq', 'channel'], ['active', 'set', 'neighbor']);
+        const levelCol = detectBestColumn(['servingcellrsrp', 'servingrsrp', 'rsrp', 'bestactiverscp', 'rscp', 'level'], ['active', 'set', 'neighbor']);
+        const ecnoCol = detectBestColumn(['servingcellrsrq', 'servingrsrq', 'rsrq', 'bestactiveec/n0', 'bestactiveecn0', 'bestecno', 'ecno', 'sinr'], ['active', 'set', 'neighbor']);
+        const freqCol = detectBestColumn(['servingcelldlearfcn', 'earfcn', 'uarfcn', 'freq', 'channel', 'ch'], ['active', 'set', 'neighbor']);
         const bandCol = detectBestColumn(['band'], ['active', 'set', 'neighbor']);
         // Prioritize "NodeB ID-Cell ID" or "EnodeB ID-Cell ID" for strict sector matching
         const cellIdCol = detectBestColumn(['enodeb id-cell id', 'enodebid-cellid', 'nodeb id-cell id', 'cellid', 'ci', 'cid', 'cell_id', 'identity'], ['active', 'set', 'neighbor', 'target']);
@@ -3418,6 +4146,42 @@ const ExcelParser = {
                 return isNaN(f) ? NaN : f;
             }
             return NaN;
+        };
+
+        const toTimeStringFromDayFraction = (fraction) => {
+            if (!Number.isFinite(fraction)) return null;
+            const dayMs = 24 * 60 * 60 * 1000;
+            let ms = Math.round((((fraction % 1) + 1) % 1) * dayMs);
+            if (ms >= dayMs) ms = 0;
+            const hh = Math.floor(ms / 3600000);
+            ms -= hh * 3600000;
+            const mm = Math.floor(ms / 60000);
+            ms -= mm * 60000;
+            const ss = Math.floor(ms / 1000);
+            ms -= ss * 1000;
+            return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+        };
+
+        const normalizeTimeValue = (value) => {
+            if (value === undefined || value === null || value === '') return 'N/A';
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                // Excel serial date/time or time fraction
+                if ((value > 20000 && value < 90000) || (value >= 0 && value < 1)) {
+                    const out = toTimeStringFromDayFraction(value);
+                    if (out) return out;
+                }
+                return String(value);
+            }
+            const s = String(value).trim();
+            if (!s) return 'N/A';
+            if (/^-?\d+(\.\d+)?$/.test(s)) {
+                const n = parseFloat(s);
+                if (Number.isFinite(n) && ((n > 20000 && n < 90000) || (n >= 0 && n < 1))) {
+                    const out = toTimeStringFromDayFraction(n);
+                    if (out) return out;
+                }
+            }
+            return s;
         };
 
         const points = [];
@@ -3448,7 +4212,7 @@ const ExcelParser = {
             const row = json[i];
             const lat = parseNumber(row[latKey]);
             const lng = parseNumber(row[lngKey]);
-            const time = row[timeKey];
+                const time = normalizeTimeValue(row[timeKey]);
 
             if (!isNaN(lat) && !isNaN(lng)) {
                 // Create Base Point from Best Columns
@@ -3608,9 +4372,26 @@ const ExcelParser = {
         if (dlThputCol) customMetrics.push('throughput_dl');
         if (ulThputCol) customMetrics.push('throughput_ul');
 
+        // Detect Technology based on measurements
+        let detectedTech = '4G (Excel)';
+        if (points.length > 0) {
+            const freqs = points.slice(0, 100).map(p => p.freq).filter(f => !isNaN(f) && f > 0);
+            if (freqs.length > 0) {
+                const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
+                if (is3G) detectedTech = '3G (UMTS)';
+                else if (freqs.some(f => f < 1000)) detectedTech = '2G (GSM)';
+                else if (freqs.some(f => f > 120000)) detectedTech = '5G (NR)';
+                else detectedTech = '4G (LTE)';
+            } else if (levelCol) {
+                const lowCol = normalize(levelCol);
+                if (lowCol.includes('rsrp')) detectedTech = '4G (LTE)';
+                else if (lowCol.includes('rscp')) detectedTech = '3G (UMTS)';
+            }
+        }
+
         return {
             points: points,
-            tech: '4G (Excel)', // Assume 4G or Generic
+            tech: detectedTech,
             customMetrics: customMetrics.concat(['rrc_rel_cause', 'cs_rel_cause', 'iucs_status']),
             signaling: [], // No signaling in simple excel for now
             debugInfo: {
