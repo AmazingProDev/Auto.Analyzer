@@ -295,6 +295,26 @@ class MapRenderer {
     getMetricValue(p, metric) {
         if (!p) return undefined;
         let val = p[metric];
+        const metricStr = String(metric || '');
+        const metricLower = metricStr.toLowerCase();
+        const metricNorm = metricLower.replace(/[^a-z0-9]/g, '');
+        const pickFirstDefined = (...vals) => {
+            for (let i = 0; i < vals.length; i++) {
+                const v = vals[i];
+                if (v !== undefined && v !== null && v !== '') return v;
+            }
+            return undefined;
+        };
+        const getObjectValueFlexible = (obj) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            if (obj[metricStr] !== undefined) return obj[metricStr];
+            if (metricLower && obj[metricLower] !== undefined) return obj[metricLower];
+            const keyExactCi = Object.keys(obj).find((k) => String(k || '').toLowerCase() === metricLower);
+            if (keyExactCi && obj[keyExactCi] !== undefined) return obj[keyExactCi];
+            const keyNorm = Object.keys(obj).find((k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '') === metricNorm);
+            if (keyNorm && obj[keyNorm] !== undefined) return obj[keyNorm];
+            return undefined;
+        };
 
         // 1. Serving Cell Name Resolution
         if (metric === 'serving_cell_name') {
@@ -318,19 +338,60 @@ class MapRenderer {
             if (val === undefined) val = p.level || p.rscp;
             if (val === undefined && p.parsed && p.parsed.serving) val = p.parsed.serving.level || p.parsed.serving.rscp;
         }
+        if (metricLower.includes('rscp') || metricLower.includes('rsrp') || metricLower.includes('signallevel')) {
+            val = pickFirstDefined(
+                val,
+                p.level,
+                p.rscp,
+                p.rsrp,
+                p.parsed && p.parsed.serving ? p.parsed.serving.level : undefined,
+                p.parsed && p.parsed.serving ? p.parsed.serving.rscp : undefined,
+                p.parsed && p.parsed.serving ? p.parsed.serving.rsrp : undefined,
+                p.properties ? p.properties['Serving RSCP'] : undefined,
+                p.properties ? p.properties['Serving RSRP'] : undefined
+            );
+        }
+        if (metricLower.includes('ecno') || metricLower.includes('quality') || metricLower === 'qual' || metricLower.includes('rsrq')) {
+            val = pickFirstDefined(
+                val,
+                p.ecno,
+                p.qual,
+                p.rsrq,
+                p.parsed && p.parsed.serving ? p.parsed.serving.ecno : undefined,
+                p.parsed && p.parsed.serving ? p.parsed.serving.qual : undefined,
+                p.parsed && p.parsed.serving ? p.parsed.serving.rsrq : undefined,
+                p.properties ? p.properties['EcNo'] : undefined,
+                p.properties ? p.properties['Serving EcNo'] : undefined,
+                p.properties ? p.properties['RSRQ'] : undefined
+            );
+        }
         if (metric.startsWith('active_set_')) {
             const sub = metric.replace('active_set_', '').toLowerCase();
             val = p[sub];
+        }
+
+        // 3b. Case/shape-insensitive fallback on point object
+        if (val === undefined) {
+            val = getObjectValueFlexible(p);
         }
 
         // 4. Serving Struct Fallback
         if (val === undefined && p.parsed && p.parsed.serving) {
             val = p.parsed.serving[metric];
         }
+        if (val === undefined && p.parsed && p.parsed.serving) {
+            val = getObjectValueFlexible(p.parsed.serving);
+        }
+        if (val === undefined && p.parsed) {
+            val = getObjectValueFlexible(p.parsed);
+        }
 
         // 5. Raw Properties Fallback (SHP etc.)
         if (val === undefined && p.properties) {
             val = p.properties[metric];
+        }
+        if (val === undefined && p.properties) {
+            val = getObjectValueFlexible(p.properties);
         }
 
         return val;

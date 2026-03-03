@@ -1322,31 +1322,170 @@ document.addEventListener('DOMContentLoaded', () => {
             if (p.parsed && typeof p.parsed === 'object') Object.keys(p.parsed).forEach(addKey);
             if (p.parsed && p.parsed.serving && typeof p.parsed.serving === 'object') Object.keys(p.parsed.serving).forEach(addKey);
         });
-
-        const findKey = (aliases) => {
-            const aliasNorm = (aliases || []).map(normalizeKey).filter(Boolean);
-            if (!aliasNorm.length) return null;
-            for (const a of aliasNorm) {
-                if (keyMap.has(a)) return keyMap.get(a);
+        const getMetricValueFlexible = (point, metricName) => {
+            if (!point || !metricName) return undefined;
+            const mRaw = String(metricName || '');
+            const mLow = mRaw.toLowerCase();
+            const mNorm = normalizeKey(mRaw);
+            const sources = [point, point.properties, point.parsed, point.parsed && point.parsed.serving];
+            for (const src of sources) {
+                if (!src || typeof src !== 'object') continue;
+                if (src[mRaw] !== undefined) return src[mRaw];
+                if (src[mLow] !== undefined) return src[mLow];
+                const hit = Object.keys(src).find((k) => String(k || '').toLowerCase() === mLow);
+                if (hit && src[hit] !== undefined) return src[hit];
+                const hitNorm = Object.keys(src).find((k) => normalizeKey(k) === mNorm);
+                if (hitNorm && src[hitNorm] !== undefined) return src[hitNorm];
             }
-            for (const [nk, raw] of keyMap.entries()) {
-                if (aliasNorm.some((a) => nk.includes(a))) return raw;
-            }
-            return null;
+            return undefined;
         };
 
-        const rsrqKey = findKey(['rsrq', 'servingrsrq', 'servingcellrsrq', 'quality']);
-        const ecnoKey = findKey(['ecno', 'servingecno', 'bestactiveecno', 'bestactiveecn0', 'quality']);
-        const fallbackLevel = findKey(['level', 'rsrp', 'rscp', 'servingrsrp', 'servingrscp']) || 'level';
+        const hasValue = (v) => {
+            if (v === undefined || v === null) return false;
+            if (typeof v === 'string') {
+                const s = v.trim().toLowerCase();
+                if (!s || s === 'n/a' || s === 'na' || s === 'null' || s === 'undefined' || s === '-') return false;
+            }
+            return true;
+        };
+
+        const scoreMetric = (rawMetric) => {
+            let anyCount = 0;
+            let numericCount = 0;
+            for (let i = 0; i < sample.length; i++) {
+                const v = getMetricValueFlexible(sample[i], rawMetric);
+                if (!hasValue(v)) continue;
+                anyCount += 1;
+                const n = Number(v);
+                if (Number.isFinite(n)) numericCount += 1;
+            }
+            return { anyCount, numericCount };
+        };
 
         const tech = String(techHint || '').toLowerCase();
         const isUmts = tech.includes('3g') || tech.includes('umts') || tech.includes('wcdma');
         const isLte = tech.includes('4g') || tech.includes('lte');
+        const metricPriority = (nk) => {
+            if (isUmts) {
+                if (nk.includes('ecno')) return 60;
+                if (nk.includes('quality') || nk === 'qual') return 50;
+                if (nk.includes('sinr') || nk.includes('cinr')) return 40;
+                if (nk.includes('rsrq')) return 35;
+                if (nk.includes('rscp')) return 25;
+                if (nk.includes('level')) return 20;
+                if (nk.includes('rsrp')) return 10;
+                return 0;
+            }
+            if (isLte) {
+                if (nk.includes('rsrq')) return 60;
+                if (nk.includes('sinr') || nk.includes('cinr')) return 55;
+                if (nk.includes('quality') || nk === 'qual') return 50;
+                if (nk.includes('ecno')) return 35;
+                if (nk.includes('rsrp')) return 25;
+                if (nk.includes('level')) return 20;
+                if (nk.includes('rscp')) return 10;
+                return 0;
+            }
+            if (nk.includes('rsrq')) return 55;
+            if (nk.includes('ecno')) return 50;
+            if (nk.includes('sinr') || nk.includes('cinr')) return 48;
+            if (nk.includes('quality') || nk === 'qual') return 45;
+            if (nk.includes('rsrp') || nk.includes('rscp')) return 30;
+            if (nk.includes('level')) return 20;
+            return 0;
+        };
 
-        if (isUmts) return ecnoKey || rsrqKey || fallbackLevel;
-        if (isLte) return rsrqKey || ecnoKey || fallbackLevel;
-        return rsrqKey || ecnoKey || fallbackLevel;
+        const ranked = [];
+        for (const [nk, raw] of keyMap.entries()) {
+            if (!(nk.includes('ecno') || nk.includes('rsrq') || nk.includes('sinr') || nk.includes('cinr') || nk.includes('quality') || nk === 'qual' || nk.includes('rscp') || nk.includes('rsrp') || nk.includes('level'))) continue;
+            const pri = metricPriority(nk);
+            if (pri <= 0) continue;
+            const score = scoreMetric(raw);
+            const total = (pri * 10000) + (score.numericCount * 100) + score.anyCount;
+            ranked.push({ raw, total, numericCount: score.numericCount, anyCount: score.anyCount });
+        }
+
+        ranked.sort((a, b) => (b.total - a.total) || (b.numericCount - a.numericCount) || (b.anyCount - a.anyCount));
+        const best = ranked.find((r) => r.anyCount > 0);
+        if (best) return best.raw;
+        return 'level';
     }
+
+    window.autoOpenDefaultLayersForLog = (log) => {
+        if (!log || !Array.isArray(log.points) || !window.mapRenderer) return;
+
+        // Force initial map metric to quality family (EcNo/RSRQ/SINR) when available.
+        const autoQualityMetric = pickAutoQualityMetric(log.points, log.tech || log.type || 'nmf', log.customMetrics || []);
+        if (autoQualityMetric && String(log.currentParam || '') !== String(autoQualityMetric)) {
+            log.currentParam = autoQualityMetric;
+            if (typeof window.mapRenderer.updateLayerMetric === 'function') {
+                window.mapRenderer.updateLayerMetric(log.id, log.points, log.currentParam || 'level');
+            }
+        }
+
+        if (!Array.isArray(log.events) || !log.events.length) return;
+        if (!window.eventLegendEntries) window.eventLegendEntries = {};
+
+        const addAutoEventLayer = (param, cfg) => {
+            if (!cfg || typeof cfg.getPoints !== 'function') return;
+            const points = cfg.getPoints();
+            if (!Array.isArray(points) || points.length === 0) return;
+            const eventKey = `${log.id}::${param}`;
+            const layerId = cfg.layerId || `event__${log.id}__${param}`;
+            window.mapRenderer.addEventsLayer(layerId, points, cfg.options || {});
+            window.eventLegendEntries[eventKey] = {
+                title: cfg.title || param,
+                iconUrl: cfg.iconUrl || null,
+                color: cfg.color || null,
+                count: points.length,
+                logId: log.id,
+                points: points,
+                layerId: layerId,
+                visible: true
+            };
+            if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+        };
+
+        addAutoEventLayer('3g_dropcall', {
+            title: 'Drop Call',
+            iconUrl: 'icons/3g_dropcall.png',
+            layerId: `event__${log.id}__3g_dropcall`,
+            options: {
+                iconUrl: 'icons/3g_dropcall.png',
+                iconSize: [32, 32],
+                iconAnchor: [16, 16]
+            },
+            getPoints: () => (typeof window.filter3gDropCalls === 'function' ? window.filter3gDropCalls(log) : [])
+        });
+
+        addAutoEventLayer('hof_handover_failure', {
+            title: 'HOF',
+            iconUrl: 'icons/HOF.png',
+            layerId: `event__${log.id}__hof`,
+            options: {
+                iconUrl: 'icons/HOF.png',
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            },
+            getPoints: () => (typeof window.filterHOFEvents === 'function' ? window.filterHOFEvents(log, { maxDeltaMs: 15000 }) : [])
+        });
+
+        addAutoEventLayer('3g_call_failure', {
+            title: 'Call Failure',
+            iconUrl: 'icons/3G_CallFailure.png',
+            layerId: `event__${log.id}__3g_call_failure`,
+            options: {
+                iconUrl: 'icons/3G_CallFailure.png',
+                iconSize: [28, 28],
+                iconAnchor: [14, 14]
+            },
+            getPoints: () => (typeof window.filter3gCallFailure === 'function' ? window.filter3gCallFailure(log) : [])
+        });
+
+        if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+        if (window.updateLegend) window.updateLegend();
+        if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+    };
 
     async function handleExcelImport(file) {
         fileStatus.textContent = 'Parsing Excel: ' + (file.name) + '...';
@@ -1381,6 +1520,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (window.mapRenderer) {
                 window.mapRenderer.updateLayerMetric(logId, points, newLog.currentParam || 'level');
+            }
+            if (typeof window.autoOpenDefaultLayersForLog === 'function') {
+                window.autoOpenDefaultLayersForLog(newLog);
             }
         } catch (e) {
             console.error(e);
@@ -1477,6 +1619,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (window.mapRenderer) {
                 window.mapRenderer.updateLayerMetric(logId, pooledPoints, newLog.currentParam || 'level');
+            }
+            if (typeof window.autoOpenDefaultLayersForLog === 'function') {
+                window.autoOpenDefaultLayersForLog(newLog);
             }
 
         } catch (e) {
@@ -1585,6 +1730,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (window.mapRenderer) {
                     window.mapRenderer.renderLog(newLog, newLog.currentParam || 'level');
                 }
+            }
+            if (typeof window.autoOpenDefaultLayersForLog === 'function') {
+                window.autoOpenDefaultLayersForLog(newLog);
             }
 
             fileStatus.textContent = 'Loaded TRP: ' + (file.name);
@@ -2208,13 +2356,11 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
-    window.filterHOF = (log) => {
-        if (!log || !log.events) return [];
-        return log.events.filter(p => {
-            if (!p || !p.event) return false;
-            const evt = String(p.event).toLowerCase();
-            return evt.includes('ho fail') || evt.includes('handover fail') || evt.includes('handover failure') || evt.includes('hof');
-        });
+    window.filterHOF = (log, options = {}) => {
+        if (typeof window.filterHOFEvents === 'function') {
+            return window.filterHOFEvents(log, options);
+        }
+        return [];
     };
 
     const parsePointTimeMs = (t) => {
@@ -2298,6 +2444,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return false;
     };
 
+    const isHofToken = (text) => {
+        const s = String(text || '').toLowerCase();
+        if (!s) return false;
+        if (/(^|[^a-z0-9])hof([^a-z0-9]|$)/.test(s)) return true;
+        if (s.includes('handover failure')) return true;
+        if (s.includes('ho failure')) return true;
+        if ((s.includes('handover') || s.includes('ho')) && (s.includes('fail') || s.includes('reject') || s.includes('abort') || s.includes('cancel'))) return true;
+        if (s.includes('t304') && (s.includes('expir') || s.includes('timeout'))) return true;
+        return false;
+    };
+
     const isRLFEvent = (ev) => {
         const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
         if (isRlfToken(name)) return true;
@@ -2307,6 +2464,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const value = String(v || '').toLowerCase();
             if (isRlfToken(key) || isRlfToken(value)) return true;
             if (key.includes('rlf') || key.includes('reestab') || key.includes('radio_link_failure')) return true;
+        }
+        return false;
+    };
+
+    const isHOFEvent = (ev) => {
+        const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+        if (isHofToken(name)) return true;
+        const pairs = extractEventParamPairs(ev);
+        for (const [k, v] of pairs) {
+            const key = String(k || '').toLowerCase();
+            const value = String(v || '').toLowerCase();
+            if (isHofToken(key) || isHofToken(value)) return true;
+            if ((key.includes('handover') || key.includes('ho_')) && (value.includes('fail') || value.includes('reject') || value.includes('abort') || value.includes('cancel'))) return true;
         }
         return false;
     };
@@ -2408,6 +2578,24 @@ document.addEventListener('DOMContentLoaded', () => {
             out.message = name || 'RLF';
             out.properties = Object.assign({}, ev && ev.properties ? ev.properties : {}, {
                 'Event': 'RLF',
+                'Event Name': name || 'N/A'
+            });
+            return out;
+        });
+    };
+
+    window.filterHOFEvents = (log, options = {}) => {
+        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const matches = allEvents.filter((ev) => isHOFEvent(ev));
+        const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
+        const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
+        return mapped.map((ev) => {
+            const out = Object.assign({}, ev);
+            const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
+            out.event = 'HOF';
+            out.message = name || 'HOF';
+            out.properties = Object.assign({}, ev && ev.properties ? ev.properties : {}, {
+                'Event': 'HOF',
                 'Event Name': name || 'N/A'
             });
             return out;
@@ -2671,7 +2859,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
                     }
                     if (data.param === 'hof_handover_failure' && log.events) {
-                        const hofs = window.filterHOF(log);
+                        const hofs = window.filterHOFEvents(log, { maxDeltaMs: 15000 });
                         const layerId = 'event__' + log.id + '__hof';
                         map.addEventsLayer(layerId, hofs, {
                             iconUrl: 'icons/HOF.png',
@@ -2681,7 +2869,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!window.eventLegendEntries) window.eventLegendEntries = {};
                         const eventKey = log.id + '::hof_handover_failure';
                         window.eventLegendEntries[eventKey] = {
-                            title: 'Handover Failure',
+                            title: 'HOF',
                             iconUrl: 'icons/HOF.png',
                             count: hofs.length,
                             logId: log.id,
@@ -16583,6 +16771,80 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const hoExecutionTimeValue = getAny('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency') ?? hoExecutionTimeInferred;
         const hoStartCompleteValue = getAny('HO Start/Complete') ?? hoStartCompleteDecoded ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents;
         const hoFailureValue = getAny('HO failure', 'HO Failure', 'Handover Failure', 'HOF') ?? hoFailureInferred;
+        const matchedFailedSession = (() => {
+            if (!activeLog || !Array.isArray(activeLog.callSessions) || !activeLog.callSessions.length) return null;
+            const explicitMode = getSessionModeFromMapPoint(p);
+            if (explicitMode) {
+                const direct = findUmtsFailedSessionFromPoint(activeLog, p, explicitMode);
+                if (direct) return direct;
+            }
+            const pointSessionId = String(p?.sessionId || p?.properties?.['Session ID'] || '').trim();
+            if (pointSessionId) {
+                const bySession = activeLog.callSessions.find((s) => String(s && s.sessionId || '').trim() === pointSessionId);
+                if (bySession) return bySession;
+            }
+            const pointCallId = String(
+                p?.callId ??
+                p?.callTransactionId ??
+                p?.properties?.['Call ID'] ??
+                p?.properties?.['Call Id'] ??
+                ''
+            ).trim();
+            if (pointCallId) {
+                const byCallId = activeLog.callSessions.find((s) => String(s && (s.callId ?? s.callTransactionId) || '').trim() === pointCallId);
+                if (byCallId) return byCallId;
+            }
+            const candidates = activeLog.callSessions.filter((s) => s &&
+                s._source === 'umts' &&
+                s.kind === 'UMTS_CALL' &&
+                (s.drop || s.setupFailure || /DROP|ABNORMAL|CALL_SETUP_FAILURE/i.test(String(s.endType || ''))));
+            if (!candidates.length) return null;
+            const clickedTs = parsePointTimeMs(p?.time || p?.timestamp || p?.ts || p?.properties?.Time);
+            let best = null;
+            let bestScore = Infinity;
+            candidates.forEach((s) => {
+                const mode = (s.setupFailure || /CALL_SETUP_FAILURE/i.test(String(s.endType || ''))) ? 'setupFailure' : 'drop';
+                const hit = (typeof findSessionAnchorPoint === 'function') ? findSessionAnchorPoint(activeLog, s, mode) : null;
+                const anchor = hit?.point;
+                if (!anchor) return;
+                if (p?.id !== undefined && anchor?.id !== undefined && String(p.id) === String(anchor.id)) {
+                    best = { session: s, timeDiff: 0, geoDiff: 0 };
+                    bestScore = -1;
+                    return;
+                }
+                if (bestScore < 0) return;
+                const tAnchor = parsePointTimeMs(anchor?.time || anchor?.timestamp || anchor?.ts || anchor?.properties?.Time);
+                const timeDiff = (Number.isFinite(clickedTs) && Number.isFinite(tAnchor)) ? Math.abs(clickedTs - tAnchor) : Infinity;
+                const geoDiff = distanceMeters(p?.lat, p?.lng, anchor?.lat, anchor?.lng);
+                const score = Math.min(timeDiff, geoDiff * 100);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = { session: s, timeDiff, geoDiff };
+                }
+            });
+            if (!best) return null;
+            if (best.timeDiff <= 3000 || best.geoDiff <= 40) return best.session;
+            return null;
+        })();
+        const matchedUmtsClassification = matchedFailedSession?.umts?.classification || matchedFailedSession?.classification || null;
+        const dropCallValue = (() => {
+            const direct = getAny('Drop Call', 'Call Drop', 'Dropped Call');
+            if (hasValue(direct)) return direct;
+            if (!matchedFailedSession) return undefined;
+            const endType = String(matchedFailedSession.endType || '').toUpperCase();
+            if (matchedFailedSession.setupFailure || endType.includes('CALL_SETUP_FAILURE')) return 'No (setup failure)';
+            if (matchedFailedSession.drop || endType.includes('DROP') || endType.includes('ABNORMAL')) return 'Yes';
+            return undefined;
+        })();
+        const dropCauseValue = pickFirstUsable(
+            getAny('Drop cause', 'Drop Cause', 'DropCause', 'drop_cause', 'Failure Cause', 'Failure cause'),
+            matchedUmtsClassification?.category,
+            matchedFailedSession?.failureReason?.cause,
+            matchedFailedSession?.failureReason?.label,
+            matchedUmtsClassification?.reason,
+            matchedFailedSession?.endTrigger,
+            matchedFailedSession?.endType
+        );
         const rlfFromPointEvent = (() => {
             const directCandidates = [
                 p && p.event,
@@ -16885,6 +17147,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('HO command', hoCommandValue, hoCommandDecodedSource ? { source: 'decoded' } : {});
         pushMetric('HO execution time', hoExecutionTimeValue, hoExecutionTimeDecodedSource ? { source: 'decoded' } : {});
         pushMetric('HO failure', hoFailureValue);
+        pushMetric('Drop Call', dropCallValue);
+        pushMetric('Drop Cause', dropCauseValue);
         pushMetric('RLF', rlfValue);
         pushMetric('RLF root-cause details', rlfRootCauseDetailsValue, rlfDecodedSource ? { source: 'decoded' } : {});
         pushMetric('Reestablishment timeline', reestablishmentTimelineValue, rlfDecodedSource ? { source: 'decoded' } : {});
@@ -16972,6 +17236,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'HO command': hoCommandValue,
             'HO execution time': hoExecutionTimeValue,
             'HO failure': hoFailureValue,
+            'Drop Call': dropCallValue,
+            'Drop Cause': dropCauseValue,
             'RLF': rlfValue,
             'RLF root-cause details': rlfRootCauseDetailsValue,
             'Reestablishment timeline': reestablishmentTimelineValue,
@@ -17043,6 +17309,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 'HO command',
                 'HO execution time',
                 'HO failure',
+                'Drop Call',
+                'Drop Cause',
                 'RLF',
                 'RLF root-cause details',
                 'Reestablishment timeline',
@@ -18094,6 +18362,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     }
                     if (window.mapRenderer) {
                         window.mapRenderer.addLogLayer(newLog.id, parsedData, newLog.currentParam || 'level', false);
+                    }
+                    if (typeof window.autoOpenDefaultLayersForLog === 'function') {
+                        window.autoOpenDefaultLayersForLog(newLog);
                     }
                 }
 
@@ -22237,7 +22508,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 if (window.applyDTLayerOrder) window.applyDTLayerOrder();
                                 if (window.updateLegend) window.updateLegend();
                             } else if (param === 'hof_handover_failure') {
-                                const hofs = window.filterHOF(log);
+                                const hofs = window.filterHOFEvents(log, { maxDeltaMs: 15000 });
                                 const layerId = 'event__' + log.id + '__hof';
                                 window.mapRenderer.addEventsLayer(layerId, hofs, {
                                     iconUrl: 'icons/HOF.png',
@@ -22247,7 +22518,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 if (!window.eventLegendEntries) window.eventLegendEntries = {};
                                 const eventKey = log.id + '::hof_handover_failure';
                                 window.eventLegendEntries[eventKey] = {
-                                    title: 'Handover Failure',
+                                    title: 'HOF',
                                     iconUrl: 'icons/HOF.png',
                                     count: hofs.length,
                                     logId: log.id,
@@ -22830,6 +23101,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 actions.appendChild(addHeader('EVENTS'));
                 actions.appendChild(addAction('A3/A5 event', 'a3a5_event', 'event'));
                 actions.appendChild(addAction('RLF', 'rlf_event', 'event'));
+                actions.appendChild(addAction('HOF', 'hof_handover_failure', 'event'));
+                actions.appendChild(addAction('Drop Call', '3g_dropcall', 'event'));
+                actions.appendChild(addAction('Call Failure', '3g_call_failure', 'event'));
             }
 
             // Resurrected Signaling Modal Button
