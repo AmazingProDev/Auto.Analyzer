@@ -2344,14 +2344,47 @@ document.addEventListener('DOMContentLoaded', () => {
         const sessionDropPoints = window.getSessionDropPoints(log);
         if (sessionDropPoints.length > 0) return sessionDropPoints;
         if (!log || !log.events) return [];
-        return log.events.filter(p => {
-            if (!p || !p.event) return false;
-            const evt = String(p.event).toLowerCase();
-            if (evt.includes('call drop')) return true;
-            if (evt.includes('rrc release')) {
-                const cause = p.properties?.rrc_rel_cause || p.properties?.['RRC Release Cause'] || p.message;
-                return window.isAbnormalCause(cause);
-            }
+        const getText = (ev) => {
+            const eventTxt = String(ev?.event || ev?.event_name || '').trim();
+            const msgTxt = String(ev?.message || ev?.name || '').trim();
+            const propsEvent = String(ev?.properties?.Event || '').trim();
+            const propsMsg = String(ev?.properties?.Message || '').trim();
+            return `${eventTxt} ${msgTxt} ${propsEvent} ${propsMsg}`.toLowerCase();
+        };
+        const hasCallIdentity = (ev) => {
+            const callId = String(
+                ev?.callId ??
+                ev?.callTransactionId ??
+                ev?.properties?.['Call ID'] ??
+                ev?.properties?.['Call Id'] ??
+                ev?.properties?.['CallID'] ??
+                ''
+            ).trim();
+            const sid = String(ev?.sessionId ?? ev?.properties?.['Session ID'] ?? '').trim();
+            return !!(callId || sid);
+        };
+        return log.events.filter((ev) => {
+            if (!ev) return false;
+            const txt = getText(ev);
+            const explicitDrop = /\bcall\s*drop\b|\bdrop\s*call\b|\bdrop_call\b/.test(txt);
+            // Do not trust plain "Call Drop" text alone (some logs emit generic RRD cause text
+            // without a confirmed call/session context).
+            if (explicitDrop && hasCallIdentity(ev)) return true;
+
+            // Conservative fallback: require strong call context + abnormal drop-like cause + call/session identity.
+            const hasCallCtx = /\bcall\b|\bvoice\b|\bcs\b/.test(txt);
+            const endType = String(ev?.endType || ev?.properties?.['End Type'] || '').toLowerCase();
+            const causeRaw = String(
+                ev?.properties?.rrc_rel_cause ??
+                ev?.properties?.['RRC Release Cause'] ??
+                ev?.properties?.['Failure Cause'] ??
+                ev?.properties?.['Drop Cause'] ??
+                ev?.message ??
+                ''
+            ).toLowerCase();
+            const abnormalLike = /drop|abnormal|unexpected_idle|rlf|radio link failure/.test(endType) ||
+                /drop|abnormal|rlf|radio link failure/.test(causeRaw);
+            if (hasCallCtx && abnormalLike && hasCallIdentity(ev)) return true;
             return false;
         });
     };
@@ -2725,6 +2758,73 @@ document.addEventListener('DOMContentLoaded', () => {
             const evt = String(p.event).toLowerCase();
             return evt.includes('call fail') || evt.includes('call failure');
         });
+    };
+
+    window.getDisplayCallSessions = (log) => {
+        const nativeSessions = Array.isArray(log && log.callSessions) ? log.callSessions : [];
+        if (nativeSessions.length > 0) return nativeSessions;
+        if (!log) return [];
+
+        const makeSessionFromEvent = (ev, mode, idx) => {
+            const timeVal = String(ev?.time ?? ev?.timestamp ?? ev?.ts ?? ev?.properties?.Time ?? '').trim();
+            const p = (ev && typeof ev === 'object') ? (ev.properties || {}) : {};
+            const callId = String(
+                ev?.callId ??
+                ev?.callTransactionId ??
+                p['Call ID'] ??
+                p['Call Id'] ??
+                p['CallID'] ??
+                ''
+            ).trim();
+            const reasonTxt = String(ev?.message || ev?.event || ev?.event_name || '').trim();
+            const sessionId = String(ev?.sessionId || p['Session ID'] || `${mode === 'drop' ? 'DROP' : 'SETUP_FAIL'}-${idx + 1}`).trim();
+            const isDrop = mode === 'drop';
+            const isSetupFailure = mode === 'setupFailure';
+
+            return {
+                _source: 'event_inferred',
+                kind: 'UMTS_CALL',
+                synthetic: true,
+                sessionId,
+                callTransactionId: callId || '-',
+                imsi: String(p.IMSI || p.imsi || '').trim() || '-',
+                tmsi: String(p.TMSI || p.tmsi || '').trim() || '-',
+                startTime: timeVal || '-',
+                endTime: timeVal || '-',
+                markerTime: timeVal || undefined,
+                endType: isDrop ? 'DROP_EVENT_INFERRED' : 'CALL_SETUP_FAILURE_EVENT_INFERRED',
+                failureReason: {
+                    label: reasonTxt || (isDrop ? 'Drop Call (event inferred)' : 'Call Setup Failure (event inferred)'),
+                    cause: String(p['Drop Cause'] || p['Failure Cause'] || p['End Type'] || '').trim() || (isDrop ? 'DROP_EVENT_INFERRED' : 'CALL_SETUP_FAILURE_EVENT_INFERRED')
+                },
+                drop: isDrop,
+                setupFailure: isSetupFailure,
+                durationMs: null,
+                rrcStates: [],
+                rabLifecycle: [],
+                radioMeasurementsTimeline: []
+            };
+        };
+
+        const drops = (typeof window.filter3gDropCalls === 'function') ? window.filter3gDropCalls(log) : [];
+        const setupFails = (typeof window.filter3gCallFailure === 'function') ? window.filter3gCallFailure(log) : [];
+        const sessions = [];
+        const seen = new Set();
+        const pushUnique = (ev, mode) => {
+            if (!ev) return;
+            const t = String(ev.time ?? ev.timestamp ?? ev.ts ?? ev?.properties?.Time ?? '').trim();
+            const la = Number(ev.lat);
+            const lo = Number(ev.lng ?? ev.lon);
+            const e = String(ev.event ?? ev.event_name ?? ev.message ?? '').trim().toLowerCase();
+            const key = `${mode}|${t}|${Number.isFinite(la) ? la.toFixed(6) : '-'}|${Number.isFinite(lo) ? lo.toFixed(6) : '-'}|${e}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            sessions.push(makeSessionFromEvent(ev, mode, sessions.length));
+        };
+        drops.forEach((ev) => pushUnique(ev, 'drop'));
+        setupFails.forEach((ev) => pushUnique(ev, 'setupFailure'));
+
+        return sessions;
     };
 
     mapContainer.addEventListener('drop', (e) => {
@@ -21596,7 +21696,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const log = loadedLogs.find(l => l.id.toString() === currentCallSessionLogId.toString());
         if (!log) return;
 
-        const sessions = Array.isArray(log.callSessions) ? log.callSessions : [];
+        const sessions = (typeof window.getDisplayCallSessions === 'function')
+            ? window.getDisplayCallSessions(log)
+            : (Array.isArray(log.callSessions) ? log.callSessions : []);
         const title = document.getElementById('callSessionsModalTitle');
         const tbody = document.getElementById('callSessionsTableBody');
         const summary = document.getElementById('callSessionsSummary');
@@ -21645,7 +21747,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return true;
         });
 
-        summary.textContent = 'Showing ' + filtered.length + ' / ' + sessions.length + ' sessions';
+        const usingInferredSessions = (!(Array.isArray(log.callSessions) && log.callSessions.length > 0) && sessions.length > 0);
+        summary.textContent = 'Showing ' + filtered.length + ' / ' + sessions.length + ' sessions' + (usingInferredSessions ? ' (event-inferred)' : '');
 
         if (filtered.length === 0) {
             tbody.innerHTML = '<tr><td colspan="13" style="text-align:center; padding:14px; border:1px solid #334155; color:#9ca3af;">No sessions match the filters.</td></tr>';
@@ -21655,7 +21758,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         filtered.forEach(s => {
             const tr = document.createElement('tr');
             tr.style.background = '#0f172a';
-            const isUmtsCall = s?._source === 'umts' && s?.kind === 'UMTS_CALL';
+            const isUmtsCall = String(s?.kind || '').toUpperCase() === 'UMTS_CALL' || s?.drop === true || s?.setupFailure === true;
 
             const startMs = parseSessionTimeToMs(s.startTime);
             const endMs = parseSessionTimeToMs(s.endTime);
@@ -21666,7 +21769,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const rabCount = Array.isArray(s.rabLifecycle) ? s.rabLifecycle.length : 0;
             const measCount = Array.isArray(s.radioMeasurementsTimeline) ? s.radioMeasurementsTimeline.length : 0;
             const idsText = [s.imsi || '-', s.tmsi || '-'].join(' / ');
-            const endType = isUmtsCall ? (s.endType || '-') : 'RRC_SESSION';
+            const endType = isUmtsCall ? (s.endType || '-') : (s.endType || 'RRC_SESSION');
             const failureReason = s.failureReason?.label || '-';
             const ynHtml = (val) => val
                 ? '<span style="color:#f87171; font-weight:600;">Yes</span>'
@@ -23098,12 +23201,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
             // Global events entry (kept lightweight): always expose A3/A5 event button when events exist.
             if (Array.isArray(log.events) && log.events.length > 0) {
+                const dropCount = (typeof window.filter3gDropCalls === 'function') ? window.filter3gDropCalls(log).length : 0;
+                const failCount = (typeof window.filter3gCallFailure === 'function') ? window.filter3gCallFailure(log).length : 0;
+                const hofCount = (typeof window.filterHOFEvents === 'function') ? window.filterHOFEvents(log, { maxDeltaMs: 15000 }).length : 0;
                 actions.appendChild(addHeader('EVENTS'));
                 actions.appendChild(addAction('A3/A5 event', 'a3a5_event', 'event'));
                 actions.appendChild(addAction('RLF', 'rlf_event', 'event'));
-                actions.appendChild(addAction('HOF', 'hof_handover_failure', 'event'));
-                actions.appendChild(addAction('Drop Call', '3g_dropcall', 'event'));
-                actions.appendChild(addAction('Call Failure', '3g_call_failure', 'event'));
+                actions.appendChild(addAction(`HOF (${hofCount})`, 'hof_handover_failure', 'event'));
+                const dropBtn = addAction(`Drop Call (${dropCount})`, '3g_dropcall', 'event');
+                if (dropCount === 0) {
+                    dropBtn.style.opacity = '0.45';
+                    dropBtn.style.cursor = 'not-allowed';
+                    dropBtn.title = 'No confirmed drop-call events detected in this log.';
+                    dropBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+                    dropBtn.draggable = false;
+                }
+                actions.appendChild(dropBtn);
+                actions.appendChild(addAction(`Call Failure (${failCount})`, '3g_call_failure', 'event'));
             }
 
             // Resurrected Signaling Modal Button
@@ -23131,7 +23245,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             sigBtn.onmouseout = () => sigBtn.style.backgroundColor = 'rgba(168, 85, 247, 0.1)';
             actions.appendChild(sigBtn);
 
-            const sessionsCount = Array.isArray(log.callSessions) ? log.callSessions.length : 0;
+            const sessionsCount = (typeof window.getDisplayCallSessions === 'function')
+                ? window.getDisplayCallSessions(log).length
+                : (Array.isArray(log.callSessions) ? log.callSessions.length : 0);
             if (sessionsCount > 0) {
                 const sessionsBtn = document.createElement('div');
                 sessionsBtn.className = 'metric-item';
