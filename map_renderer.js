@@ -263,7 +263,7 @@ class MapRenderer {
         }
 
         const discreteMetrics = [
-            'cellId', 'cid', 'pci', 'sc', 'lac', 'serving_cell_name', 'Cell ID',
+            'cellId', 'cid', 'pci', 'sc', 'SC', 'Serving SC', 'rnc', 'RNC', 'Serving RNC', 'lac', 'LAC', 'Serving LAC', 'serving_cell_name', 'Cell ID',
             'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name',
             'RRC State', 'AS Event', 'HO Command', 'HO Completion', 'Active Set Size',
             'RLF indication', 'UL sync loss (UE can’t reach NodeB)', 'DL sync loss (Interference / coverage)', 'T310', 'T312',
@@ -1008,6 +1008,9 @@ class MapRenderer {
         const isIdentityMetric = (rangeKey === 'discrete' || metric === 'cellId' || metric === 'cid' || metric === 'Cell ID' ||
             metric === 'RRC State' || metric === 'Active Set Size' || metric === 'AS Event' ||
             metric === 'HO Command' || metric === 'HO Completion' ||
+            metric === 'sc' || metric === 'SC' || metric === 'Serving SC' ||
+            metric === 'rnc' || metric === 'RNC' || metric === 'Serving RNC' ||
+            metric === 'lac' || metric === 'LAC' || metric === 'Serving LAC' ||
             metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' ||
             metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel');
         const thresholds = (rangeKey && window.themeConfig && window.themeConfig.thresholds)
@@ -1019,6 +1022,13 @@ class MapRenderer {
             for (let i = pIdx; i < end; i++) {
                 const p = points[i];
                 const val = this.getMetricValue(p, metric);
+                const metricNorm = String(metric || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const isServingRscpMetric = (
+                    metricNorm === 'level' ||
+                    metricNorm === 'rscp' ||
+                    metricNorm === 'rscpnotcombined' ||
+                    metricNorm === 'servingrscp'
+                );
 
                 // Handle Identity Metrics Collection for Legend
                 if (isIdentityMetric) {
@@ -1045,7 +1055,11 @@ class MapRenderer {
                     if (matched) totalValidsForMetric++;
                 }
 
-                if (metric !== 'level' && metric !== 'quality') { // Only skip for specific metrics
+                // For Serving RSCP, draw only points that carry valid RSCP values (no gray placeholders).
+                if (isServingRscpMetric) {
+                    const nVal = Number(val);
+                    if (!Number.isFinite(nVal)) continue;
+                } else if (metric !== 'level' && metric !== 'quality') { // Only skip for specific metrics
                     if (val === undefined || val === null || val === 'N/A' || val === '') continue;
                 }
 
@@ -1324,6 +1338,25 @@ class MapRenderer {
         if (!this.eventLayers) this.eventLayers = {};
         if (this.eventLayers[id]) this.map.removeLayer(this.eventLayers[id]);
 
+        const normalizeEventName = (v) => String(v || '').toLowerCase().trim();
+        const buildSpecialEventIcon = (eventName) => {
+            const e = normalizeEventName(eventName);
+            let glyph = null;
+            if (e.includes('ul sync loss')) glyph = '↑';
+            else if (e.includes('dl sync loss')) glyph = '↓';
+            else if (e.includes('rlf indication') || e === 'rlf' || e.includes('radio link failure')) glyph = '!';
+            if (!glyph) return null;
+            return L.divIcon({
+                className: 'event-special-icon',
+                html:
+                    '<div style="width:24px;height:40px;display:flex;align-items:flex-end;justify-content:center;">' +
+                    '<span style="color:#ef4444;font-size:34px;line-height:1;font-weight:900;text-shadow:0 0 2px rgba(0,0,0,0.7),0 0 1px #fff;">' + glyph + '</span>' +
+                    '</div>',
+                iconSize: [24, 40],
+                iconAnchor: [12, 36]
+            });
+        };
+
         const layerGroup = L.layerGroup();
         const useIcon = options && options.iconUrl;
         const useFlag = !!(options && options.useFlag);
@@ -1394,20 +1427,23 @@ class MapRenderer {
                     break;
             }
 
-            const marker = useIcon
-                ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: true })
-                : useFlag
-                    ? L.marker([p.lat, p.lng], { icon: flagIcon, pane: 'eventsPane', interactive: true })
-                    : L.circleMarker([p.lat, p.lng], {
-                        radius: radius,
-                        color: '#fff', // White border for contrast
-                        weight: 2,
-                        fillColor: fillColor,
-                        fillOpacity: 1,
-                        pane: 'eventsPane',
-                        className: 'event-marker',
-                        interactive: true
-                    });
+            const specialIcon = buildSpecialEventIcon(p.event);
+            const marker = specialIcon
+                ? L.marker([p.lat, p.lng], { icon: specialIcon, pane: 'eventsPane', interactive: true })
+                : useIcon
+                    ? L.marker([p.lat, p.lng], { icon: iconObj, pane: 'eventsPane', interactive: true })
+                    : useFlag
+                        ? L.marker([p.lat, p.lng], { icon: flagIcon, pane: 'eventsPane', interactive: true })
+                        : L.circleMarker([p.lat, p.lng], {
+                            radius: radius,
+                            color: '#fff', // White border for contrast
+                            weight: 2,
+                            fillColor: fillColor,
+                            fillOpacity: 1,
+                            pane: 'eventsPane',
+                            className: 'event-marker',
+                            interactive: true
+                        });
 
             if (typeof this.layerZ === 'number') {
                 if (typeof marker.setZIndexOffset === 'function') marker.setZIndexOffset(this.layerZ);

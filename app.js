@@ -286,9 +286,32 @@ document.addEventListener('DOMContentLoaded', () => {
     window.getThresholdKey = (metric) => {
         if (!metric) return 'rsrp';
         const m = metric.toLowerCase();
+        const mNorm = m.replace(/[^a-z0-9]/g, '');
 
         // Discrete identity metrics (Cell/Network identifiers)
-        if (m.startsWith('__info_') || m.startsWith('__derived_') || m.includes('earfcn') || m.includes('tracking area') || m.includes('tac') || m.includes('enodeb') || m.includes('physical cell') || m.includes('pci') || m === 'cellid' || m.includes('cell id') || m.includes('cellidentity')) return 'discrete';
+        if (m.startsWith('__info_') ||
+            m.startsWith('__derived_') ||
+            m.includes('earfcn') ||
+            m.includes('tracking area') ||
+            m.includes('tac') ||
+            m.includes('enodeb') ||
+            m.includes('physical cell') ||
+            m.includes('pci') ||
+            m === 'cellid' ||
+            m.includes('cell id') ||
+            m.includes('cellidentity') ||
+            mNorm === 'lac' ||
+            mNorm === 'servinglac' ||
+            m.includes('location area code') ||
+            mNorm === 'freq' ||
+            mNorm === 'servingfreq' ||
+            mNorm === 'uarfcn' ||
+            mNorm === 'arfcn' ||
+            mNorm === 'sc' ||
+            mNorm === 'servingsc' ||
+            mNorm === 'scramblingcode' ||
+            mNorm === 'rnc' ||
+            mNorm === 'servingrnc') return 'discrete';
 
         // LTE neighbors specific legends
         if (m.includes('radio.lte.neighbor[') && m.endsWith('.rsrp')) return 'neighbor_rsrp';
@@ -4697,7 +4720,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const isDiscreteLegend = (window.getThresholdKey && window.getThresholdKey(metric) === 'discrete');
 
-                if (isDiscreteLegend || metric === 'cellId' || metric === 'cid' || metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
+                if (isDiscreteLegend || metric === 'cellId' || metric === 'cid' || metric === 'sc' || metric === 'SC' || metric === 'Serving SC' || metric === 'rnc' || metric === 'RNC' || metric === 'Serving RNC' || metric === 'freq' || metric === 'Freq' || metric === 'lac' || metric === 'LAC' || metric === 'Serving LAC' || metric === 'earfcn' || metric === 'EARFCN' || metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel') {
                     const ids = statsObj.activeMetricIds || [];
                     let sortedIds;
                     if (entry.__discreteCounts && entry.__discreteCounts.size > 0) {
@@ -14967,6 +14990,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'RRC State (decoded exact)': ['RRC State (decoded exact)', '__decoded_rrc_state_exact', 'Radio.Lte.Rrc.State', 'Radio.Lte.Rrc.ConnectionState'],
             'RRC Re-establishment': ['RRC Re-establishment', 'RRC Reestablishment', 'RRC Connection Reestablishment', 'RrcConnectionReestablishmentRequest', 'RrcConnectionReestablishmentComplete', 'RrcConnectionReestablishmentReject'],
             'RRC State': ['RRC State', 'rrcState', 'Radio.Lte.Rrc.State', 'Radio.Lte.Rrc.ConnectionState'],
+            'RRC_REL_CAUSE': ['RRC_REL_CAUSE', 'rrc_rel_cause', 'RRC Release Cause', 'RRC Release', 'RRC Cause', 'RRC_RELEASE_CAUSE'],
+            'CS_REL_CAUSE': ['CS_REL_CAUSE', 'cs_rel_cause', 'CS Release Cause', 'CS Release', 'CS Cause', 'CS_RELEASE_CAUSE'],
+            'IUCS_STATUS': ['IUCS_STATUS', 'iucs_status', 'IU-CS Status', 'IUCS Status', 'IU CS Status'],
+            'UL sync loss': ['UL sync loss (UE can’t reach NodeB)', 'UL sync loss', 'Uplink sync loss'],
+            'DL sync loss': ['DL sync loss (Interference / coverage)', 'DL sync loss', 'Downlink sync loss', 'Out of sync'],
+            'NodeB Tx Power': ['NodeB Tx Power', 'NodeB Tx', 'NodeB TxPower', 'NodeB Tx power'],
+            'A5 event': ['A5 event', 'A5 Event', 'Event A5', 'A3/A5 Event'],
             'HO Start/Complete': ['HO Start/Complete'],
             'A3/A5 triggers': ['A3/A5 triggers', 'A3 Trigger', 'A5 Trigger'],
             'A3/A5 event thresholds': ['A3/A5 event thresholds', 'A3/A5 thresholds', 'rrc_recfg_a3a5_thresholds_inferred'],
@@ -16056,6 +16086,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const a3a5RowsAll = nearEventsDetailed.filter((row) => /(^|[^a-z0-9])(a3|a5)([^a-z0-9]|$)|measurement.*report.*a[35]|event\s*a[35]|a3\/a5/i.test(String(row && row.name || '')));
         const hoCommandRowsAll = nearEventsDetailed.filter((row) => isHoCommandEvent(row && row.name));
         const hoCompleteRowsAll = nearEventsDetailed.filter((row) => isHoCompleteEvent(row && row.name));
+        const ulSyncLossRowsAll = nearEventsDetailed.filter((row) => /ul\s*sync\s*loss|uplink\s*sync\s*loss/i.test(String(row && row.name || '')));
+        const dlSyncLossRowsAll = nearEventsDetailed.filter((row) => /dl\s*sync\s*loss|downlink\s*sync\s*loss|out\s*of\s*sync/i.test(String(row && row.name || '')));
+        const a5RowsAll = nearEventsDetailed.filter((row) => /(^|[^a-z0-9])a5([^a-z0-9]|$)|event\s*a5|measurement.*report.*a5/i.test(String(row && row.name || '')));
         const hoFailureRowsAll = nearEventsDetailed.filter((row) => /(handover|ho).*(fail|failure|reject|abort|cancel)|\bhof\b|t304.*expir/i.test(String(row && row.name || '')));
         const rlfRowsAll = nearEventsDetailed.filter((row) => /\brlf\b|radio\s*link\s*failure|out\s*of\s*sync|t310|n310|rrc.*reestablish/i.test(String(row && row.name || '')));
         const reestRowsAll = nearEventsDetailed.filter((row) => /rrcconnectionreestablishment|rrc\s*re.?establish|re.?establishment/i.test(String(row && row.name || '')));
@@ -16871,6 +16904,49 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const hoExecutionTimeValue = getAny('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency') ?? hoExecutionTimeInferred;
         const hoStartCompleteValue = getAny('HO Start/Complete') ?? hoStartCompleteDecoded ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents;
         const hoFailureValue = getAny('HO failure', 'HO Failure', 'Handover Failure', 'HOF') ?? hoFailureInferred;
+        const ulSyncLossValue = pickFirstUsable(
+            getAny('UL sync loss (UE can’t reach NodeB)', 'UL sync loss', 'Uplink sync loss'),
+            summarizeNearEventRows(ulSyncLossRowsAll, 2)
+        );
+        const dlSyncLossValue = pickFirstUsable(
+            getAny('DL sync loss (Interference / coverage)', 'DL sync loss', 'Downlink sync loss', 'Out of sync'),
+            summarizeNearEventRows(dlSyncLossRowsAll, 2)
+        );
+        const rrcRelCauseValue = getAny(
+            'rrc_rel_cause',
+            'RRC Release Cause',
+            'RRC Release',
+            'RRC Cause',
+            'RRC_RELEASE_CAUSE'
+        ) ?? findByTokens(['rrc', 'release', 'cause']);
+        const csRelCauseValue = getAny(
+            'cs_rel_cause',
+            'CS Release Cause',
+            'CS Release',
+            'CS Cause',
+            'CS_RELEASE_CAUSE'
+        ) ?? findByTokens(['cs', 'release', 'cause']);
+        const iucsStatusValue = getAny(
+            'iucs_status',
+            'IU-CS Status',
+            'IUCS Status',
+            'IU CS Status'
+        ) ?? findByTokens(['iu', 'cs', 'status']);
+        const nodebTxPowerRaw = getAny(
+            'NodeB Tx Power',
+            'NodeB Tx',
+            'NodeB TxPower',
+            'NodeB Tx power'
+        ) ?? findByTokens(['nodeb', 'tx', 'power']);
+        const nodebTxPowerValue = (() => {
+            const n = Number(nodebTxPowerRaw);
+            if (!Number.isFinite(n)) return nodebTxPowerRaw;
+            return Number.isInteger(n) ? `${n} dBm` : `${n.toFixed(1)} dBm`;
+        })();
+        const a5EventValue = pickFirstUsable(
+            getAny('A5 event', 'A5 Event', 'Event A5'),
+            summarizeNearEventRows(a5RowsAll, 2)
+        );
         const matchedFailedSession = (() => {
             if (!activeLog || !Array.isArray(activeLog.callSessions) || !activeLog.callSessions.length) return null;
             const explicitMode = getSessionModeFromMapPoint(p);
@@ -17239,14 +17315,21 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('RRC State', rrcStateFinal);
         pushMetric('RRC Re-establishment', rrcReestablishmentValue, rrcReestablishmentDecodedSource ? { source: 'decoded' } : {});
         pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('UL sync loss', ulSyncLossValue);
+        pushMetric('DL sync loss', dlSyncLossValue);
         pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('A5 event', a5EventValue);
         pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : {});
         pushMetric('A3/A5 threshold source time', a3a5ThresholdSourceTimeValue);
         pushMetric('A3/A5 threshold source PCI', a3a5ThresholdSourcePciValue);
         pushMetric('A3/A5 threshold context check', a3a5ThresholdContextCheckValue);
+        pushMetric('RRC_REL_CAUSE', rrcRelCauseValue);
+        pushMetric('CS_REL_CAUSE', csRelCauseValue);
+        pushMetric('IUCS_STATUS', iucsStatusValue);
         pushMetric('HO command', hoCommandValue, hoCommandDecodedSource ? { source: 'decoded' } : {});
         pushMetric('HO execution time', hoExecutionTimeValue, hoExecutionTimeDecodedSource ? { source: 'decoded' } : {});
         pushMetric('HO failure', hoFailureValue);
+        pushMetric('NodeB Tx Power', nodebTxPowerValue);
         pushMetric('Drop Call', dropCallValue);
         pushMetric('Drop Cause', dropCauseValue);
         pushMetric('RLF', rlfValue);
@@ -17328,14 +17411,21 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'RRC State': rrcStateFinal,
             'RRC Re-establishment': rrcReestablishmentValue,
             'HO Start/Complete': hoStartCompleteValue,
+            'UL sync loss': ulSyncLossValue,
+            'DL sync loss': dlSyncLossValue,
             'A3/A5 triggers': a3a5TriggersValue,
+            'A5 event': a5EventValue,
             'A3/A5 event thresholds': a3a5ThresholdsValue,
             'A3/A5 threshold source time': a3a5ThresholdSourceTimeValue,
             'A3/A5 threshold source PCI': a3a5ThresholdSourcePciValue,
             'A3/A5 threshold context check': a3a5ThresholdContextCheckValue,
+            'RRC_REL_CAUSE': rrcRelCauseValue,
+            'CS_REL_CAUSE': csRelCauseValue,
+            'IUCS_STATUS': iucsStatusValue,
             'HO command': hoCommandValue,
             'HO execution time': hoExecutionTimeValue,
             'HO failure': hoFailureValue,
+            'NodeB Tx Power': nodebTxPowerValue,
             'Drop Call': dropCallValue,
             'Drop Cause': dropCauseValue,
             'RLF': rlfValue,
@@ -17405,10 +17495,17 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 'RRC State (decoded exact)',
                 'RRC State',
                 'RRC Re-establishment',
+                'UL sync loss',
+                'DL sync loss',
+                'RRC_REL_CAUSE',
+                'CS_REL_CAUSE',
+                'IUCS_STATUS',
                 'HO Start/Complete',
+                'A5 event',
                 'HO command',
                 'HO execution time',
                 'HO failure',
+                'NodeB Tx Power',
                 'Drop Call',
                 'Drop Cause',
                 'RLF',
@@ -22453,24 +22550,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 '<span style="background:#3b82f6; color:white; padding:2px 4px; border-radius:2px;">' + log.tech + '</span>' +
                 '<span style="margin-left:5px;">' + count + ' pts</span>';
 
-            // --- NEW: Detected Config Display (Event 1A) ---
-            if (log.config) {
-                const c = log.config;
-                const configDiv = document.createElement('div');
-                configDiv.style.cssText = 'margin-top:5px; padding:5px; background:#1f2937; border-radius:3px; font-size:10px; color:#9ca3af; border-left:2px solid #6ee7b7;';
-
-                let configHtml = '<div style="margin-bottom:2px; font-weight:bold; color:#6ee7b7;">Handover (SHO / IFHO) parameters</div>';
-
-                // Button to open Grid
-                configHtml += '<button onclick="window.showEvent1AGrid(\'' + log.id + '\')" style="margin-top:5px; width:100%; font-size:10px; padding:3px; background:#374151; border:1px solid #4b5563; color:#e5e7eb; cursor:pointer; border-radius:2px;">Event 1A – Add cell to Active Set</button>';
-
-                configDiv.innerHTML = configHtml;
-                stats.appendChild(configDiv);
-            }
-
             // Actions
             const actions = document.createElement('div');
             actions.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
+            const isSyncOrRlfMetric = (name) => {
+                const n = String(name || '').toLowerCase();
+                return n === 'rlf indication' ||
+                    n.includes('ul sync loss') ||
+                    n.includes('dl sync loss');
+            };
 
             const addAction = (label, param, type = 'metric') => {
                 const btn = document.createElement('div');
@@ -22659,6 +22747,38 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     } else if (type === 'driver_entry') {
                         window.showMetricOptions(e, log.id, param, 'driver_entry');
                     } else {
+                        if (isSyncOrRlfMetric(param) && window.mapRenderer) {
+                            const title = String(param || '');
+                            const matching = (Array.isArray(log.points) ? log.points : []).filter((pt) => {
+                                const v = pt && pt.properties ? pt.properties[title] : undefined;
+                                return v !== undefined && v !== null && String(v).trim() !== '' && String(v).toUpperCase() !== 'N/A';
+                            }).map((pt) => ({
+                                ...pt,
+                                type: 'EVENT',
+                                event: title
+                            }));
+                            const layerId = 'event__' + log.id + '__' + title.replace(/[^a-zA-Z0-9_-]/g, '_');
+                            window.mapRenderer.addEventsLayer(layerId, matching, {
+                                useFlag: false
+                            });
+                            if (!window.eventLegendEntries) window.eventLegendEntries = {};
+                            const eventKey = log.id + '::metric_event::' + title;
+                            window.eventLegendEntries[eventKey] = {
+                                title: title,
+                                iconUrl: null,
+                                color: '#dc2626',
+                                count: matching.length,
+                                logId: log.id,
+                                points: matching,
+                                layerId: layerId,
+                                visible: true
+                            };
+                            if (window.moveDTLayerToTop) window.moveDTLayerToTop(eventKey);
+                            if (window.applyDTLayerOrder) window.applyDTLayerOrder();
+                            if (window.updateLegend) window.updateLegend();
+                            if (window.updateDTLayersSidebar) window.updateDTLayersSidebar();
+                            return;
+                        }
                         window.showMetricOptions(e, log.id, param, 'regular');
                     }
                 };
@@ -23035,15 +23155,74 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     'Call / Events / State': [],
                     'Other': []
                 } : {
-                    'Standard': [],
+                    'Serving set': [],
+                    'Active Set': [],
+                    'Monitored Set': [],
+                    'Detected Set': [],
                     'DT Analysis': [],
                     'POWER CONTROL': [],
                     'HANDOVER & ACTIVE SET ANALYSIS': [],
                     'RADIO LINK FAILURE (RLF)': [],
-                    'RRC & CS RELEASE CAUSE': [],
-                    'Active Set': [],
-                    'Monitored Set': [],
-                    'Detected Set': []
+                    'RRC & CS RELEASE CAUSE': []
+                };
+                const normMetricName = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                const isServing3GMetric = (metric) => {
+                    const n = normMetricName(metric);
+                    return n === 'level' ||
+                        n === 'rscp' ||
+                        n === 'servingrscp' ||
+                        n === 'ecno' ||
+                        n === 'servingecno' ||
+                        n === 'sc' ||
+                        n === 'servingsc' ||
+                        n === 'scramblingcode' ||
+                        n === 'cellid' ||
+                        n === 'servingcellid' ||
+                        n === 'freq' ||
+                        n === 'servingfreq' ||
+                        n === 'uarfcn' ||
+                        n === 'lac' ||
+                        n === 'servinglac' ||
+                        n === 'rnc' ||
+                        n === 'servingrnc' ||
+                        n === 'band' ||
+                        n === 'servingband';
+                };
+                const isServing2GMetric = (metric) => {
+                    const n = normMetricName(metric);
+                    return n.includes('rxlev') ||
+                        n.includes('rxqual') ||
+                        n.includes('bcch') ||
+                        n.includes('bsic') ||
+                        n === 'lac' ||
+                        n === 'servinglac' ||
+                        n === 'band' ||
+                        n === 'servingband' ||
+                        n === 'freq' ||
+                        n === 'servingfreq';
+                };
+                const formatServingLabel3G = (metric) => {
+                    const n = normMetricName(metric);
+                    if (n === 'level' || n === 'rscp' || n === 'servingrscp') return 'Serving RSCP';
+                    if (n === 'ecno' || n === 'servingecno') return 'Serving EcNo';
+                    if (n === 'sc' || n === 'servingsc' || n === 'scramblingcode') return 'Serving SC';
+                    if (n === 'cellid' || n === 'servingcellid') return 'Serving Cell ID';
+                    if (n === 'freq' || n === 'servingfreq' || n === 'uarfcn') return 'Serving Freq';
+                    if (n === 'lac' || n === 'servinglac') return 'Serving LAC';
+                    if (n === 'rnc' || n === 'servingrnc') return 'Serving RNC';
+                    if (n === 'band' || n === 'servingband') return 'Serving Band';
+                    return metric;
+                };
+                const formatServingLabel2G = (metric) => {
+                    const n = normMetricName(metric);
+                    if (n.includes('rxlev')) return 'Serving RxLev';
+                    if (n.includes('rxqual')) return 'Serving RxQual';
+                    if (n.includes('bcch')) return 'Serving BCCH';
+                    if (n.includes('bsic')) return 'Serving BSIC';
+                    if (n === 'lac' || n === 'servinglac') return 'Serving LAC';
+                    if (n === 'band' || n === 'servingband') return 'Serving Band';
+                    if (n === 'freq' || n === 'servingfreq') return 'Serving Freq';
+                    return metric;
                 };
 
                 log.customMetrics.forEach(m => {
@@ -23074,12 +23253,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         if (/^a\d+_/.test(low)) groups['Active Set'].push(m);
                         else if (/^m\d+_/.test(low)) groups['Monitored Set'].push(m);
                         else if (/^d\d+_/.test(low)) groups['Detected Set'].push(m);
+                        else if (isServing3GMetric(m) || isServing2GMetric(m)) groups['Serving set'].push(m);
                         else if (m === 'UE Tx Power' || m === 'NodeB Tx Power' || m === 'TPC') groups['POWER CONTROL'].push(m);
                         else if (m === 'RRC State' || m === 'bler_dl' || m === 'bler_ul' || m === 'Throughput' || m === 'RSSI') groups['DT Analysis'].push(m);
                         else if (m === 'Active Set Size' || m === 'AS Event' || m === 'HO Command' || m === 'HO Completion') groups['HANDOVER & ACTIVE SET ANALYSIS'].push(m);
                         else if (m === 'RLF indication' || m === 'UL sync loss (UE can’t reach NodeB)' || m === 'DL sync loss (Interference / coverage)' || m === 'T310' || m === 'T312') groups['RADIO LINK FAILURE (RLF)'].push(m);
                         else if (m === 'rrc_rel_cause' || m === 'cs_rel_cause' || m === 'iucs_status') groups['RRC & CS RELEASE CAUSE'].push(m);
-                        else groups['Standard'].push(m);
+                        else groups['DT Analysis'].push(m);
                     }
                 });
 
@@ -23103,8 +23283,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     body.style.flexDirection = 'column';
                     body.style.gap = '4px';
 
-                    // Open "Standard" by default
-                    if (groupName === 'Standard') {
+                    // Open "Serving set" by default
+                    if (groupName === 'Serving set') {
                         body.style.display = 'flex';
                         header.innerHTML = '▼ ' + groupName;
                     }
@@ -23116,23 +23296,64 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         header.innerHTML = (isHidden ? '▼ ' : '▶ ') + groupName;
                     };
 
-                    const seenLabels = new Set();
-                    list.forEach(metric => {
-                        if (String(metric).toLowerCase() === 'analyze point') return;
-                        let label = metric;
-                        if (metric === 'level' || metric === 'Level') label = 'RSCP';
-                        if (metric === 'ecno' || metric === 'EcNo') label = 'Serving EcNo';
-                        if (metric === 'sc' || metric === 'SC') label = 'Scrambling Code';
-                        if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
-                        if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
-                        const labelKey = String(label).toLowerCase();
-                        if (seenLabels.has(labelKey)) return;
-                        seenLabels.add(labelKey);
-
-                        // Use existing helper to create button
-                        const btn = addAction(label, metric);
-                        body.appendChild(btn);
-                    });
+                    if (!log.trpRunId && groupName === 'Serving set') {
+                        const serving3G = list.filter((metric) => isServing3GMetric(metric));
+                        const serving2G = list.filter((metric) => isServing2GMetric(metric));
+                        const renderServingSubset = (title, subset, formatter) => {
+                            const subWrap = document.createElement('div');
+                            subWrap.style.marginBottom = '2px';
+                            const subHead = document.createElement('div');
+                            subHead.innerHTML = '▼ ' + title;
+                            subHead.style.cssText = 'font-size:10px; color:#93c5fd; margin:2px 0 4px 0; font-weight:700; letter-spacing:0.4px; cursor:pointer; user-select:none;';
+                            const subBody = document.createElement('div');
+                            subBody.style.display = 'flex';
+                            subBody.style.flexDirection = 'column';
+                            subBody.style.gap = '4px';
+                            subBody.style.paddingLeft = '6px';
+                            subHead.onclick = () => {
+                                const hidden = subBody.style.display === 'none';
+                                subBody.style.display = hidden ? 'flex' : 'none';
+                                subHead.innerHTML = (hidden ? '▼ ' : '▶ ') + title;
+                            };
+                            if (!subset.length) {
+                                const empty = document.createElement('div');
+                                empty.textContent = 'N/A';
+                                empty.style.cssText = 'font-size:10px; color:#6b7280; margin:0 0 6px 2px;';
+                                subBody.appendChild(empty);
+                            } else {
+                                const seenLabels = new Set();
+                                subset.forEach((metric) => {
+                                    if (String(metric).toLowerCase() === 'analyze point') return;
+                                    const label = formatter(metric);
+                                    const key = String(label).toLowerCase();
+                                    if (seenLabels.has(key)) return;
+                                    seenLabels.add(key);
+                                    subBody.appendChild(addAction(label, metric));
+                                });
+                            }
+                            subWrap.appendChild(subHead);
+                            subWrap.appendChild(subBody);
+                            body.appendChild(subWrap);
+                        };
+                        renderServingSubset('3G Serving set', serving3G, formatServingLabel3G);
+                        renderServingSubset('2G Serving set', serving2G, formatServingLabel2G);
+                    } else {
+                        const seenLabels = new Set();
+                        list.forEach(metric => {
+                            if (String(metric).toLowerCase() === 'analyze point') return;
+                            let label = metric;
+                            if (metric === 'level' || metric === 'Level') label = 'RSCP';
+                            if (metric === 'ecno' || metric === 'EcNo') label = 'Serving EcNo';
+                            if (metric === 'sc' || metric === 'SC') label = 'Scrambling Code';
+                            if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
+                            if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
+                            const labelKey = String(label).toLowerCase();
+                            if (seenLabels.has(labelKey)) return;
+                            seenLabels.add(labelKey);
+                            const btn = addAction(label, metric);
+                            body.appendChild(btn);
+                        });
+                    }
 
                     groupContainer.appendChild(header);
                     groupContainer.appendChild(body);
