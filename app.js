@@ -15327,9 +15327,17 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             findByTokens(['harq', 'nack']) ??
             findByTokens(['harq', 'ack']) ??
             findByTokens(['harq']);
-        const drxValue = getByTrpLabel('DRX', 'DRX (DTX)') ??
-            getAny('DRX', 'Drx', 'DRX State', 'RRC DRX State', 'Radio.Lte.Rrc.DrxState', 'Radio.Lte.ServingCell[8].DrxState', 'Radio.Lte.ServingCellTotal.DrxState') ??
-            findByTokens(['drx']);
+        const drxEntry = getStrictMetricEntry(
+            'DRX',
+            'Drx',
+            'DRX (DTX)',
+            'DRX State',
+            'RRC DRX State',
+            'Radio.Lte.Rrc.DrxState',
+            'Radio.Lte.ServingCell[8].DrxState',
+            'Radio.Lte.ServingCellTotal.DrxState'
+        ) ?? getByTrpLabelEntry('DRX', 'DRX (DTX)');
+        const drxValue = metricValueFromEntry(drxEntry);
         const txPowerRaw = getByTrpLabel('Tx power') ??
             getAny(
                 'Tx power',
@@ -15385,14 +15393,16 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (derived !== null) return derived;
             return activeSetSizeValue;
         })();
-        const cqiDlValue = getAny(
+        const cqiDlEntry = getStrictMetricEntry(
             'Radio.Lte.ServingCell[8].Stream[2].Cqi',
             'Radio.Lte.ServingCell[8].Cqi',
             'Radio.Lte.ServingCellTotal.Cqi',
             'CQI (DL)',
             'CQI',
-            'Downlink CQI'
-        ) ?? findByTokens(['cqi']);
+            'Downlink CQI',
+            'cqi_dl'
+        );
+        const cqiDlValue = metricValueFromEntry(cqiDlEntry);
         const dlMcsValue = getAny('DL MCS', 'Radio.Lte.ServingCell[8].DlMcs', 'Radio.Lte.ServingCellTotal.DlMcs') ?? findByTokens(['dl', 'mcs']) ?? findByTokens(['pdsch', 'mcs']);
         const ulMcsValue = getAny('UL MCS', 'Radio.Lte.ServingCell[8].UlMcs', 'Radio.Lte.ServingCellTotal.UlMcs') ?? findByTokens(['ul', 'mcs']) ?? findByTokens(['pusch', 'mcs']);
         const dlMod = getByTrpLabel('Modulation (DL/UL)') ?? getAny('DL Modulation', 'Radio.Lte.ServingCell[8].DlModulation', 'Radio.Lte.ServingCellTotal.DlModulation') ?? findByTokens(['dl', 'modulation']) ?? findByTokens(['pdsch', 'modulation']);
@@ -15403,9 +15413,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (n < 0 || n > 2000) return null;
             return Number.isInteger(n) ? n : Number(n.toFixed(1));
         };
-        const timingAdvanceRaw = getAny('Timing Advance', 'Radio.Lte.ServingCell[8].TimingAdvance', 'Radio.Lte.ServingCellTotal.TimingAdvance', 'TA') ??
-            findByTokens(['timing', 'advance']) ??
-            findByTokens(['timingadvance']);
+        const timingAdvanceEntry = getStrictMetricEntry(
+            'Timing Advance',
+            'timingAdvance',
+            'Radio.Lte.ServingCell[8].TimingAdvance',
+            'Radio.Lte.ServingCellTotal.TimingAdvance',
+            'TA'
+        );
+        const timingAdvanceRaw = metricValueFromEntry(timingAdvanceEntry);
         const timingAdvanceValue = normalizeTa(timingAdvanceRaw);
         const pmiValue = getAny('PMI', 'Radio.Lte.ServingCell[8].Pmi', 'Radio.Lte.ServingCellTotal.Pmi') ?? findByTokens(['pmi']);
         const rankLayersEntry = getByTrpLabelEntry('Rank/Layers (feedback proxy)') ??
@@ -15567,21 +15582,16 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (bw > 1000) bw = bw / 1e6; // Hz -> MHz
             return Number(bw.toFixed(1));
         };
-        const dlBandwidthRaw = getByTrpLabel('BW', 'DL bandwidth', 'Downlink bandwidth', 'Bandwidth') ??
-            getAny(
-                'BW',
-                'DL bandwidth',
-                'Downlink bandwidth',
-                'Bandwidth',
-                'Channel bandwidth',
-                'Radio.Lte.ServingCell[8].Downlink.Bandwidth',
-                'Radio.Lte.ServingCellTotal.Downlink.Bandwidth'
-            ) ??
-            findByTokens(['downlink', 'bandwidth']) ??
-            findByTokens(['dl', 'bandwidth']) ??
-            findByTokens(['channel', 'bandwidth']) ??
-            findByTokens(['bandwidth']) ??
-            findByTokens(['bw']);
+        const dlBandwidthEntry = getStrictMetricEntry(
+            'BW',
+            'DL bandwidth',
+            'Downlink bandwidth',
+            'Bandwidth',
+            'Channel bandwidth',
+            'Radio.Lte.ServingCell[8].Downlink.Bandwidth',
+            'Radio.Lte.ServingCellTotal.Downlink.Bandwidth'
+        ) ?? getByTrpLabelEntry('BW', 'DL bandwidth', 'Downlink bandwidth', 'Bandwidth');
+        const dlBandwidthRaw = metricValueFromEntry(dlBandwidthEntry);
         const dlBandwidthMhz = parseBandwidthMhz(dlBandwidthRaw);
         const bwValue = (() => {
             if (dlBandwidthMhz !== null) return `${dlBandwidthMhz} MHz`;
@@ -15631,12 +15641,31 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const ueCategoryValue = getByTrpLabel('UE category', 'UE Category') ??
             getAny('UE category', 'UE Category', 'UE Cat', '__info_ue_category', '__info_ue_category_inferred') ??
             getFromRunInfo('ue_category', 'ue_category_inferred');
-        const mimoCapabilityValue = getByTrpLabel('MIMO capability') ??
-            getAny('MIMO capability', 'MIMO Capability', '__info_mimo_capability', '__info_mimo_capability_inferred') ??
-            getFromRunInfo('mimo_capability', 'mimo_capability_inferred');
-        const caCapabilityValue = getByTrpLabel('CA capability') ??
-            getAny('CA capability', 'CA Capability', 'Carrier Aggregation capability', '__info_ca_capability', '__info_ca_capability_inferred') ??
-            getFromRunInfo('ca_capability', 'ca_capability_inferred');
+        const mimoCapabilityEntry = getStrictMetricEntry(
+            'MIMO capability',
+            'MIMO Capability',
+            '__info_mimo_capability',
+            '__info_mimo_capability_inferred'
+        ) ?? getByTrpLabelEntry('MIMO capability');
+        const mimoCapabilityValue = metricValueFromEntry(mimoCapabilityEntry) ?? getFromRunInfo('mimo_capability', 'mimo_capability_inferred');
+        const caCapabilityEntry = getStrictMetricEntry(
+            'CA capability',
+            'CA Capability',
+            'Carrier Aggregation capability',
+            '__info_ca_capability',
+            '__info_ca_capability_inferred'
+        ) ?? getByTrpLabelEntry('CA capability');
+        const caCapabilityValue = metricValueFromEntry(caCapabilityEntry) ?? getFromRunInfo('ca_capability', 'ca_capability_inferred');
+        const sinrEntry = getStrictMetricEntry(
+            'SINR',
+            'sinr',
+            'RS-SINR',
+            'RSSINR',
+            'RS SINR',
+            'Radio.Lte.ServingCell[8].RsSinr',
+            'Radio.Lte.ServingCellTotal.RsSinr'
+        );
+        const sinrValue = metricValueFromEntry(sinrEntry);
         const estimateActiveCcCount = (() => {
             const direct = getAny(
                 'CA active CC',
@@ -15816,15 +15845,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             findByTokens(['rlc', 'retx']);
         const l1l2PerTtiExactValue = getAny('L1/L2 per-TTI exact', '__l1l2_per_tti_exact');
         const l1l2DecodeNoteValue = getAny('L1/L2 decode note', '__l1l2_decode_note');
-        const blerDlValue = getByTrpLabel('BLER DL') ??
-            getAny('BLER DL', 'blerDl', 'DL BLER', 'Radio.Lte.ServingCell[8].BlerDl', 'Radio.Lte.ServingCellTotal.BlerDl', 'DL IBLER (%)') ??
-            findByTokens(['bler', 'dl']) ??
-            findByTokens(['dl', 'ibler']) ??
-            findByTokens(['bler']);
-        const blerUlValue = getByTrpLabel('BLER UL', 'UL BLER') ??
-            getAny('BLER UL', 'blerUl', 'UL BLER', 'Radio.Lte.ServingCell[8].BlerUl', 'Radio.Lte.ServingCellTotal.BlerUl', 'UL IBLER (%)') ??
-            findByTokens(['bler', 'ul']) ??
-            findByTokens(['ul', 'ibler']);
+        const blerDlEntry = getStrictMetricEntry(
+            'BLER DL',
+            'bler_dl',
+            'blerDl',
+            'DL BLER',
+            'Radio.Lte.ServingCell[8].BlerDl',
+            'Radio.Lte.ServingCellTotal.BlerDl',
+            'DL IBLER (%)'
+        ) ?? getByTrpLabelEntry('BLER DL');
+        const blerDlValue = metricValueFromEntry(blerDlEntry);
+        const blerUlEntry = getStrictMetricEntry(
+            'BLER UL',
+            'bler_ul',
+            'blerUl',
+            'UL BLER',
+            'Radio.Lte.ServingCell[8].BlerUl',
+            'Radio.Lte.ServingCellTotal.BlerUl',
+            'UL IBLER (%)'
+        ) ?? getByTrpLabelEntry('BLER UL', 'UL BLER');
+        const blerUlValue = metricValueFromEntry(blerUlEntry);
         const normalizePercentInput = (v) => {
             if (v === undefined || v === null) return null;
             let n = Number(v);
@@ -17437,10 +17477,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('DL throughput', dlThroughput);
         pushMetric(servingFreqMetricLabel, sFreq);
         pushMetric('Band', bandValue);
-        pushMetric('BW', bwValue);
+        pushMetric('BW', bwValue, metricMetaFromResolvedEntry(dlBandwidthEntry));
         pushMetric('UE category', ueCategoryValue);
-        pushMetric('MIMO capability', mimoCapabilityValue);
-        pushMetric('CA capability', caCapabilityValue);
+        pushMetric('MIMO capability', mimoCapabilityValue, metricMetaFromResolvedEntry(mimoCapabilityEntry));
+        pushMetric('CA capability', caCapabilityValue, metricMetaFromResolvedEntry(caCapabilityEntry));
         pushMetric('CA Status', caStatusValue);
         pushMetric('CA SCell Add/Remove', caScellAddRemoveValue);
         pushMetric(servingScMetricLabel, sSC, { estimated: false });
@@ -17453,7 +17493,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             pushMetric('RSSI', rssiValue);
             pushMetric('Active Set Size', activeSetSizeValueFinal);
         }
-        pushMetric('SINR', getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr']));
+        pushMetric('SINR', sinrValue, metricMetaFromResolvedEntry(sinrEntry));
         pushMetric('Tracking area code', tacValue);
         pushMetric('UL throughput', ulThroughput);
         pushMetric('RTT', rttValue);
@@ -17462,7 +17502,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('Bearer active', bearerActiveValue);
         pushMetric('Data Session Start/Stop', dataSessionStartStopValue);
         pushMetric('VoLTE Call Start/End', volteCallStartEndValue);
-        pushMetric('DRX (DTX)', drxValueFinal);
+        pushMetric('DRX (DTX)', drxValueFinal, metricMetaFromResolvedEntry(drxEntry));
         pushMetric('Tx power', txPowerValue);
         pushMetric('Estimated RB usage', rbUsageDisplay);
         pushMetric('Allocated RBs', allocatedRbsValueDisplay, allocatedRbsNormInfo.flagged ? { estimated: true } : {});
@@ -17473,12 +17513,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('TBS', tbsValue);
         pushMetric('TBS UL', tbsUlValue);
         pushMetric('#layers', layersValue);
-        pushMetric('CQI (DL)', cqiDlValue);
+        pushMetric('CQI (DL)', cqiDlValue, metricMetaFromResolvedEntry(cqiDlEntry));
         pushMetric('DL MCS', dlMcsValue);
         pushMetric('UL MCS', ulMcsValue);
         pushMetric('Code Rate', codeRateValue);
         pushMetric('Modulation (DL/UL)', ((dlMod || ulMod) ? `${normalizeMissing(dlMod)} / ${normalizeMissing(ulMod)}` : 'N/A'));
-        pushMetric('Timing Advance', timingAdvanceValue);
+        pushMetric('Timing Advance', timingAdvanceValue, metricMetaFromResolvedEntry(timingAdvanceEntry));
         pushMetric('MIMO/CA', getAny('MIMO/CA', 'MIMO', 'CA') ?? findByTokens(['mimo']) ?? findByTokens(['carrier', 'aggregation']));
         pushMetric('PMI', pmiValue);
         pushMetric('Rank (RI)', rankRiValue, rankRiMeta);
@@ -17492,8 +17532,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
         pushHeader('RELIABILITY');
         pushMetric(harqHasDirect ? 'HARQ' : 'HARQ (proxy)', harqDisplay);
-        pushMetric('BLER DL', blerDlValue);
-        pushMetric('BLER UL', blerUlValue);
+        pushMetric('BLER DL', blerDlValue, metricMetaFromResolvedEntry(blerDlEntry));
+        pushMetric('BLER UL', blerUlValue, metricMetaFromResolvedEntry(blerUlEntry));
 
         pushHeader('EVENTS');
         pushMetric('RRC State (decoded exact)', rrcStateExactDisplay, rrcStateExactSource ? { source: rrcStateExactSource } : {});
@@ -17550,7 +17590,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'EcNo': sEcNo,
             'RSSI': rssiValue,
             'Active Set Size': activeSetSizeValueFinal,
-            'SINR': (getAny('SINR', 'RS-SINR', 'RSSINR', 'RS SINR') ?? findByTokens(['sinr'])),
+            'SINR': sinrValue,
             'Tracking area code': tacValue,
             'UL throughput': ulThroughput,
             'RTT': rttValue,

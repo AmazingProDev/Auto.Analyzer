@@ -3027,6 +3027,11 @@ const NMFParser = {
         let latestUeTxPower = null;
         let latestNodeBTxPower = null;
         let latestTpc = null;
+        let latestLteSinr = null;
+        let latestTimingAdvance = null;
+        let latestCqiDl = null;
+        let latestBlerDl = null;
+        let latestBlerUl = null;
         let lastAsSize = null;
         // Re-init RAT/serving state
         let state = { imsi: null, cid: null, rat: 'UNKNOWN' };
@@ -3226,6 +3231,17 @@ const NMFParser = {
             } else if (upperHeader === 'RXPC') {
                 const val = parseFloat(parts[5]);
                 if (!isNaN(val)) latestNodeBTxPower = val;
+            } else if (upperHeader === 'TAD') {
+                const ta = parseFloat(parts[4]);
+                if (!isNaN(ta) && ta >= 0 && ta <= 2000) latestTimingAdvance = ta;
+            } else if (upperHeader === 'CQI') {
+                const tech = parseInt(parts[3], 10);
+                if (tech === 7) {
+                    const cqiA = Number(parts[7]);
+                    const cqiB = Number(parts[8]);
+                    if (Number.isFinite(cqiA) && cqiA >= 1 && cqiA <= 15) latestCqiDl = cqiA;
+                    else if (Number.isFinite(cqiB) && cqiB >= 1 && cqiB <= 15) latestCqiDl = cqiB;
+                }
             } else if (upperHeader === 'RRD') {
                 const cause = parts[6];
                 if (cause === '1' || cause === '5') {
@@ -3718,6 +3734,9 @@ const NMFParser = {
                             servingSc = servingBlock.pci;
                             servingLevel = servingBlock.rsrp;
                             servingEcNo = servingBlock.rsrq;
+                            if (Number.isFinite(servingBlock.sinr) && servingBlock.sinr >= -30 && servingBlock.sinr <= 60) {
+                                latestLteSinr = servingBlock.sinr;
+                            }
                         }
 
                         lteBlocks.forEach((b) => {
@@ -3797,11 +3816,21 @@ const NMFParser = {
                     point.earfcn = servingFreq;
                     point.band = servingBand;
                     point.tac = state.lac;
+                    if (Number.isFinite(latestLteSinr)) point.sinr = latestLteSinr;
+                    if (Number.isFinite(latestTimingAdvance)) point.timingAdvance = latestTimingAdvance;
+                    if (Number.isFinite(latestCqiDl)) point.cqi_dl = latestCqiDl;
+                    if (Number.isFinite(latestBlerDl)) point.bler_dl = latestBlerDl;
+                    if (Number.isFinite(latestBlerUl)) point.bler_ul = latestBlerUl;
                     point.properties['Serving PCI'] = servingSc;
                     point.properties['Serving EARFCN'] = (servingFreq !== null ? servingFreq : 'N/A');
                     point.properties['Serving RSRQ'] = servingEcNo;
                     point.properties['Serving TAC'] = state.lac;
                     point.properties['Band'] = servingBand || 'N/A';
+                    if (Number.isFinite(latestLteSinr)) point.properties['SINR'] = latestLteSinr;
+                    if (Number.isFinite(latestTimingAdvance)) point.properties['Timing Advance'] = latestTimingAdvance;
+                    if (Number.isFinite(latestCqiDl)) point.properties['CQI (DL)'] = latestCqiDl;
+                    if (Number.isFinite(latestBlerDl)) point.properties['BLER DL'] = latestBlerDl;
+                    if (Number.isFinite(latestBlerUl)) point.properties['BLER UL'] = latestBlerUl;
                 }
                 if (techId === 5 && umtsCellmeasSubtypeStats) {
                     point.properties['CELLMEAS Neighbor RSCP'] = umtsCellmeasSubtypeStats.rscpAvailable
@@ -4015,6 +4044,8 @@ const NMFParser = {
                     const ulBler = parseFloat(parts[10]);
 
                     if (!isNaN(dlBler) || !isNaN(ulBler)) {
+                        if (!isNaN(dlBler)) latestBlerDl = dlBler;
+                        if (!isNaN(ulBler)) latestBlerUl = ulBler;
                         allPoints.push({
                             lat: gps.lat, lng: gps.lng, time,
                             type: 'MEASUREMENT', // Treat as measurement to allow coloring
