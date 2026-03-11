@@ -16134,6 +16134,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return rows.slice(0, limit);
         };
         const pickNearEventSummary = (regex, limit = 2) => summarizeNearEventRows(pickNearEventRows(regex, limit), limit);
+        const pickNearEventPropertyValue = (regex, keys, limit = 4) => {
+            const wanted = Array.isArray(keys) ? keys.map((k) => String(k || '').toLowerCase()) : [];
+            if (!wanted.length) return undefined;
+            const rows = regex instanceof RegExp ? pickNearEventRows(regex, limit) : nearEventsDetailed.slice(0, limit);
+            for (const row of rows) {
+                const props = row && row.properties;
+                if (!props || typeof props !== 'object') continue;
+                const propKeys = Object.keys(props);
+                for (const wantedKey of wanted) {
+                    const hit = propKeys.find((k) => String(k || '').toLowerCase() === wantedKey);
+                    if (!hit) continue;
+                    const value = props[hit];
+                    if (pointDetailsHasUsableValue(value)) return value;
+                }
+            }
+            return undefined;
+        };
         const findNearestEventGapMs = (startRows, endRows, maxGapMs = 30000) => {
             if (!Array.isArray(startRows) || !Array.isArray(endRows) || !startRows.length || !endRows.length) return null;
             let best = null;
@@ -17084,12 +17101,16 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         );
         const rrcRelCauseEntry = getStrictMetricEntry(
             'rrc_rel_cause',
+            'RRC_REL_CAUSE',
             'RRC Release Cause',
             'RRC Release',
             'RRC Cause',
             'RRC_RELEASE_CAUSE'
         );
-        const rrcRelCauseValue = metricValueFromEntry(rrcRelCauseEntry) ?? findByTokens(['rrc', 'release', 'cause']);
+        const rrcRelCauseValue = pickFirstUsable(
+            metricValueFromEntry(rrcRelCauseEntry),
+            pickNearEventPropertyValue(/rrc.*release|release/i, ['RRC Release Cause', 'rrc_rel_cause', 'RRC_REL_CAUSE'])
+        );
         const csRelCauseEntry = getStrictMetricEntry(
             'cs_rel_cause',
             'CS Release Cause',
@@ -17099,19 +17120,24 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         );
         const csRelCauseValue = metricValueFromEntry(csRelCauseEntry) ?? findByTokens(['cs', 'release', 'cause']);
         const iucsStatusEntry = getStrictMetricEntry(
+            'IUCS_STATUS',
             'iucs_status',
             'IU-CS Status',
             'IUCS Status',
             'IU CS Status'
         );
-        const iucsStatusValue = metricValueFromEntry(iucsStatusEntry) ?? findByTokens(['iu', 'cs', 'status']);
+        const iucsStatusValue = pickFirstUsable(
+            metricValueFromEntry(iucsStatusEntry),
+            pickNearEventPropertyValue(/cs release|iu.?cs|call|l3sm/i, ['IUCS_STATUS', 'iucs_status', 'IU-CS Status', 'IUCS Status', 'IU CS Status']),
+            activeCallSessionAtPoint ? 'Connected' : undefined
+        );
         const nodebTxPowerEntry = getStrictMetricEntry(
             'NodeB Tx Power',
             'NodeB Tx',
             'NodeB TxPower',
             'NodeB Tx power'
         );
-        const nodebTxPowerRaw = metricValueFromEntry(nodebTxPowerEntry) ?? findByTokens(['nodeb', 'tx', 'power']);
+        const nodebTxPowerRaw = metricValueFromEntry(nodebTxPowerEntry);
         const nodebTxPowerValue = (() => {
             const n = Number(nodebTxPowerRaw);
             if (!Number.isFinite(n)) return nodebTxPowerRaw;
