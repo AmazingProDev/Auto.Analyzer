@@ -775,12 +775,47 @@ const UmtsCallAnalyzer = {
             const start = 7;
             const remaining = parts.length - start;
             if (remaining <= 0) return [];
+            const out = [];
+
+            if (techId === 7) {
+                // LTE MIMOMEAS rows in this Nemo export use 9-field samples:
+                // [bandCode, earfcn, pci, branchIdx, typeCode, auxPower, rsrq, rsrp, cellId]
+                if (remaining % 9 !== 0) return [];
+                for (let i = start; i + 8 < parts.length; i += 9) {
+                    const bandCode = parseNumber(parts[i]);
+                    const earfcn = parseNumber(parts[i + 1]);
+                    const pci = parseNumber(parts[i + 2]);
+                    const branchIdx = parseNumber(parts[i + 3]);
+                    const typeCode = parseNumber(parts[i + 4]);
+                    const rawPower = parseNumber(parts[i + 5]);
+                    const rsrq = parseNumber(parts[i + 6]);
+                    const rsrp = parseNumber(parts[i + 7]);
+                    const cellId = parseNumber(parts[i + 8]);
+                    if (pci === null || rsrp === null || rsrq === null) continue;
+                    out.push({
+                        sc: pci,
+                        psc: null,
+                        pci,
+                        rscp: rsrp,
+                        ecno: rsrq,
+                        rssi: null,
+                        rawPower,
+                        typeCode,
+                        branchIdx,
+                        bandCode,
+                        cellId,
+                        uarfcn: null,
+                        earfcn
+                    });
+                }
+                return out;
+            }
+
             let blockSize = 8;
             if (remaining % 8 !== 0) {
                 if (remaining % 9 === 0) blockSize = 9;
                 else return [];
             }
-            const out = [];
             for (let i = start; i + blockSize - 1 < parts.length; i += blockSize) {
                 const cellId = parseNumber(parts[i]);
                 const uarfcn = parseNumber(parts[i + 1]);
@@ -790,17 +825,16 @@ const UmtsCallAnalyzer = {
                 const rssi = parseNumber(parts[i + 7]);
                 if (psc === null || rscp === null || ecno === null) continue;
 
-                // Unify sc, rscp, ecno for both technologies
                 out.push({
                     sc: psc,
                     psc: techId === 5 ? psc : null,
-                    pci: techId === 7 ? psc : null,
+                    pci: null,
                     rscp,
                     ecno,
                     rssi,
                     cellId,
                     uarfcn,
-                    earfcn: techId === 7 ? uarfcn : null
+                    earfcn: null
                 });
             }
             return out;
@@ -3597,62 +3631,94 @@ const NMFParser = {
                         valRssi = servingLevel - servingEcNo;
                     }
                 } else if (techId === 7) {
-                    // LTE/HSPA+ (Tech 7)
-                    // LTE format: [cellId?, earfcn, pci, rssi, rsrp, rsrq, cellId]
+                    // LTE (Tech 7)
+                    // Nemo LTE CELLMEAS tuples map as:
+                    // [typeCode, bandCode, earfcn, pci, auxPower, rsrp, rsrq, cellId, aux1, aux2, sinr]
+                    const lteBandFromEarfcn = (earfcn) => {
+                        if (!Number.isFinite(earfcn)) return 'Unknown';
+                        if (earfcn >= 0 && earfcn <= 599) return 'B1 (2100)';
+                        if (earfcn >= 600 && earfcn <= 1199) return 'B2 (1900)';
+                        if (earfcn >= 1200 && earfcn <= 1949) return 'B3 (1800)';
+                        if (earfcn >= 2400 && earfcn <= 2649) return 'B5 (850)';
+                        if (earfcn >= 2750 && earfcn <= 3449) return 'B7 (2600)';
+                        if (earfcn >= 3450 && earfcn <= 3799) return 'B8 (900)';
+                        if (earfcn >= 6150 && earfcn <= 6449) return 'B20 (800)';
+                        return 'Unknown';
+                    };
                     servingFreq = parseFloat(parts[9]);
                     servingLevel = parseFloat(parts[12]); // RSRP
                     servingSc = parseInt(parts[10]) || 'N/A'; // PCI
                     servingEcNo = parseFloat(parts[13]); // RSRQ
-                    valRssi = parseFloat(parts[11]); // RSSI
+                    valRssi = null; // Raw LTE CELLMEAS field before RSRP is not stable enough to label as RSSI.
                     if (isNaN(servingFreq) || servingFreq <= 0) servingFreq = null;
-                    servingBand = parts[14];
+                    servingBand = lteBandFromEarfcn(servingFreq);
                     activeSetCount = 1;
                     monitoredSetCount = parseInt(parts[6]) || 0;
 
-                    // Neighbors: Robust Pattern-Based Sliding Scan (Tech 7)
+                    // Neighbors: scan 11-field LTE CELLMEAS blocks directly.
                     const lteNeighborsMap = new Map();
-                    let activeContextActive = false;
+                    const lteBlocks = [];
+                    for (let k = 7; k + 10 < parts.length; k += 11) {
+                        const typeCode = parseInt(parts[k], 10);
+                        const bandCode = parseInt(parts[k + 1], 10);
+                        const freq = parseFloat(parts[k + 2]);
+                        const pci = parseInt(parts[k + 3], 10);
+                        const auxPower = parseFloat(parts[k + 4]);
+                        const rsrp = parseFloat(parts[k + 5]);
+                        const rsrq = parseFloat(parts[k + 6]);
+                        const cellIdentity = parseInt(parts[k + 7], 10);
+                        const auxMetric = parseFloat(parts[k + 8]);
+                        const sinr = parseFloat(parts[k + 10]);
 
-                    // Pre-scan for "Active" context marker in the header/preamble
-                    for (let j = 0; j < Math.min(parts.length, 20); j++) {
-                        if (String(parts[j]).toUpperCase().includes('ACTIVE')) {
-                            activeContextActive = true;
-                            break;
-                        }
+                        const validType = Number.isFinite(typeCode) && typeCode >= 0 && typeCode <= 20;
+                        const validFreq = Number.isFinite(freq) && freq > 0 && freq < 100000 && Math.abs(freq - Math.round(freq)) < 0.01;
+                        const validPci = Number.isFinite(pci) && pci >= 0 && pci <= 503;
+                        const validRsrp = Number.isFinite(rsrp) && rsrp < -20 && rsrp > -140;
+                        const validRsrq = Number.isFinite(rsrq) && rsrq <= 5 && rsrq > -40;
+
+                        if (!validType || !validFreq || !validPci || !validRsrp || !validRsrq) continue;
+
+                        lteBlocks.push({
+                            typeCode,
+                            bandCode: Number.isFinite(bandCode) ? bandCode : null,
+                            freq: Math.round(freq),
+                            sc: pci,
+                            pci,
+                            rscp: rsrp,
+                            rsrp,
+                            ecno: rsrq,
+                            rsrq,
+                            rawPower: Number.isFinite(auxPower) ? auxPower : null,
+                            rssi: null,
+                            sinr: Number.isFinite(sinr) ? sinr : (Number.isFinite(auxMetric) ? auxMetric : null),
+                            cellId: Number.isFinite(cellIdentity) ? cellIdentity : null
+                        });
                     }
 
-                    for (let k = 15; k < parts.length - 3; k++) {
-                        const freq = parseFloat(parts[k]);
-                        const pci = parseInt(parts[k + 1]);
-                        const rsrp = parseFloat(parts[k + 2]);
-                        const rsrq = parseFloat(parts[k + 3]);
+                    if (lteBlocks.length) {
+                        const servingBlock = lteBlocks.find((b, idx) => (
+                            (Number.isFinite(servingFreq) && Number.isFinite(b.freq) && Math.round(servingFreq) === b.freq && Number.isFinite(servingSc) && servingSc === b.pci) ||
+                            (idx === 0)
+                        ));
+                        if (servingBlock) {
+                            servingFreq = servingBlock.freq;
+                            servingSc = servingBlock.pci;
+                            servingLevel = servingBlock.rsrp;
+                            servingEcNo = servingBlock.rsrq;
+                        }
 
-                        // SANITY: validate 4-field LTE tuple shape (EARFCN, PCI, RSRP, RSRQ)
-                        // Frequency must be integer-ish EARFCN
-                        const valFreq = Number.isFinite(freq) && freq > 0 && freq < 100000 && Math.abs(freq - Math.round(freq)) < 0.01;
-                        const valPci = !isNaN(pci) && pci >= 0 && pci <= 503;
-                        const valRsrp = !isNaN(rsrp) && rsrp < -20 && rsrp > -140;
-                        const valRsrq = !isNaN(rsrq) && rsrq <= 0 && rsrq > -30;
-
-                        if (valFreq && valPci && valRsrp && valRsrq) {
-                            const key = `${Math.round(freq)}:${pci}`;
-                            const type = activeContextActive ? 1 : 3; // Active context or fallback to Detected
-                            const prio = type <= 1 ? 0 : type;
+                        lteBlocks.forEach((b) => {
+                            const isServing = Number.isFinite(servingSc) && Number.isFinite(servingFreq) && b.pci === servingSc && b.freq === Math.round(servingFreq);
+                            const key = `${b.freq}:${b.pci}`;
                             const existing = lteNeighborsMap.get(key);
-                            const existingPrio = existing ? (existing.type <= 1 ? 0 : existing.type) : 999;
-
-                            if (!existing || prio < existingPrio) {
+                            if (!existing || (Number.isFinite(b.rsrp) && (!Number.isFinite(existing.rsrp) || b.rsrp > existing.rsrp))) {
                                 lteNeighborsMap.set(key, {
-                                    type,
-                                    freq: Math.round(freq),
-                                    sc: pci,
-                                    pci: pci,
-                                    ecno: rsrq,
-                                    rscp: rsrp
+                                    ...b,
+                                    isServing,
+                                    source_kind: 'measured'
                                 });
                             }
-                            k += 3; // Successfully consumed 4 fields, skip ahead (for loop does +1)
-                        }
+                        });
                     }
                     neighbors = Array.from(lteNeighborsMap.values());
                 } else {
@@ -3711,6 +3777,19 @@ const NMFParser = {
                             'TPC': latestTpc
                         }
                     };
+                if (techId === 7) {
+                    point.rsrp = servingLevel;
+                    point.rsrq = servingEcNo;
+                    point.pci = servingSc;
+                    point.earfcn = servingFreq;
+                    point.band = servingBand;
+                    point.tac = state.lac;
+                    point.properties['Serving PCI'] = servingSc;
+                    point.properties['Serving EARFCN'] = (servingFreq !== null ? servingFreq : 'N/A');
+                    point.properties['Serving RSRQ'] = servingEcNo;
+                    point.properties['Serving TAC'] = state.lac;
+                    point.properties['Band'] = servingBand || 'N/A';
+                }
                 if (techId === 5 && umtsCellmeasSubtypeStats) {
                     point.properties['CELLMEAS Neighbor RSCP'] = umtsCellmeasSubtypeStats.rscpAvailable
                         ? 'Available (Subtype A/B present)'
@@ -3786,6 +3865,12 @@ const NMFParser = {
                         point[`${keyBase}_ecno`] = n.ecno;
                         point[`${keyBase}_sc`] = sc;
                         point[`${keyBase}_freq`] = n.freq;
+                        if (techId === 7) {
+                            point[`${keyBase}_rsrp`] = n.rscp;
+                            point[`${keyBase}_rsrq`] = n.ecno;
+                            point[`${keyBase}_pci`] = sc;
+                            point[`${keyBase}_earfcn`] = n.freq;
+                        }
 
                         // Add aliases for UI Trend Charts (N1, N2, N3)
                         if (idx < 3) {
@@ -3794,12 +3879,24 @@ const NMFParser = {
                             point[`n${cIdx}_rscp`] = n.rscp;
                             point[`n${cIdx}_ecno`] = n.ecno;
                             point[`n${cIdx}_freq`] = n.freq;
+                            if (techId === 7) {
+                                point[`n${cIdx}_pci`] = sc;
+                                point[`n${cIdx}_rsrp`] = n.rscp;
+                                point[`n${cIdx}_rsrq`] = n.ecno;
+                                point[`n${cIdx}_earfcn`] = n.freq;
+                            }
                         }
 
                         // Add to properties for Popup
                         point.properties[`${prefix.toUpperCase()}${num} SC`] = sc;
                         point.properties[`${prefix.toUpperCase()}${num} RSCP`] = n.rscp;
                         point.properties[`${prefix.toUpperCase()}${num} EcNo`] = n.ecno;
+                        if (techId === 7) {
+                            point.properties[`${prefix.toUpperCase()}${num} PCI`] = sc;
+                            point.properties[`${prefix.toUpperCase()}${num} RSRP`] = n.rscp;
+                            point.properties[`${prefix.toUpperCase()}${num} RSRQ`] = n.ecno;
+                            point.properties[`${prefix.toUpperCase()}${num} EARFCN`] = n.freq;
+                        }
                         if (Number.isFinite(n.rssi)) {
                             point.properties[`${prefix.toUpperCase()}${num} RSSI`] = n.rssi;
                         }
@@ -3958,7 +4055,7 @@ const NMFParser = {
         const normalizeKey = (k) => String(k).toLowerCase().replace(/[\s_]+/g, ' ').trim();
         const canonicalizeKey = (k) => {
             const nk = normalizeKey(k);
-            const admMatch = nk.match(/^(a|m|d)\s*(\d+)\s*(rscp|ecno|sc|freq)$/);
+            const admMatch = nk.match(/^(a|m|d|n)\s*(\d+)\s*(rscp|ecno|sc|freq|rsrp|rsrq|pci|earfcn)$/);
             if (admMatch) return `${admMatch[1]}${admMatch[2]}_${admMatch[3]}`;
 
             const map = {
@@ -3986,7 +4083,17 @@ const NMFParser = {
                 'serving ecno': 'Serving EcNo',
                 'serving rnc': 'Serving RNC',
                 'serving lac': 'Serving LAC',
-                'serving freq': 'Serving Freq'
+                'serving freq': 'Serving Freq',
+                'serving rsrp': 'Serving RSRP',
+                'serving rsrq': 'Serving RSRQ',
+                'serving pci': 'Serving PCI',
+                'serving earfcn': 'Serving EARFCN',
+                'serving tac': 'Serving TAC',
+                'rsrp': 'Serving RSRP',
+                'rsrq': 'Serving RSRQ',
+                'pci': 'Serving PCI',
+                'earfcn': 'Serving EARFCN',
+                'tac': 'Serving TAC'
             };
             return map[nk] || k;
         };
@@ -4284,10 +4391,63 @@ const ExcelParser = {
                     }
 
                     const normM = normalize(m);
+                    const setNeighborField = (bucketKey, typeLabel, field, rawValue) => {
+                        if (!point._neighborsHelper) point._neighborsHelper = {};
+                        if (!point._neighborsHelper[bucketKey]) {
+                            point._neighborsHelper[bucketKey] = {
+                                type: typeLabel,
+                                source_kind: 'measured',
+                                rat: 'UTRA'
+                            };
+                        }
+                        point._neighborsHelper[bucketKey][field] = rawValue;
+                    };
 
                     // ----------------------------------------------------------------
                     // ACTIVE SET & NEIGHBORS (Enhanced parsing)
                     // ----------------------------------------------------------------
+
+                    // Direct A/M/D parsing for Excel exports like "A2 SC", "A3 PSC", "M1 RSCP", "D1 EcNo"
+                    const amdMatch = normM.match(/^([amd])(\d+)(sc|psc|pci|identity|rscp|rsrp|ecno|rsrq|freq|uarfcn|earfcn)$/i);
+                    if (amdMatch) {
+                        const prefix = amdMatch[1].toLowerCase();
+                        const idx = parseInt(amdMatch[2], 10);
+                        const metric = amdMatch[3].toLowerCase();
+                        if (idx >= 1 && idx <= 32) {
+                            const numVal = parseNumber(val);
+                            const bucketKey = prefix === 'a' ? idx : (prefix === 'm' ? 100 + idx : 200 + idx);
+                            const typeLabel = `${prefix.toUpperCase()}${idx}`;
+
+                            if (metric === 'sc' || metric === 'psc' || metric === 'pci' || metric === 'identity') {
+                                const parsedId = Number.isFinite(numVal) ? parseInt(numVal, 10) : parseInt(String(val).trim(), 10);
+                                if (!isNaN(parsedId)) {
+                                    point[`${prefix}${idx}_sc`] = parsedId;
+                                    point[`${prefix}${idx}_psc`] = parsedId;
+                                    setNeighborField(bucketKey, typeLabel, 'sc', parsedId);
+                                    setNeighborField(bucketKey, typeLabel, 'pci', parsedId);
+                                    setNeighborField(bucketKey, typeLabel, 'psc', parsedId);
+                                }
+                            } else if (metric === 'rscp' || metric === 'rsrp') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_rscp`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'rscp', numVal);
+                                }
+                            } else if (metric === 'ecno' || metric === 'rsrq') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_ecno`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'ecno', numVal);
+                                }
+                            } else if (metric === 'freq' || metric === 'uarfcn' || metric === 'earfcn') {
+                                if (Number.isFinite(numVal)) {
+                                    point[`${prefix}${idx}_freq`] = numVal;
+                                    point[`${prefix}${idx}_uarfcn`] = numVal;
+                                    setNeighborField(bucketKey, typeLabel, 'freq', numVal);
+                                    setNeighborField(bucketKey, typeLabel, 'uarfcn', numVal);
+                                }
+                            }
+                            continue;
+                        }
+                    }
 
                     // Regex helpers
                     const extractIdx = (str, prefix) => {
