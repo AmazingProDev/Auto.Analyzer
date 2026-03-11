@@ -17324,7 +17324,53 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return undefined;
         })();
 
+        const formatPointDetailsTimeLabel = (value) => {
+            if (!hasValue(value)) return 'N/A';
+            const raw = String(value).trim();
+            if (!raw) return 'N/A';
+            const todMatch = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+            if (todMatch) {
+                const hh = todMatch[1].padStart(2, '0');
+                const mm = todMatch[2].padStart(2, '0');
+                const ss = todMatch[3].padStart(2, '0');
+                const frac = String(todMatch[4] || '').padEnd(3, '0').slice(0, 3);
+                return `${hh}:${mm}:${ss}.${frac}`;
+            }
+            const isoMatch = raw.match(/T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/);
+            if (isoMatch) {
+                const hh = isoMatch[1];
+                const mm = isoMatch[2];
+                const ss = isoMatch[3];
+                const frac = String(isoMatch[4] || '').padEnd(3, '0').slice(0, 3);
+                return `${hh}:${mm}:${ss}.${frac}`;
+            }
+            const ts = pointDetailsTsMs(raw);
+            if (Number.isFinite(ts)) {
+                const msOfDay = ((ts % 86400000) + 86400000) % 86400000;
+                const hh = String(Math.floor(msOfDay / 3600000)).padStart(2, '0');
+                const mm = String(Math.floor((msOfDay % 3600000) / 60000)).padStart(2, '0');
+                const ss = String(Math.floor((msOfDay % 60000) / 1000)).padStart(2, '0');
+                const ms = String(Math.floor(msOfDay % 1000)).padStart(3, '0');
+                return `${hh}:${mm}:${ss}.${ms}`;
+            }
+            return raw;
+        };
+        const formatCallOutcomeLabel = (session) => {
+            if (!session) return '';
+            if (session.setupFailure || /CALL_SETUP_FAILURE/i.test(String(session.endType || ''))) return 'Setup failure';
+            if (session.drop || /DROP|ABNORMAL/i.test(String(session.endType || ''))) return 'Drop';
+            if (/INCOMPLETE/i.test(String(session.endType || ''))) return 'Incomplete';
+            if (/NORMAL|SUCCESS/i.test(String(session.endType || ''))) return 'Normal';
+            return String(session.endType || '').trim();
+        };
+        const matchedVoiceSession = activeCallSessionAtPoint || matchedCallSession;
         const volteCallStartEndValue = (() => {
+            if (isLTE && matchedVoiceSession) {
+                const start = formatPointDetailsTimeLabel(matchedVoiceSession.startTime || matchedVoiceSession.startTsIso || matchedVoiceSession.startTs || matchedVoiceSession.markerTime);
+                const end = formatPointDetailsTimeLabel(matchedVoiceSession.endTime || matchedVoiceSession.endTsRealIso || matchedVoiceSession.endTsReal || matchedVoiceSession.markerTime);
+                const outcome = formatCallOutcomeLabel(matchedVoiceSession);
+                return `Start=${start} | End=${end}${outcome ? ` | Outcome=${outcome}` : ''}`;
+            }
             const direct = getAny(
                 'VoLTE Call Start/End',
                 'VoLTE call start',
@@ -17784,6 +17830,28 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const neighborFilterBtnHtml = isLteTrp
             ? ('<button class="btn" onclick="window.togglePointDetailsNeighborSourceFilter(event)" style="padding:2px 8px; font-size:10px; border:1px solid #334155; color:#cbd5e1; background:#0f172a;">Neighbors: ' + getNeighborSourceFilterLabel() + '</button>')
             : '';
+        const mobileStateBadgeHtml = (() => {
+            const resolvedState =
+                String(
+                    rrcStateFinal ||
+                    rrcStateExactDisplay ||
+                    (activeCallSessionAtPoint ? 'Connected' : '') ||
+                    (matchedCallSession ? 'Connected' : '') ||
+                    ((hasConnectedSignalEvent || hasTrafficEvidence) ? 'Connected' : '') ||
+                    ((hasIdleSignalEvent && !hasTrafficEvidence) ? 'Idle' : '') ||
+                    ''
+                ).trim();
+            if (!resolvedState) return '';
+            const isIdle = /^idle\b/i.test(resolvedState);
+            const label = isIdle ? 'Idle' : 'Connected';
+            const bg = isIdle ? 'rgba(239,68,68,0.18)' : 'rgba(34,197,94,0.18)';
+            const color = isIdle ? '#fca5a5' : '#86efac';
+            const border = isIdle ? 'rgba(239,68,68,0.55)' : 'rgba(34,197,94,0.55)';
+            return '<div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px; color:#cbd5e1;">' +
+                '<span>Mobile state:</span>' +
+                '<span style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; font-weight:700; letter-spacing:0.02em;">' + escapeHtml(label) + '</span>' +
+                '</div>';
+        })();
         const html = '<div class="log-view-container">' +
             '<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">' +
             '<div>' +
@@ -17791,6 +17859,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             enbNameDisplay +
             enbIdDisplay +
             '<div style="color:#aaa; font-size:11px; margin-top:2px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
+            mobileStateBadgeHtml +
             '</div>' +
             '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">' +
             '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
