@@ -48,6 +48,7 @@ from trp_importer import (
     fetch_run_track,
     fetch_run_events,
 )
+from lte_rrc_per_decoder import decode_rrc_event_payload
 
 UPLOAD_DIR = os.environ.get("OPTIM_UPLOAD_DIR", "/tmp/optim_uploads")
 DB_PATH = None  # kept for backward compatibility; in-memory store ignores it
@@ -521,6 +522,22 @@ class Handler(SimpleHTTPRequestHandler):
                         "text": conv.get("text", ""),
                     },
                 )
+                return
+
+            if path == "/api/lte_rrc/decode":
+                payload = _parse_json_body(self)
+                event_name = str(payload.get("eventName") or payload.get("event_name") or "").strip()
+                payload_hex = str(payload.get("payloadHex") or payload.get("payload_hex") or "").strip()
+                if not event_name or not payload_hex:
+                    _json(self, {"status": "error", "message": "eventName and payloadHex are required"}, 400)
+                    return
+                try:
+                    payload_bytes = bytes.fromhex(payload_hex)
+                except Exception:
+                    _json(self, {"status": "error", "message": "Invalid payloadHex"}, 400)
+                    return
+                decoded = decode_rrc_event_payload(payload_bytes, event_name)
+                _json(self, {"status": "success", "decoded": decoded})
                 return
 
             if path == "/api/trp/import":

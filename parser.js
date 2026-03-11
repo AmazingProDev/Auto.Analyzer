@@ -3186,6 +3186,64 @@ const NMFParser = {
                         properties: { 'Time': time, 'Type': 'EVENT', 'Event': 'T312', 'T312': 'Expired' }
                     });
                 }
+                if (line.includes('"SystemInformation - SIB2,SIB3"') || line.includes('"SystemInformation - SIB3"') || line.includes('"SystemInformation - SIB5"')) {
+                    const quoted = [...line.matchAll(/"([^"]*)"/g)].map((m) => String(m[1] || ''));
+                    const sibEventName = quoted.find((txt) => /^SystemInformation - SIB(?:2,SIB3|3|5)$/i.test(String(txt || ''))) || null;
+                    const payloadHex = quoted.length ? String(quoted[quoted.length - 1] || '').trim() : '';
+                    const earfcnIdx = sibEventName && /SIB2,SIB3|SIB3/i.test(sibEventName) ? 8 : 7;
+                    const pciIdx = sibEventName && /SIB2,SIB3|SIB3/i.test(sibEventName) ? 9 : 8;
+                    const servingEarfcn = Number(parts[earfcnIdx]);
+                    const servingPci = Number(parts[pciIdx]);
+                    if (sibEventName && /^[0-9A-F]+$/i.test(payloadHex)) {
+                        allPoints.push({
+                            lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                            type: 'EVENT', event: sibEventName, message: sibEventName,
+                            properties: {
+                                'Time': time,
+                                'Type': 'EVENT',
+                                'Event': sibEventName,
+                                'RRC raw payload hex': payloadHex,
+                                'Serving EARFCN': Number.isFinite(servingEarfcn) ? servingEarfcn : 'N/A',
+                                'Serving PCI': Number.isFinite(servingPci) ? servingPci : 'N/A'
+                            }
+                        });
+                    }
+                }
+            } else if (upperHeader === 'HOA') {
+                const srcEarfcn = Number(parts[8]);
+                const srcPci = Number(parts[9]);
+                const tgtEarfcn = Number(parts[13]);
+                const tgtPci = Number(parts[14]);
+                const hasSrc = Number.isFinite(srcPci) || Number.isFinite(srcEarfcn);
+                const hasTgt = Number.isFinite(tgtPci) || Number.isFinite(tgtEarfcn);
+                if (hasSrc || hasTgt) {
+                    const isInterFreq = Number.isFinite(srcEarfcn) && Number.isFinite(tgtEarfcn) && srcEarfcn !== tgtEarfcn;
+                    const hoType = isInterFreq ? 'InterFreq' : 'IntraFreq';
+                    const triggerFamily = isInterFreq ? 'A5' : 'A3';
+                    const srcLabel = `${Number.isFinite(srcPci) ? srcPci : '?'}${Number.isFinite(srcEarfcn) ? `/${srcEarfcn}` : ''}`;
+                    const tgtLabel = `${Number.isFinite(tgtPci) ? tgtPci : '?'}${Number.isFinite(tgtEarfcn) ? `/${tgtEarfcn}` : ''}`;
+                    allPoints.push({
+                        lat: gps ? gps.lat : null, lng: gps ? gps.lng : null, time,
+                        type: 'EVENT', event: 'A3/A5 Event', message: `${triggerFamily} ${hoType} HOA ${srcLabel} -> ${tgtLabel}`,
+                        properties: {
+                            'Time': time,
+                            'Type': 'EVENT',
+                            'Event': 'A3/A5 Event',
+                            'A3/A5 Event': `${triggerFamily} ${hoType}`,
+                            'A5 event': isInterFreq ? 'Yes' : 'No',
+                            'A3/A5 triggers': `${triggerFamily} (executed HOA)`,
+                            'HO type': hoType,
+                            'HO source PCI': Number.isFinite(srcPci) ? srcPci : 'N/A',
+                            'HO source EARFCN': Number.isFinite(srcEarfcn) ? srcEarfcn : 'N/A',
+                            'HO target PCI': Number.isFinite(tgtPci) ? tgtPci : 'N/A',
+                            'HO target EARFCN': Number.isFinite(tgtEarfcn) ? tgtEarfcn : 'N/A',
+                            'rrc_recfg_src_pci': Number.isFinite(srcPci) ? srcPci : 'N/A',
+                            'rrc_recfg_src_earfcn': Number.isFinite(srcEarfcn) ? srcEarfcn : 'N/A',
+                            'rrc_recfg_tgt_pci': Number.isFinite(tgtPci) ? tgtPci : 'N/A',
+                            'rrc_recfg_tgt_earfcn': Number.isFinite(tgtEarfcn) ? tgtEarfcn : 'N/A'
+                        }
+                    });
+                }
             } else if (upperHeader === 'L3SM') {
                 const messageName = parts[5].replace(/^"|"$/g, '');
                 if (messageName === 'RELEASE' || messageName === 'DISCONNECT') {

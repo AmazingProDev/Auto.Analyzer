@@ -490,6 +490,35 @@ _RRC_EVENT_PROFILES: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "sib3",
+        "param_prefix": "sib3",
+        "event_contains": [
+            "systeminformation - sib2,sib3",
+            "systeminformation - sib3",
+            ".sib3",
+        ],
+        "must_tokens": ["sib3", "cellreselection"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
+    {
+        "id": "sib5",
+        "param_prefix": "sib5",
+        "event_contains": [
+            "systeminformation - sib5",
+            ".sib5",
+        ],
+        "must_tokens": ["sib5", "interfreqcarrierfreqlist"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
+    {
         "id": "rrc_recfg_complete",
         "param_prefix": "rrc_recfg_complete",
         "event_contains": ["dcchul.rrcconnectionreconfigurationcomplete"],
@@ -1116,6 +1145,47 @@ def _summary_for_profile(profile: Dict[str, Any], decoded_json: Dict[str, Any]) 
         tac = _extract_tracking_area_code(decoded_json)
         summary["trackingAreaCode"] = tac
         summary["trackingAreaCodeHex"] = (f"{int(tac):04X}" if isinstance(tac, int) else None)
+    elif profile_id == "sib3":
+        sib3 = _find_first_key(decoded_json, "sib3")
+        if isinstance(sib3, dict):
+            intra = sib3.get("intraFreqCellReselectionInfo") or {}
+            common = sib3.get("cellReselectionInfoCommon") or {}
+            serving = sib3.get("cellReselectionServingFreqInfo") or {}
+            summary["qHyst"] = _first_present(common, ["q-Hyst"])
+            summary["cellReselectionPriority"] = _safe_int(_first_present(serving, ["cellReselectionPriority"]))
+            summary["sIntraSearch"] = _safe_int(_first_present(intra, ["s-IntraSearch"]))
+            summary["sNonIntraSearch"] = _safe_int(_first_present(serving, ["s-NonIntraSearch"]))
+            summary["threshServingLow"] = _safe_int(_first_present(serving, ["threshServingLow"]))
+            summary["qRxLevMin"] = _safe_int(_first_present(intra, ["q-RxLevMin"]))
+            summary["qQualMin"] = _safe_int(_first_present(sib3, ["q-QualMin-r9", "q-QualMin"]))
+            summary["tReselectionEutra"] = _safe_int(_first_present(intra, ["t-ReselectionEUTRA"]))
+            summary["tReselectionEutraSfHigh"] = _first_present(intra, ["sf-High"])
+            summary["tReselectionEutraSfMedium"] = _first_present(intra, ["sf-Medium"])
+            summary["sIntraSearchP"] = _safe_int(_first_present(sib3, ["s-IntraSearchP-r9"]))
+            summary["sIntraSearchQ"] = _safe_int(_first_present(sib3, ["s-IntraSearchQ-r9"]))
+            summary["sNonIntraSearchP"] = _safe_int(_first_present(sib3, ["s-NonIntraSearchP-r9"]))
+            summary["sNonIntraSearchQ"] = _safe_int(_first_present(sib3, ["s-NonIntraSearchQ-r9"]))
+    elif profile_id == "sib5":
+        sib5 = _find_first_key(decoded_json, "sib5")
+        carrier_rows = []
+        if isinstance(sib5, dict):
+            carriers = sib5.get("interFreqCarrierFreqList") or []
+            if isinstance(carriers, list):
+                for row in carriers:
+                    if not isinstance(row, dict):
+                        continue
+                    carrier_rows.append({
+                        "dlCarrierFreq": _safe_int(_first_present(row, ["dl-CarrierFreq"])),
+                        "cellReselectionPriority": _safe_int(_first_present(row, ["cellReselectionPriority"])),
+                        "qRxLevMin": _safe_int(_first_present(row, ["q-RxLevMin"])),
+                        "qOffsetFreq": _first_present(row, ["q-OffsetFreq"]),
+                        "threshXHigh": _safe_int(_first_present(row, ["threshX-High"])),
+                        "threshXLow": _safe_int(_first_present(row, ["threshX-Low"])),
+                        "tReselectionEutra": _safe_int(_first_present(row, ["t-ReselectionEUTRA"])),
+                        "allowedMeasBandwidth": _first_present(row, ["allowedMeasBandwidth"]),
+                    })
+        summary["carrierCount"] = len(carrier_rows)
+        summary["carriers"] = carrier_rows
     elif profile_id == "rrc_release":
         summary["releaseCause"] = _first_present(decoded_json, ["releaseCause"])
         summary["hasIdleModeMobilityControlInfo"] = bool(_find_first_key(decoded_json, "idleModeMobilityControlInfo"))

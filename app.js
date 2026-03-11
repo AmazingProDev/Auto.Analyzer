@@ -2419,6 +2419,95 @@ document.addEventListener('DOMContentLoaded', () => {
         return [];
     };
 
+    window.enrichLteSibEvents = async (log) => {
+        if (!log || !Array.isArray(log.events) || !log.events.length || typeof fetch !== 'function') return;
+        if (log.__sibEnrichmentDone) return;
+        if (log.__sibEnrichmentPromise) return log.__sibEnrichmentPromise;
+        const sibEvents = log.events.filter((ev) => {
+            const name = String(ev && (ev.event_name || ev.event || ev.message || ev?.properties?.Event) || '').trim();
+            return /^SystemInformation - SIB(?:2,SIB3|3|5)$/i.test(name);
+        });
+        if (!sibEvents.length) {
+            log.__sibEnrichmentDone = true;
+            return;
+        }
+        const cache = log.__sibDecodeCache || (log.__sibDecodeCache = new Map());
+        const getPropCI = (obj, wanted) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const key = Object.keys(obj).find((k) => String(k || '').toLowerCase() === String(wanted || '').toLowerCase());
+            return key ? obj[key] : undefined;
+        };
+        const renderSib3Summary = (summary) => {
+            if (!summary || typeof summary !== 'object') return '';
+            const parts = [];
+            if (summary.qHyst != null) parts.push(`q-Hyst ${summary.qHyst}`);
+            if (summary.cellReselectionPriority != null) parts.push(`prio ${summary.cellReselectionPriority}`);
+            if (summary.sIntraSearch != null) parts.push(`s-IntraSearch ${summary.sIntraSearch}`);
+            if (summary.sNonIntraSearch != null) parts.push(`s-NonIntraSearch ${summary.sNonIntraSearch}`);
+            if (summary.threshServingLow != null) parts.push(`threshServingLow ${summary.threshServingLow}`);
+            if (summary.qRxLevMin != null) parts.push(`q-RxLevMin ${summary.qRxLevMin} dBm`);
+            if (summary.qQualMin != null) parts.push(`q-QualMin ${summary.qQualMin} dB`);
+            if (summary.tReselectionEutra != null) parts.push(`t-ReselectionEUTRA ${summary.tReselectionEutra}`);
+            return parts.join(' | ');
+        };
+        const renderSib5Summary = (summary) => {
+            const carriers = Array.isArray(summary && summary.carriers) ? summary.carriers : [];
+            if (!carriers.length) return '';
+            return carriers.slice(0, 4).map((row) => {
+                const bits = [];
+                if (row.dlCarrierFreq != null) bits.push(`EARFCN ${row.dlCarrierFreq}`);
+                if (row.cellReselectionPriority != null) bits.push(`prio ${row.cellReselectionPriority}`);
+                if (row.qRxLevMin != null) bits.push(`q-RxLevMin ${row.qRxLevMin} dBm`);
+                if (row.threshXHigh != null) bits.push(`threshX-High ${row.threshXHigh}`);
+                if (row.threshXLow != null) bits.push(`threshX-Low ${row.threshXLow}`);
+                if (row.qOffsetFreq != null) bits.push(`q-OffsetFreq ${row.qOffsetFreq}`);
+                return bits.join(', ');
+            }).join(' | ');
+        };
+        log.__sibEnrichmentPromise = (async () => {
+            let successCount = 0;
+            await Promise.all(sibEvents.map(async (ev) => {
+                const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : (ev.properties = {});
+                const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+                const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+                if (!eventName || !payloadHex) return;
+                const cacheKey = `${eventName}|${payloadHex}`;
+                let decoded = cache.get(cacheKey);
+                if (!decoded) {
+                    try {
+                        const res = await fetch('/api/lte_rrc/decode', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ eventName, payloadHex })
+                        });
+                        const data = await res.json();
+                        if (!res.ok || data.status !== 'success') return;
+                        decoded = data.decoded || null;
+                        cache.set(cacheKey, decoded);
+                    } catch (_e) {
+                        return;
+                    }
+                }
+                if (!decoded || !decoded.ok || !decoded.summary) return;
+                const profile = String(decoded.message_id || '').toLowerCase();
+                props['RRC decoder'] = String(decoded.decoder || 'pycrate_rrclte');
+                if (profile === 'sib3') {
+                    props['SIB3 reselection thresholds'] = renderSib3Summary(decoded.summary);
+                    props['SIB3 decoded JSON'] = JSON.stringify(decoded.summary);
+                    successCount += 1;
+                } else if (profile === 'sib5') {
+                    props['SIB5 reselection thresholds'] = renderSib5Summary(decoded.summary);
+                    props['SIB5 decoded JSON'] = JSON.stringify(decoded.summary);
+                    successCount += 1;
+                }
+            }));
+            log.__sibEnrichmentDone = successCount > 0;
+            log.__sibEnrichmentPromise = null;
+            return successCount;
+        })();
+        return log.__sibEnrichmentPromise;
+    };
+
     const parsePointTimeMs = (t) => {
         if (!t) return NaN;
         const txt = String(t).trim();
@@ -2607,8 +2696,52 @@ document.addEventListener('DOMContentLoaded', () => {
     window.filterA3A5Events = (log, options = {}) => {
         const allEvents = Array.isArray(log && log.events) ? log.events : [];
         const matches = allEvents.filter((ev) => isA3A5Event(ev));
+        const synthetic = [];
+        if (!matches.length) {
+            allEvents.forEach((ev) => {
+                if (!ev) return;
+                const name = String((ev.event_name || ev.event || ev.message) || '').trim();
+                const low = name.toLowerCase();
+                const pairs = extractEventParamPairs(ev);
+                const hasHoContext = low.includes('ho command') || low.includes('handover command') || low.includes('rrcconnectionreconfiguration');
+                const hasA3A5Context = pairs.some(([k, v]) => {
+                    const key = String(k || '').toLowerCase();
+                    const value = String(v || '').toLowerCase();
+                    if (key === 'rrc_recfg_a3a5_inferred' && value.includes('no measurementreport evidence')) return false;
+                    if (key === 'rrc_recfg_a3a5_thresholds_inferred' && (value === 'n/a' || value === 'none')) return false;
+                    return key.includes('rrc_recfg_a3') || key.includes('rrc_recfg_a5') || key.includes('rrc_recfg_a3a5') || isA3A5Token(value);
+                });
+                if (!hasHoContext && !hasA3A5Context) return;
+                const srcPci = getEventParamValueCI(ev, 'rrc_recfg_src_pci');
+                const srcEarfcn = getEventParamValueCI(ev, 'rrc_recfg_src_earfcn');
+                const tgtPci = getEventParamValueCI(ev, 'rrc_recfg_tgt_pci');
+                const tgtEarfcn = getEventParamValueCI(ev, 'rrc_recfg_tgt_earfcn');
+                const trigger = getEventParamValueCI(ev, 'rrc_recfg_a3a5_inferred');
+                const thresholds = getEventParamValueCI(ev, 'rrc_recfg_a3a5_thresholds_inferred');
+                const summaryBits = [];
+                if (hasValue(trigger)) summaryBits.push(String(trigger).trim());
+                if (hasValue(thresholds)) summaryBits.push(String(thresholds).trim());
+                if (hasValue(srcPci) || hasValue(tgtPci)) {
+                    summaryBits.push(`PCI ${hasValue(srcPci) ? srcPci : '?'} -> ${hasValue(tgtPci) ? tgtPci : '?'}`);
+                }
+                if (hasValue(srcEarfcn) || hasValue(tgtEarfcn)) {
+                    summaryBits.push(`EARFCN ${hasValue(srcEarfcn) ? srcEarfcn : '?'} -> ${hasValue(tgtEarfcn) ? tgtEarfcn : '?'}`);
+                }
+                synthetic.push(Object.assign({}, ev, {
+                    event: 'A3/A5 Event',
+                    message: summaryBits.length ? summaryBits.join(' | ') : (name || 'A3/A5 Event'),
+                    properties: Object.assign({}, ev && ev.properties ? ev.properties : {}, {
+                        'Event': 'A3/A5 Event',
+                        'Event Name': name || 'N/A',
+                        'Source': hasA3A5Context ? 'decoded HO context' : 'HO context fallback'
+                    })
+                }));
+            });
+        }
+        const mergedMatches = matches.length ? matches : synthetic;
         const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
-        const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
+        const mapped = window.mapEventsToNearestLogPoints(log, mergedMatches, maxDeltaMs);
+        const seen = new Set();
         return mapped.map((ev) => {
             const out = Object.assign({}, ev);
             const name = String((ev && (ev.event_name || ev.event || ev.message)) || '').trim();
@@ -2618,8 +2751,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 'Event': 'A3/A5 Event',
                 'Event Name': name || 'N/A'
             });
+            const key = [
+                parsePointTimeMs(out.time || out.timestamp || out.ts),
+                Number(out.lat).toFixed(6),
+                Number(out.lng).toFixed(6),
+                String(out.message || '')
+            ].join('|');
+            if (seen.has(key)) return null;
+            seen.add(key);
             return out;
-        });
+        }).filter(Boolean);
     };
 
     window.filterRLFEvents = (log, options = {}) => {
@@ -11937,6 +12078,55 @@ Why it matters: confirms which cell configuration drove trigger analysis.`),
         'A3/A5 threshold context check': doc(`10) RRC state, handover, and failure chains (LTE)
 Meaning: attribution consistency check (serving cell, frequency, measObject, timing).
 Why it matters: avoids blaming the wrong PCI/config when contexts change quickly.`),
+        'HO source PCI': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: source PCI of the handover/reconfiguration context selected near the clicked point.
+Why it matters: confirms which serving LTE cell the decoded HO logic started from.`),
+        'HO source EARFCN': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: source EARFCN of the selected handover/reconfiguration context.
+Why it matters: needed to separate intrafrequency and interfrequency mobility.`),
+        'HO target PCI': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: target PCI of the handover/reconfiguration context selected near the clicked point.
+Why it matters: identifies which target neighbor the HO command aimed at.`),
+        'HO target EARFCN': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: target EARFCN of the selected handover/reconfiguration context.
+Why it matters: together with source EARFCN, it defines intrafreq vs interfreq HO.`),
+        'HO type': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: handover class inferred from source and target EARFCN.
+- intrafreq: same EARFCN
+- interfreq: different EARFCN
+Why it matters: each class usually maps to different trigger logic and tuning levers.`),
+        'A3 offset': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded A3 offset, when measConfig exposes it.
+Interpretation: neighbor must beat serving by roughly this offset before A3 trigger conditions are met.`),
+        'HO hysteresis': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded hysteresis used by mobility trigger logic.
+Interpretation: larger hysteresis reduces ping-pong risk but can delay HO.`),
+        'HO TTT': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded time-to-trigger applied to the relevant mobility event.
+Interpretation: longer TTT makes HO less reactive; shorter TTT makes it more aggressive.`),
+        'A5 serving threshold': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded/inferred A5 serving threshold (threshold1) in dBm.
+Interpretation: serving must usually drop below this level before the A5 condition can trigger.`),
+        'A5 neighbor threshold': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded/inferred A5 neighbor threshold (threshold2) in dBm.
+Interpretation: target neighbor must usually exceed this level before the A5 condition can trigger.`),
+        'SIB3 reselection thresholds': doc(`10) LTE broadcast reselection thresholds (idle mode)
+Meaning: decoded LTE SIB3 parameters broadcast by the serving cell for intra-frequency idle-mode reselection.
+Typical fields shown here:
+- q-Hyst
+- cellReselectionPriority
+- s-IntraSearch / s-NonIntraSearch
+- threshServingLow
+- q-RxLevMin / q-QualMin
+This is not A3/A5 HO config. SIB3 is broadcast idle-mode policy.`),
+        'SIB5 reselection thresholds': doc(`10) LTE broadcast reselection thresholds (idle mode)
+Meaning: decoded LTE SIB5 parameters broadcast for inter-frequency idle-mode reselection.
+Typical fields shown here per target EARFCN:
+- cellReselectionPriority
+- q-RxLevMin
+- threshX-High / threshX-Low
+- q-OffsetFreq
+This is not A3/A5 HO config. SIB5 is broadcast idle-mode policy.`),
         'HO command': doc(`10) RRC state, handover, and failure chains (LTE)
 Meaning: decoded HO command message with target/reconfiguration details.
 Why it matters: confirms command issuance and target assignment.`),
@@ -15076,6 +15266,18 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'A3/A5 threshold source time': ['A3/A5 threshold source time', 'A3/A5 source time', 'rrc_recfg_meas_report_time'],
             'A3/A5 threshold source PCI': ['A3/A5 threshold source PCI', 'A3/A5 source PCI', 'rrc_recfg_src_pci', 'rrc_recfg_tgt_pci'],
             'A3/A5 threshold context check': ['A3/A5 threshold context check', 'A3/A5 context check'],
+            'HO source PCI': ['HO source PCI', 'rrc_recfg_src_pci'],
+            'HO source EARFCN': ['HO source EARFCN', 'rrc_recfg_src_earfcn'],
+            'HO target PCI': ['HO target PCI', 'rrc_recfg_tgt_pci'],
+            'HO target EARFCN': ['HO target EARFCN', 'rrc_recfg_tgt_earfcn'],
+            'HO type': ['HO type', 'HO Type', 'Handover type'],
+            'A3 offset': ['A3 offset', 'A3 Offset', 'rrc_recfg_a3_offset_db'],
+            'HO hysteresis': ['HO hysteresis', 'Hysteresis', 'rrc_recfg_hysteresis_db'],
+            'HO TTT': ['HO TTT', 'Time-to-Trigger', 'Time To Trigger', 'rrc_recfg_ttt_ms'],
+            'A5 serving threshold': ['A5 serving threshold', 'A5 Threshold1', 'A5 serving threshold (dBm)', 'rrc_recfg_a5_serving_threshold_est_dbm'],
+            'A5 neighbor threshold': ['A5 neighbor threshold', 'A5 Threshold2', 'A5 neighbor threshold (dBm)', 'rrc_recfg_a5_neighbor_threshold_est_dbm'],
+            'SIB3 reselection thresholds': ['SIB3 reselection thresholds'],
+            'SIB5 reselection thresholds': ['SIB5 reselection thresholds'],
             'HO command': ['HO command', 'HO Command', 'Handover Command'],
             'HO execution time': ['HO execution time', 'HO Execution Time', 'Handover Execution Time'],
             'HO failure': ['HO failure', 'HO Failure', 'Handover Failure', 'HOF'],
@@ -16110,6 +16312,31 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             rows.sort((a, b) => a.ms - b.ms);
             return rows;
         })();
+        const getEventPropertyCiLocal = (ev, key) => {
+            if (!ev || !ev.properties || typeof ev.properties !== 'object') return undefined;
+            const match = Object.keys(ev.properties).find((k) => String(k || '').toLowerCase() === String(key || '').toLowerCase());
+            return match ? ev.properties[match] : undefined;
+        };
+        const findNearestSibSummary = (nameRegex, summaryProp, maxDeltaMs = 120000) => {
+            if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return undefined;
+            const target = pointDetailsTsMs(p.time);
+            if (!Number.isFinite(target)) return undefined;
+            let best = null;
+            activeLog.events.forEach((ev) => {
+                const name = String(ev && (ev.event_name || ev.event || ev.message || getEventPropertyCiLocal(ev, 'Event')) || '').trim();
+                if (!nameRegex.test(name)) return;
+                const summary = getEventPropertyCiLocal(ev, summaryProp);
+                if (!hasValue(summary)) return;
+                const ts = pointDetailsTsMs(ev && (ev.time ?? ev.timestamp ?? ev.ts));
+                if (!Number.isFinite(ts)) return;
+                const d = Math.abs(ts - target);
+                if (d > maxDeltaMs) return;
+                if (!best || d < best.d) best = { d, summary };
+            });
+            return best ? best.summary : undefined;
+        };
+        const sib3ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB(?:2,SIB3|3)$/i, 'SIB3 reselection thresholds');
+        const sib5ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB5$/i, 'SIB5 reselection thresholds');
         const nearEventNames = (() => {
             const seen = new Set();
             const out = [];
@@ -16599,7 +16826,17 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         };
         const decodeA3A5FromMeasConfig = (() => {
             const cfgRows = recfgDecodedPreferredRows.filter((row) => hasValue(row && row.rrcRecfgMeasConfigJson));
-            if (!cfgRows.length) return { triggers: undefined, thresholds: undefined };
+            if (!cfgRows.length) {
+                return {
+                    triggers: undefined,
+                    thresholds: undefined,
+                    a3OffsetDb: null,
+                    hysteresisDb: null,
+                    ttt: undefined,
+                    a5ServingThresholdDbm: null,
+                    a5NeighborThresholdDbm: null
+                };
+            }
             const triggers = [];
             const addTrigger = (v) => {
                 if (!v) return;
@@ -16615,6 +16852,11 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 if (!s) return;
                 if (!thresholdsOut.includes(s)) thresholdsOut.push(s);
             };
+            let bestA3OffsetDb = null;
+            let bestHysteresisDb = null;
+            let bestTtt = undefined;
+            let bestA5ServingThresholdDbm = null;
+            let bestA5NeighborThresholdDbm = null;
             cfgRows.forEach((row) => {
                 const txt = String(row && row.rrcRecfgMeasConfigJson || '');
                 if (!txt) return;
@@ -16641,6 +16883,11 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 if (isValidA5Dbm(a5s) || isValidA5Dbm(a5n)) {
                     pushThreshold(`A5 S≈${isValidA5Dbm(a5s) ? a5s.toFixed(1) : '?'} dBm, N≈${isValidA5Dbm(a5n) ? a5n.toFixed(1) : '?'} dBm`);
                 }
+                if (bestA3OffsetDb === null && Number.isFinite(a3Offset)) bestA3OffsetDb = a3Offset;
+                if (bestHysteresisDb === null && Number.isFinite(hysteresis)) bestHysteresisDb = hysteresis;
+                if (bestTtt === undefined && ttt) bestTtt = ttt;
+                if (bestA5ServingThresholdDbm === null && isValidA5Dbm(a5s)) bestA5ServingThresholdDbm = a5s;
+                if (bestA5NeighborThresholdDbm === null && isValidA5Dbm(a5n)) bestA5NeighborThresholdDbm = a5n;
             });
             if (!triggers.length && !thresholdsOut.length) {
                 // Fallback: keep decoded context visible even if schema variant uses unfamiliar keys.
@@ -16653,7 +16900,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
             return {
                 triggers: triggers.length ? `${triggers.join('/')} measurement trigger(s) (decoded measConfig)` : undefined,
-                thresholds: thresholdsOut.length ? `${thresholdsOut.join('; ')} (decoded measConfig)` : undefined
+                thresholds: thresholdsOut.length ? `${thresholdsOut.join('; ')} (decoded measConfig)` : undefined,
+                a3OffsetDb: bestA3OffsetDb,
+                hysteresisDb: bestHysteresisDb,
+                ttt: bestTtt,
+                a5ServingThresholdDbm: bestA5ServingThresholdDbm,
+                a5NeighborThresholdDbm: bestA5NeighborThresholdDbm
             };
         })();
         const hoExecMsInferred = findNearestEventGapMs(hoCommandRowsAll, hoCompleteRowsAll, 30000);
@@ -17069,6 +17321,57 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 notes.push(`N1 ${n1RsrpNow.toFixed(1)} vs A5 N ${thrNeigh.toFixed(1)} dBm`);
             }
             return notes.length ? `Aligned (${notes.join(', ')})` : undefined;
+        })();
+        const hoContextRow = recfgDecodedPreferredRows[0] || recfgThresholdSourceRow || null;
+        const formatDbMaybe = (v, unit = 'dB') => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return undefined;
+            return `${n.toFixed(1)} ${unit}`;
+        };
+        const hoSourcePciValue = getAny('HO source PCI') ?? (Number.isFinite(hoContextRow && hoContextRow.srcPci) ? String(hoContextRow.srcPci) : undefined);
+        const hoSourceEarfcnValue = getAny('HO source EARFCN') ?? (Number.isFinite(hoContextRow && hoContextRow.srcEarfcn) ? String(hoContextRow.srcEarfcn) : undefined);
+        const hoTargetPciValue = getAny('HO target PCI') ?? (Number.isFinite(hoContextRow && hoContextRow.tgtPci) ? String(hoContextRow.tgtPci) : undefined);
+        const hoTargetEarfcnValue = getAny('HO target EARFCN') ?? (Number.isFinite(hoContextRow && hoContextRow.tgtEarfcn) ? String(hoContextRow.tgtEarfcn) : undefined);
+        const hoTypeValue = (() => {
+            const direct = getAny('HO type', 'HO Type', 'Handover type');
+            if (hasValue(direct)) return direct;
+            const src = Number(hoContextRow && hoContextRow.srcEarfcn);
+            const tgt = Number(hoContextRow && hoContextRow.tgtEarfcn);
+            if (Number.isFinite(src) && Number.isFinite(tgt)) return src === tgt ? 'IntraFreq' : 'InterFreq';
+            return undefined;
+        })();
+        const a3OffsetValue = (() => {
+            const direct = getAny('A3 offset', 'A3 Offset');
+            if (hasValue(direct)) return direct;
+            return formatDbMaybe(decodeA3A5FromMeasConfig.a3OffsetDb);
+        })();
+        const hoHysteresisValue = (() => {
+            const direct = getAny('HO hysteresis', 'Hysteresis');
+            if (hasValue(direct)) return direct;
+            return formatDbMaybe(decodeA3A5FromMeasConfig.hysteresisDb);
+        })();
+        const hoTttValue = (() => {
+            const direct = getAny('HO TTT', 'Time-to-Trigger', 'Time To Trigger');
+            if (hasValue(direct)) return direct;
+            return hasValue(decodeA3A5FromMeasConfig.ttt) ? String(decodeA3A5FromMeasConfig.ttt) : undefined;
+        })();
+        const a5ServingThresholdValue = (() => {
+            const direct = getAny('A5 serving threshold', 'A5 Threshold1', 'A5 serving threshold (dBm)');
+            if (hasValue(direct)) return direct;
+            const rowValue = toFiniteNum(recfgThresholdSourceRow && recfgThresholdSourceRow.recfgA5ServingThresholdDbm);
+            return formatDbMaybe(
+                Number.isFinite(rowValue) ? rowValue : decodeA3A5FromMeasConfig.a5ServingThresholdDbm,
+                'dBm'
+            );
+        })();
+        const a5NeighborThresholdValue = (() => {
+            const direct = getAny('A5 neighbor threshold', 'A5 Threshold2', 'A5 neighbor threshold (dBm)');
+            if (hasValue(direct)) return direct;
+            const rowValue = toFiniteNum(recfgThresholdSourceRow && recfgThresholdSourceRow.recfgA5NeighborThresholdDbm);
+            return formatDbMaybe(
+                Number.isFinite(rowValue) ? rowValue : decodeA3A5FromMeasConfig.a5NeighborThresholdDbm,
+                'dBm'
+            );
         })();
         const hoCommandEntry = getStrictMetricEntry('HO command', 'HO Command', 'Handover Command');
         const hoCommandValue = (() => {
@@ -17576,8 +17879,20 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : metricMetaFromResolvedEntry(hoStartCompleteEntry, hasValue(hoStartCompleteValue) ? { source: 'event' } : {}));
         pushMetric('UL sync loss', ulSyncLossValue, metricMetaFromResolvedEntry(ulSyncLossEntry, hasValue(ulSyncLossValue) ? { source: 'event' } : {}));
         pushMetric('DL sync loss', dlSyncLossValue, metricMetaFromResolvedEntry(dlSyncLossEntry, hasValue(dlSyncLossValue) ? { source: 'event' } : {}));
+        pushMetric('SIB3 reselection thresholds', sib3ThresholdsValue, hasValue(sib3ThresholdsValue) ? { source: 'decoded' } : {});
+        pushMetric('SIB5 reselection thresholds', sib5ThresholdsValue, hasValue(sib5ThresholdsValue) ? { source: 'decoded' } : {});
+        pushMetric('HO source PCI', hoSourcePciValue, hasValue(hoSourcePciValue) ? { source: 'decoded' } : {});
+        pushMetric('HO source EARFCN', hoSourceEarfcnValue, hasValue(hoSourceEarfcnValue) ? { source: 'decoded' } : {});
+        pushMetric('HO target PCI', hoTargetPciValue, hasValue(hoTargetPciValue) ? { source: 'decoded' } : {});
+        pushMetric('HO target EARFCN', hoTargetEarfcnValue, hasValue(hoTargetEarfcnValue) ? { source: 'decoded' } : {});
+        pushMetric('HO type', hoTypeValue, hasValue(hoTypeValue) ? { source: 'decoded' } : {});
         pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : (hasValue(a3a5TriggersValue) ? { source: 'event' } : {}));
         pushMetric('A5 event', a5EventValue, metricMetaFromResolvedEntry(a5EventEntry, hasValue(a5EventValue) ? { source: 'event' } : {}));
+        pushMetric('A3 offset', a3OffsetValue, hasValue(a3OffsetValue) ? { source: 'decoded' } : {});
+        pushMetric('HO hysteresis', hoHysteresisValue, hasValue(hoHysteresisValue) ? { source: 'decoded' } : {});
+        pushMetric('HO TTT', hoTttValue, hasValue(hoTttValue) ? { source: 'decoded' } : {});
+        pushMetric('A5 serving threshold', a5ServingThresholdValue, hasValue(a5ServingThresholdValue) ? { source: 'decoded' } : {});
+        pushMetric('A5 neighbor threshold', a5NeighborThresholdValue, hasValue(a5NeighborThresholdValue) ? { source: 'decoded' } : {});
         pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : (hasValue(a3a5ThresholdsValue) ? { source: 'inferred' } : {}));
         pushMetric('A3/A5 threshold source time', a3a5ThresholdSourceTimeValue);
         pushMetric('A3/A5 threshold source PCI', a3a5ThresholdSourcePciValue);
@@ -17672,8 +17987,20 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'HO Start/Complete': hoStartCompleteValue,
             'UL sync loss': ulSyncLossValue,
             'DL sync loss': dlSyncLossValue,
+            'SIB3 reselection thresholds': sib3ThresholdsValue,
+            'SIB5 reselection thresholds': sib5ThresholdsValue,
+            'HO source PCI': hoSourcePciValue,
+            'HO source EARFCN': hoSourceEarfcnValue,
+            'HO target PCI': hoTargetPciValue,
+            'HO target EARFCN': hoTargetEarfcnValue,
+            'HO type': hoTypeValue,
             'A3/A5 triggers': a3a5TriggersValue,
             'A5 event': a5EventValue,
+            'A3 offset': a3OffsetValue,
+            'HO hysteresis': hoHysteresisValue,
+            'HO TTT': hoTttValue,
+            'A5 serving threshold': a5ServingThresholdValue,
+            'A5 neighbor threshold': a5NeighborThresholdValue,
             'A3/A5 event thresholds': a3a5ThresholdsValue,
             'A3/A5 threshold source time': a3a5ThresholdSourceTimeValue,
             'A3/A5 threshold source PCI': a3a5ThresholdSourcePciValue,
@@ -18839,6 +19166,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     configHistory: configHistory
                 };
                 loadedLogs.push(newLog);
+                if (/4g|lte/i.test(String(technology || '')) && typeof window.enrichLteSibEvents === 'function') {
+                    window.enrichLteSibEvents(newLog).catch((err) => console.warn('SIB decode enrichment failed:', err));
+                }
 
                 if (umtsCallAnalysis && umtsCallAnalysis.summary) {
                     const s = umtsCallAnalysis.summary;
@@ -23796,11 +24126,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
             // Global events entry (kept lightweight): always expose A3/A5 event button when events exist.
             if (Array.isArray(log.events) && log.events.length > 0) {
+                const a3a5Count = (typeof window.filterA3A5Events === 'function') ? window.filterA3A5Events(log, { maxDeltaMs: 15000 }).length : 0;
                 const dropCount = (typeof window.filter3gDropCalls === 'function') ? window.filter3gDropCalls(log).length : 0;
                 const failCount = (typeof window.filter3gCallFailure === 'function') ? window.filter3gCallFailure(log).length : 0;
                 const hofCount = (typeof window.filterHOFEvents === 'function') ? window.filterHOFEvents(log, { maxDeltaMs: 15000 }).length : 0;
                 actions.appendChild(addHeader('EVENTS'));
-                actions.appendChild(addAction('A3/A5 event', 'a3a5_event', 'event'));
+                actions.appendChild(addAction(`A3/A5 event (${a3a5Count})`, 'a3a5_event', 'event'));
                 actions.appendChild(addAction('RLF', 'rlf_event', 'event'));
                 actions.appendChild(addAction(`HOF (${hofCount})`, 'hof_handover_failure', 'event'));
                 const dropBtn = addAction(`Drop Call (${dropCount})`, '3g_dropcall', 'event');
