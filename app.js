@@ -12188,11 +12188,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     function getPointDetailsMetricInfoPayload(row) {
         const baseMetric = String((row && row.baseLabel) || (row && row.label) || '').trim();
         const body = POINT_DETAILS_METRIC_INFO[baseMetric] || 'No configured description for this metric in the provided catalog.';
+        const source = String(row?.meta?.source || '').trim();
+        const estimated = !!row?.meta?.estimated;
         return {
             metric: String((row && row.label) || baseMetric || 'Metric'),
             baseMetric,
             body: String(body),
-            qosProfile: getPointDetailsMetricQosProfile(baseMetric)
+            qosProfile: getPointDetailsMetricQosProfile(baseMetric),
+            source,
+            estimated
         };
     }
 
@@ -12275,6 +12279,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const title = escapeHtml(info.metric || info.baseMetric || 'Metric info');
         const bodyHtml = formatPointMetricInfoBodyHtml(info.body || 'No details available.');
         const qosProfileHtml = formatPointMetricQosProfileHtml(info.qosProfile);
+        const sourceHtml = (info.source || info.estimated)
+            ? (
+                '<div style="margin:0 0 12px; line-height:1.58;">' +
+                '<span style="font-weight:800; color:#f8fafc;">Source:</span> ' +
+                '<span style="color:#dbeafe;">' + escapeHtml(info.source || (info.estimated ? 'estimated/inferred' : '')) + '</span>' +
+                '</div>'
+            )
+            : '';
 
         const overlayWrap = document.createElement('div');
         overlayWrap.innerHTML =
@@ -12285,7 +12297,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             '      <button id="pointMetricInfoCloseBtn" type="button" style="background:#1e293b; color:#e2e8f0; border:1px solid #475569; border-radius:999px; width:32px; height:32px; line-height:28px; font-size:18px; padding:0; cursor:pointer;">×</button>' +
             '    </div>' +
             '    <div style="padding:14px 16px 16px; flex:1 1 auto; min-height:0; overflow:auto; background:linear-gradient(180deg, rgba(15,23,42,0.62) 0%, rgba(2,6,23,0.45) 100%);">' +
-            '      <div style="font-size:14px; color:#dbeafe;">' + bodyHtml + qosProfileHtml + '</div>' +
+            '      <div style="font-size:14px; color:#dbeafe;">' + sourceHtml + bodyHtml + qosProfileHtml + '</div>' +
             '    </div>' +
             '  </div>' +
             '</div>';
@@ -14932,6 +14944,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const resolveMetricQualifier = (label, value, opts = {}) => {
             const lowSource = String(opts && opts.source || '').toLowerCase();
             if (lowSource.includes('decoded')) return 'decoded';
+            if (lowSource.includes('session')) return 'session';
+            if (lowSource.includes('event')) return 'event';
             if (lowSource.includes('inferred')) return 'inferred';
             if (opts && opts.estimated) return 'est';
             const normalized = normalizeMissing(value);
@@ -14954,9 +14968,11 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const formatMetricLabelForDisplay = (label, qualifier) => {
             const base = String(label || '').trim();
             if (!base || !qualifier) return base;
-            if (/\((?:[^)]*decoded[^)]*|[^)]*inferred[^)]*|[^)]*est[^)]*)\)/i.test(base)) return base;
+            if (/\((?:[^)]*decoded[^)]*|[^)]*inferred[^)]*|[^)]*est[^)]*|[^)]*event[^)]*|[^)]*session[^)]*)\)/i.test(base)) return base;
             const q = String(qualifier || '').toLowerCase();
             if (q === 'decoded') return `${base} (decoded)`;
+            if (q === 'event') return `${base} (event)`;
+            if (q === 'session') return `${base} (session)`;
             if (q === 'inferred') return `${base} (inferred)`;
             if (q === 'est') return `${base} (est)`;
             return base;
@@ -15099,6 +15115,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 if (meta.source || meta.estimated) return meta;
             }
             return { estimated: true };
+        };
+        const getStrictMetricEntry = (...keys) => {
+            for (const key of keys) {
+                if (!key) continue;
+                const byAny = getAnyEntry(key);
+                if (byAny && hasValue(byAny.value)) return byAny;
+                const byRun = getFromRunInfoEntry(key);
+                if (byRun && hasValue(byRun.value)) return byRun;
+            }
+            return null;
+        };
+        const metricValueFromEntry = (entry) => entry && hasValue(entry.value) ? entry.value : undefined;
+        const metricMetaFromResolvedEntry = (entry, fallback = {}) => {
+            if (!entry) return fallback;
+            const meta = metricMetaFromEntry(entry);
+            if (meta && (meta.source || meta.estimated)) return meta;
+            return fallback;
         };
         const normalizeRrcStateLabel = (raw) => {
             if (!hasValue(raw)) return null;
@@ -15894,14 +15927,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const rrcStateExactDisplay = normalizeRrcStateLabel(rrcStateExactRaw) ?? (hasValue(rrcStateExactRaw) ? String(rrcStateExactRaw) : undefined);
         const rrcStateExactSource = String(p && p.__rrcStateExactSource || '').trim();
         const prevRrc = getPointValCI(prevPoint, 'RRC State') ?? getPointByTokens(prevPoint, ['rrc', 'state']);
-        const currRrc = getAny(
+        const rrcStateEntry = getStrictMetricEntry(
             'RRC State',
             'rrcState',
             'Radio.Lte.ServingCell[8].RrcState',
             'Radio.Lte.ServingCellTotal.RrcState',
             'Radio.Lte.Rrc.State',
             'Radio.Lte.Rrc.ConnectionState'
-        ) ?? findByTokens(['rrc', 'state']) ?? findByTokens(['connection', 'state']);
+        );
+        let currRrc = metricValueFromEntry(rrcStateEntry) ?? findByTokens(['rrc', 'state']) ?? findByTokens(['connection', 'state']);
         const prevTa = getPointTimingAdvance(prevPoint);
         const currTa = normalizeTa(timingAdvanceValue);
         const getEventParamValue = (ev, id) => {
@@ -16084,6 +16118,37 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const dlTpNum = toFiniteNum(dlThroughput);
         const appDlTpNum = toFiniteNum(appThroughputDl);
         const ulTpNum = toFiniteNum(ulThroughput);
+        const pointTimeRawForSession = p?.time || p?.timestamp || p?.ts || p?.properties?.Time;
+        const pointTsForSession = pointDetailsTsMs(pointTimeRawForSession);
+        const pointUsesTimeOfDayBasis = (() => {
+            const raw = String(pointTimeRawForSession ?? '').trim();
+            return /^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/.test(raw);
+        })();
+        const normalizeSessionTsForPoint = (value) => {
+            const ts = pointDetailsTsMs(value);
+            if (!Number.isFinite(ts)) return null;
+            if (!pointUsesTimeOfDayBasis) return ts;
+            return ((ts % 86400000) + 86400000) % 86400000;
+        };
+        const activeCallSessionAtPoint = (() => {
+            if (!activeLog || !Array.isArray(activeLog.callSessions) || !Number.isFinite(pointTsForSession)) return null;
+            const sessions = activeLog.callSessions.filter((s) => {
+                if (!s) return false;
+                const kind = String(s.kind || '').toUpperCase();
+                if (kind !== 'CALL_SESSION' && kind !== 'UMTS_CALL') return false;
+                const startMs = normalizeSessionTsForPoint(s.startTime || s.startTsIso || s.startTs || s.markerTime);
+                const endMs = normalizeSessionTsForPoint(s.endTime || s.endTsRealIso || s.endTsReal || s.markerTime);
+                if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+                return pointTsForSession >= startMs && pointTsForSession <= endMs;
+            });
+            if (!sessions.length) return null;
+            sessions.sort((a, b) => {
+                const aStart = normalizeSessionTsForPoint(a.startTime || a.startTsIso || a.startTs || a.markerTime);
+                const bStart = normalizeSessionTsForPoint(b.startTime || b.startTsIso || b.startTs || b.markerTime);
+                return aStart - bStart;
+            });
+            return sessions[0];
+        })();
         // If throughput is present, RRC is practically in connected context for this DT sample.
         const hasTrafficEvidence = [dlTpNum, appDlTpNum, ulTpNum].some((v) => Number.isFinite(v) && v > 50);
         const hasConnectedSignalEvent = nearEventNames.some((n) => /(handover|rrc.*(reconfig|setup|resume|connected)|intrafrequencyhandoverevent|erab|drb|srb|securitymode|service request)/i.test(String(n || '')));
@@ -16110,13 +16175,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 const stateMatch = String(s).match(/\b(IDLE|CONNECTED|INACTIVE|CELL_DCH|CELL_FACH|CELL_PCH|URA_PCH)\b/i);
                 if (stateMatch) return stateMatch[1].toUpperCase();
             }
+            if (activeCallSessionAtPoint) return 'CONNECTED';
             if (hasConnectedSignalEvent || hasTrafficEvidence) return 'CONNECTED';
             if (hasIdleSignalEvent && !hasTrafficEvidence) return 'IDLE';
             return undefined;
         })();
+        const genericLteIdleRrc =
+            isLTE &&
+            !hasValue(rrcStateExactDisplay) &&
+            String(rrcStateEntry?.sourceKey || '').toLowerCase() === 'rrc state' &&
+            /^idle\b/i.test(String(normalizeRrcStateLabel(currRrc) ?? currRrc ?? ''));
+        if (genericLteIdleRrc) currRrc = undefined;
         const rawRrcStateValue = currRrc ?? rrcFromEvents;
         const rrcStateDisplay = normalizeRrcStateLabel(rawRrcStateValue);
         let rrcStateFinal = rrcStateDisplay ?? undefined;
+        if (!hasValue(rrcStateExactDisplay) && !hasValue(currRrc) && activeCallSessionAtPoint) {
+            rrcStateFinal = 'Connected';
+        }
         if (!hasValue(rrcStateExactDisplay) && typeof rrcStateFinal === 'string' && /^idle\b/i.test(rrcStateFinal) && (hasTrafficEvidence || hasConnectedSignalEvent)) {
             rrcStateFinal = 'Connected';
         }
@@ -16930,8 +17005,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
             return notes.length ? `Aligned (${notes.join(', ')})` : undefined;
         })();
+        const hoCommandEntry = getStrictMetricEntry('HO command', 'HO Command', 'Handover Command');
         const hoCommandValue = (() => {
-            const direct = getAny('HO command', 'HO Command', 'Handover Command');
+            const direct = metricValueFromEntry(hoCommandEntry);
             if (hasValue(direct)) return direct;
             const row = recfgDecodedPreferredRows[0];
             if (row && /^yes$/i.test(String(row.rrcRecfgFullDecoded || ''))) {
@@ -16950,53 +17026,63 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (hasValue(hoCommandDecoded)) return hoCommandDecoded;
             return hoCommandInferred;
         })();
-        const hoExecutionTimeValue = getAny('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency') ?? hoExecutionTimeInferred;
-        const hoStartCompleteValue = getAny('HO Start/Complete') ?? hoStartCompleteDecoded ?? findByTokens(['ho', 'start']) ?? findByTokens(['ho', 'complete']) ?? hoFromEvents;
-        const hoFailureValue = getAny('HO failure', 'HO Failure', 'Handover Failure', 'HOF') ?? hoFailureInferred;
+        const hoExecutionTimeEntry = getStrictMetricEntry('HO execution time', 'HO Execution Time', 'Handover Execution Time', 'HO latency');
+        const hoExecutionTimeValue = metricValueFromEntry(hoExecutionTimeEntry) ?? hoExecutionTimeInferred;
+        const hoStartCompleteEntry = getStrictMetricEntry('HO Start/Complete');
+        const hoStartCompleteValue = metricValueFromEntry(hoStartCompleteEntry) ?? hoStartCompleteDecoded ?? hoFromEvents;
+        const hoFailureEntry = getStrictMetricEntry('HO failure', 'HO Failure', 'Handover Failure', 'HOF');
+        const hoFailureValue = metricValueFromEntry(hoFailureEntry) ?? hoFailureInferred;
+        const ulSyncLossEntry = getStrictMetricEntry('UL sync loss (UE can’t reach NodeB)', 'UL sync loss', 'Uplink sync loss');
         const ulSyncLossValue = pickFirstUsable(
-            getAny('UL sync loss (UE can’t reach NodeB)', 'UL sync loss', 'Uplink sync loss'),
+            metricValueFromEntry(ulSyncLossEntry),
             summarizeNearEventRows(ulSyncLossRowsAll, 2)
         );
+        const dlSyncLossEntry = getStrictMetricEntry('DL sync loss (Interference / coverage)', 'DL sync loss', 'Downlink sync loss', 'Out of sync');
         const dlSyncLossValue = pickFirstUsable(
-            getAny('DL sync loss (Interference / coverage)', 'DL sync loss', 'Downlink sync loss', 'Out of sync'),
+            metricValueFromEntry(dlSyncLossEntry),
             summarizeNearEventRows(dlSyncLossRowsAll, 2)
         );
-        const rrcRelCauseValue = getAny(
+        const rrcRelCauseEntry = getStrictMetricEntry(
             'rrc_rel_cause',
             'RRC Release Cause',
             'RRC Release',
             'RRC Cause',
             'RRC_RELEASE_CAUSE'
-        ) ?? findByTokens(['rrc', 'release', 'cause']);
-        const csRelCauseValue = getAny(
+        );
+        const rrcRelCauseValue = metricValueFromEntry(rrcRelCauseEntry) ?? findByTokens(['rrc', 'release', 'cause']);
+        const csRelCauseEntry = getStrictMetricEntry(
             'cs_rel_cause',
             'CS Release Cause',
             'CS Release',
             'CS Cause',
             'CS_RELEASE_CAUSE'
-        ) ?? findByTokens(['cs', 'release', 'cause']);
-        const iucsStatusValue = getAny(
+        );
+        const csRelCauseValue = metricValueFromEntry(csRelCauseEntry) ?? findByTokens(['cs', 'release', 'cause']);
+        const iucsStatusEntry = getStrictMetricEntry(
             'iucs_status',
             'IU-CS Status',
             'IUCS Status',
             'IU CS Status'
-        ) ?? findByTokens(['iu', 'cs', 'status']);
-        const nodebTxPowerRaw = getAny(
+        );
+        const iucsStatusValue = metricValueFromEntry(iucsStatusEntry) ?? findByTokens(['iu', 'cs', 'status']);
+        const nodebTxPowerEntry = getStrictMetricEntry(
             'NodeB Tx Power',
             'NodeB Tx',
             'NodeB TxPower',
             'NodeB Tx power'
-        ) ?? findByTokens(['nodeb', 'tx', 'power']);
+        );
+        const nodebTxPowerRaw = metricValueFromEntry(nodebTxPowerEntry) ?? findByTokens(['nodeb', 'tx', 'power']);
         const nodebTxPowerValue = (() => {
             const n = Number(nodebTxPowerRaw);
             if (!Number.isFinite(n)) return nodebTxPowerRaw;
             return Number.isInteger(n) ? `${n} dBm` : `${n.toFixed(1)} dBm`;
         })();
+        const a5EventEntry = getStrictMetricEntry('A5 event', 'A5 Event', 'Event A5');
         const a5EventValue = pickFirstUsable(
-            getAny('A5 event', 'A5 Event', 'Event A5'),
+            metricValueFromEntry(a5EventEntry),
             summarizeNearEventRows(a5RowsAll, 2)
         );
-        const matchedFailedSession = (() => {
+        const matchedCallSession = (() => {
             if (!activeLog || !Array.isArray(activeLog.callSessions) || !activeLog.callSessions.length) return null;
             const explicitMode = getSessionModeFromMapPoint(p);
             if (explicitMode) {
@@ -17019,10 +17105,12 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 const byCallId = activeLog.callSessions.find((s) => String(s && (s.callId ?? s.callTransactionId) || '').trim() === pointCallId);
                 if (byCallId) return byCallId;
             }
-            const candidates = activeLog.callSessions.filter((s) => s &&
-                s._source === 'umts' &&
-                s.kind === 'UMTS_CALL' &&
-                (s.drop || s.setupFailure || /DROP|ABNORMAL|CALL_SETUP_FAILURE/i.test(String(s.endType || ''))));
+            const candidates = activeLog.callSessions.filter((s) => {
+                if (!s) return false;
+                const kind = String(s.kind || '').toUpperCase();
+                if (kind === 'UMTS_CALL' || kind === 'CALL_SESSION') return true;
+                return !!String(s.callId ?? s.callTransactionId ?? '').trim();
+            });
             if (!candidates.length) return null;
             const clickedTs = parsePointTimeMs(p?.time || p?.timestamp || p?.ts || p?.properties?.Time);
             let best = null;
@@ -17051,25 +17139,27 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (best.timeDiff <= 3000 || best.geoDiff <= 40) return best.session;
             return null;
         })();
-        const matchedUmtsClassification = matchedFailedSession?.umts?.classification || matchedFailedSession?.classification || null;
+        const matchedSessionClassification = matchedCallSession?.umts?.classification || matchedCallSession?.classification || null;
         const dropCallValue = (() => {
             const direct = getAny('Drop Call', 'Call Drop', 'Dropped Call');
             if (hasValue(direct)) return direct;
-            if (!matchedFailedSession) return undefined;
-            const endType = String(matchedFailedSession.endType || '').toUpperCase();
-            if (matchedFailedSession.setupFailure || endType.includes('CALL_SETUP_FAILURE')) return 'No (setup failure)';
-            if (matchedFailedSession.drop || endType.includes('DROP') || endType.includes('ABNORMAL')) return 'Yes';
+            if (!matchedCallSession) return undefined;
+            const endType = String(matchedCallSession.endType || '').toUpperCase();
+            if (matchedCallSession.setupFailure || endType.includes('CALL_SETUP_FAILURE')) return 'No (setup failure)';
+            if (matchedCallSession.drop || endType.includes('DROP') || endType.includes('ABNORMAL')) return 'Yes';
+            if (endType === 'NORMAL' || endType === 'SUCCESS') return 'No';
             return undefined;
         })();
         const dropCauseValue = pickFirstUsable(
             getAny('Drop cause', 'Drop Cause', 'DropCause', 'drop_cause', 'Failure Cause', 'Failure cause'),
-            matchedUmtsClassification?.category,
-            matchedFailedSession?.failureReason?.cause,
-            matchedFailedSession?.failureReason?.label,
-            matchedUmtsClassification?.reason,
-            matchedFailedSession?.endTrigger,
-            matchedFailedSession?.endType
+            matchedSessionClassification?.category,
+            matchedCallSession?.failureReason?.cause,
+            matchedCallSession?.failureReason?.label,
+            matchedSessionClassification?.reason,
+            matchedCallSession?.endTrigger,
+            matchedCallSession?.endType
         );
+        const rlfEntry = getStrictMetricEntry('RLF', 'RLF indication', 'Radio Link Failure');
         const rlfFromPointEvent = (() => {
             const directCandidates = [
                 p && p.event,
@@ -17090,7 +17180,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const rlfValue = pickFirstUsable(
             rlfFromPointEvent,
             rlfExactFallback,
-            getAny('RLF', 'RLF indication', 'Radio Link Failure'),
+            metricValueFromEntry(rlfEntry),
             rlfInferred,
             rlfGlobalFallback
         );
@@ -17362,26 +17452,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushHeader('EVENTS');
         pushMetric('RRC State (decoded exact)', rrcStateExactDisplay, rrcStateExactSource ? { source: rrcStateExactSource } : {});
         pushMetric('RRC State', rrcStateFinal);
-        pushMetric('RRC Re-establishment', rrcReestablishmentValue, rrcReestablishmentDecodedSource ? { source: 'decoded' } : {});
-        pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : {});
-        pushMetric('UL sync loss', ulSyncLossValue);
-        pushMetric('DL sync loss', dlSyncLossValue);
-        pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : {});
-        pushMetric('A5 event', a5EventValue);
-        pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : {});
+        pushMetric('RRC Re-establishment', rrcReestablishmentValue, rrcReestablishmentDecodedSource ? { source: 'decoded' } : (hasValue(rrcReestablishmentValue) ? { source: 'event' } : {}));
+        pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : metricMetaFromResolvedEntry(hoStartCompleteEntry, hasValue(hoStartCompleteValue) ? { source: 'event' } : {}));
+        pushMetric('UL sync loss', ulSyncLossValue, metricMetaFromResolvedEntry(ulSyncLossEntry, hasValue(ulSyncLossValue) ? { source: 'event' } : {}));
+        pushMetric('DL sync loss', dlSyncLossValue, metricMetaFromResolvedEntry(dlSyncLossEntry, hasValue(dlSyncLossValue) ? { source: 'event' } : {}));
+        pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : (hasValue(a3a5TriggersValue) ? { source: 'event' } : {}));
+        pushMetric('A5 event', a5EventValue, metricMetaFromResolvedEntry(a5EventEntry, hasValue(a5EventValue) ? { source: 'event' } : {}));
+        pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : (hasValue(a3a5ThresholdsValue) ? { source: 'inferred' } : {}));
         pushMetric('A3/A5 threshold source time', a3a5ThresholdSourceTimeValue);
         pushMetric('A3/A5 threshold source PCI', a3a5ThresholdSourcePciValue);
         pushMetric('A3/A5 threshold context check', a3a5ThresholdContextCheckValue);
-        pushMetric('RRC_REL_CAUSE', rrcRelCauseValue);
-        pushMetric('CS_REL_CAUSE', csRelCauseValue);
-        pushMetric('IUCS_STATUS', iucsStatusValue);
-        pushMetric('HO command', hoCommandValue, hoCommandDecodedSource ? { source: 'decoded' } : {});
-        pushMetric('HO execution time', hoExecutionTimeValue, hoExecutionTimeDecodedSource ? { source: 'decoded' } : {});
-        pushMetric('HO failure', hoFailureValue);
-        pushMetric('NodeB Tx Power', nodebTxPowerValue);
-        pushMetric('Drop Call', dropCallValue);
-        pushMetric('Drop Cause', dropCauseValue);
-        pushMetric('RLF', rlfValue);
+        pushMetric('RRC_REL_CAUSE', rrcRelCauseValue, metricMetaFromResolvedEntry(rrcRelCauseEntry));
+        pushMetric('CS_REL_CAUSE', csRelCauseValue, metricMetaFromResolvedEntry(csRelCauseEntry));
+        pushMetric('IUCS_STATUS', iucsStatusValue, metricMetaFromResolvedEntry(iucsStatusEntry));
+        pushMetric('HO command', hoCommandValue, hoCommandDecodedSource ? { source: 'decoded' } : metricMetaFromResolvedEntry(hoCommandEntry, hasValue(hoCommandValue) ? { source: 'event' } : {}));
+        pushMetric('HO execution time', hoExecutionTimeValue, hoExecutionTimeDecodedSource ? { source: 'decoded' } : metricMetaFromResolvedEntry(hoExecutionTimeEntry, hasValue(hoExecutionTimeValue) ? { source: 'event' } : {}));
+        pushMetric('HO failure', hoFailureValue, metricMetaFromResolvedEntry(hoFailureEntry, hasValue(hoFailureValue) ? { source: 'event' } : {}));
+        pushMetric('NodeB Tx Power', nodebTxPowerValue, metricMetaFromResolvedEntry(nodebTxPowerEntry));
+        pushMetric('Drop Call', dropCallValue, hasValue(dropCallValue) && !getAny('Drop Call', 'Call Drop', 'Dropped Call') ? { source: 'session' } : {});
+        pushMetric('Drop Cause', dropCauseValue, hasValue(dropCauseValue) && !getAny('Drop cause', 'Drop Cause', 'DropCause', 'drop_cause', 'Failure Cause', 'Failure cause') ? { source: 'session' } : {});
+        pushMetric('RLF', rlfValue, metricMetaFromResolvedEntry(rlfEntry, hasValue(rlfValue) ? { source: 'event' } : {}));
         pushMetric('RLF root-cause details', rlfRootCauseDetailsValue, rlfDecodedSource ? { source: 'decoded' } : {});
         pushMetric('Reestablishment timeline', reestablishmentTimelineValue, rlfDecodedSource ? { source: 'decoded' } : {});
         pushMetric('RLF reason breakdown', rlfReasonBreakdownValue, rlfDecodedSource ? { source: 'decoded' } : {});
