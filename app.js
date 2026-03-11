@@ -14438,6 +14438,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 return valB - valA;
             });
 
+        let lteMonIdx = 1;
+        let lteDetIdx = 1;
         const neighbors = neighborsSource.map((n, i) => {
             const resolved = resolveN(n);
             const rat = inferNeighborRat(n);
@@ -14450,7 +14452,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const displaySourceKind = (sourceKindRaw === 'decoded' && !Number.isFinite(rsrpNum) && !Number.isFinite(rsrqNum))
                 ? 'configured'
                 : sourceKindRaw;
-            const typeBase = isLteTrp ? ('N' + (i + 1)) : (n.type || ('N' + (i + 1)));
+            const existingType = String(n && n.type || '').trim().toUpperCase();
+            const hasMeasuredRf = Number.isFinite(rsrpNum) || Number.isFinite(rsrqNum) || Number.isFinite(Number(n && n.sinr));
+            let typeBase = isLteTrp ? ('N' + (i + 1)) : (n.type || ('N' + (i + 1)));
+            if (isLTE && !/^[AMD]\d+$/i.test(existingType)) {
+                const prefix = hasMeasuredRf ? 'M' : 'D';
+                typeBase = prefix === 'M' ? `M${lteMonIdx++}` : `D${lteDetIdx++}`;
+            }
             const typeDisplay = (isLteTrp && rat !== 'LTE') ? `${typeBase} (${rat})` : typeBase;
             const bsicDisplay = normalizeBsicValue(n && n.bsic, true) || '-';
             const bcchDisplay = Number.isFinite(Number(n && n.bcch))
