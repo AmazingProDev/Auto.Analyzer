@@ -2267,6 +2267,7 @@ const UmtsCallAnalyzer = {
                     sessionKey: key,
                     callId: String(callId || ''),
                     deviceId: String(deviceId || ''),
+                    rat: 'UNKNOWN',
                     startTs: null,
                     connectedTs: null,
                     cadStatus: null,
@@ -2344,6 +2345,7 @@ const UmtsCallAnalyzer = {
             const callDeviceId = String(parts[4] || '').trim();
             const sessionKey = `${callDeviceId}:${callId}`;
             const s = getSession(sessionKey, callId, callDeviceId);
+            if (state.rat) s.rat = String(state.rat).trim().toUpperCase() || s.rat;
 
             if (header === 'CAA') {
                 if (!Number.isFinite(s.startTs) || ts < s.startTs) s.startTs = ts;
@@ -2391,9 +2393,18 @@ const UmtsCallAnalyzer = {
         };
         out.forEach(s => {
             s.endTsReal = s.endTsCare || s.endTsCaf || s.endTsCad || null;
-            if (s.cadStatus === 1 && s.cadCause === 16) s.resultType = 'SUCCESS';
-            else if (!Number.isFinite(s.connectedTs) && (Number.isFinite(s.endTsCaf) || s.cadStatus === 2 || s.cadCause === 102)) s.resultType = 'CALL_SETUP_FAILURE';
-            else if (Number.isFinite(s.connectedTs) && (Number.isFinite(s.endTsCare) || s.cadStatus === 2 || (Number.isFinite(s.cadCause) && s.cadCause !== 16))) s.resultType = 'DROP_CALL';
+            const connected = Number.isFinite(s.connectedTs);
+            const terminalCadSuccess = s.cadStatus === 1 && Number.isFinite(s.endTsCad);
+            const setupFailureLike = !connected && (Number.isFinite(s.endTsCaf) || s.cadStatus === 2 || s.cadCause === 102);
+            const abnormalAfterConnect = connected && (
+                Number.isFinite(s.endTsCare) ||
+                s.cadStatus === 2 ||
+                (Number.isFinite(s.cadCause) && !terminalCadSuccess && s.cadCause !== 16)
+            );
+
+            if (terminalCadSuccess || (connected && s.cadCause === 16)) s.resultType = 'SUCCESS';
+            else if (setupFailureLike) s.resultType = 'CALL_SETUP_FAILURE';
+            else if (abnormalAfterConnect) s.resultType = 'DROP_CALL';
             else if (Number.isFinite(s.connectedTs)) s.resultType = 'INCOMPLETE_OR_UNKNOWN_END';
             else s.resultType = 'UNCLASSIFIED';
 
@@ -2474,9 +2485,11 @@ const UmtsCallAnalyzer = {
                 }))
                 : [];
 
+            const sessionRat = String(s.rat || '').trim().toUpperCase();
+            const sessionPrefix = (sessionRat && sessionRat !== 'UNKNOWN') ? sessionRat : 'CALL';
             return {
-                sessionId: `UMTS-${s.callId}`,
-                kind: 'UMTS_CALL',
+                sessionId: `${sessionPrefix}-${s.callId}`,
+                kind: 'CALL_SESSION',
                 deviceId: s.deviceId || '',
                 callId: s.callId,
                 callTransactionId: s.callId,
@@ -4124,33 +4137,17 @@ const NMFParser = {
         });
 
         const customMetrics = Array.from(metricSet);
-        const callSessions = CallSessionBuilder
-            .build(measurementPoints.concat(eventPoints, signalingPoints))
-            .map(s => ({
-                ...s,
-                _source: s?._source || 'generic',
-                kind: s?.kind || 'RRC_SESSION'
-            }));
-        const umtsCallAnalysis = UmtsCallAnalyzer.analyze(content, { windowSeconds: 10 });
-        const umtsUiSessions = UmtsCallAnalyzer.toUiSessions(umtsCallAnalysis);
-        const keyFrom = (s) => {
-            const dev = String(s?.deviceId ?? s?.sessionId ?? '').trim();
-            const cid = String(s?.callId ?? s?.callTransactionId ?? '').trim();
-            return `${dev}|${cid}`;
-        };
-        const indexByKey = new Map();
-        for (let i = 0; i < callSessions.length; i++) {
-            indexByKey.set(keyFrom(callSessions[i]), i);
-        }
-        for (const us of umtsUiSessions) {
-            const k = keyFrom(us);
-            const idx = indexByKey.get(k);
-            if (idx === undefined) {
-                callSessions.push({ ...us, _source: 'umts' });
-                indexByKey.set(k, callSessions.length - 1);
-            } else {
-                callSessions[idx] = { ...callSessions[idx], ...us, _source: 'umts' };
-            }
+        const callHeaderSet = new Set(['CAA', 'CAC', 'CAD', 'CAF', 'CARE']);
+        const hasCallMarkers = String(content || '').split(/\r?\n/).some((line) => {
+            const hdr = String(line || '').split(',', 1)[0].trim().toUpperCase();
+            return callHeaderSet.has(hdr);
+        });
+
+        let callSessions = [];
+        let umtsCallAnalysis = null;
+        if (hasCallMarkers) {
+            umtsCallAnalysis = UmtsCallAnalyzer.analyze(content, { windowSeconds: 10 });
+            callSessions = UmtsCallAnalyzer.toUiSessions(umtsCallAnalysis);
         }
 
         return {

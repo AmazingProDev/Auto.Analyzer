@@ -6117,6 +6117,19 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'Cell Name': (servingRes && servingRes.name) ? servingRes.name : (stashCellName || 'Unknown'),
             'Tech': p.tech || sourceObj.Tech || (p.rsrp !== undefined ? 'LTE' : 'UMTS')
         });
+        const simpleIsLte = /LTE|NR|5G/i.test(String(stashDataSimple.Tech || ''));
+        const simpleAnalysisButtonsHtml = simpleIsLte
+            ? (
+                '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare LTE Analysis</button>\n' +
+                '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep LTE Analysis</button>\n' +
+                '                    <button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>\n'
+            )
+            : (
+                '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>\n' +
+                '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>\n' +
+                '                    <button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>\n' +
+                '                    <button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>\n'
+            );
         const simpleFindByTokens = (...tokens) => {
             const wanted = tokens.map(t => String(t || '').toLowerCase());
             const rows = [sourceObj, p?.parsed, p?.parsed?.serving];
@@ -6358,10 +6371,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             '                </div>\n' +
             '                \n' +
             '                <div class="point-analysis-actions" style="display:none; flex-wrap:wrap; gap:5px; margin-top:10px;">\n' +
-            '                    <button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>\n' +
-            '                    <button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>\n' +
-            '                    <button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>\n' +
-            '                    <button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>\n' +
+            simpleAnalysisButtonsHtml +
             '                </div>\n' +
             '                    <!-- Hidden data stash for the analyzer -->\n' +
             '                    <script type="application/json" id="point-data-stash">\n' +
@@ -7293,6 +7303,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             }
 
             const data = JSON.parse(script.textContent);
+            const analysisTech = String(data?.Tech || '').toUpperCase();
+            const isLteAnalysis = /LTE|NR|5G/.test(analysisTech);
             const result = analyzeSmartCarePoint(data);
             const { kpi, status, identity, confidence } = result;
             const deepResult = buildDeepAnalysisScenarios(data, result);
@@ -7363,7 +7375,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 <div class="analysis-modal-overlay deep-analysis-modal" style="z-index:10003;" onclick="if(event.target===this && this.dataset.dragging!=='true') this.remove()">
                     <div class="analysis-modal" style="width: 760px; max-width: 95vw; position:fixed; z-index:10004;">
                         <div class="analysis-header" style="background:#0b2447; cursor:grab;">
-                            <h3>Deep SmartCare Analysis</h3>
+                            <h3>${isLteAnalysis ? 'Deep LTE Analysis' : 'Deep Analysis'}</h3>
                             <button class="analysis-close-btn" onclick="this.closest('.analysis-modal-overlay').remove()">×</button>
                         </div>
                         <div class="analysis-content" style="padding:18px; background:#071326; color:#e5e7eb; max-height:78vh; overflow-y:auto;">
@@ -13846,7 +13858,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         }
 
         const isLteTrp = Boolean(isTrpPoint && isLTE);
-        const idHeader = isLteTrp ? 'PCI' : 'SC';
+        const idHeader = isLTE ? 'PCI' : 'SC';
         const levelHeader = isLTE ? 'RSRP' : 'RSCP';
         const qualHeader = isLTE ? 'RSRQ' : 'EcNo';
 
@@ -14055,10 +14067,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
         const readNeighborMetric = (prefix, idx) => {
             const base = `${prefix}${idx}`;
-            const sc = getValCI(`${base}_sc`) ?? getValCI(`${base} SC`);
-            const rscp = getValCI(`${base}_rscp`) ?? getValCI(`${base} RSCP`);
-            const ecno = getValCI(`${base}_ecno`) ?? getValCI(`${base} EcNo`);
-            const freq = getValCI(`${base}_freq`) ?? getValCI(`${base} Freq`) ?? sFreq;
+            const sc = getValCI(`${base}_sc`)
+                ?? getValCI(`${base} SC`)
+                ?? getValCI(`${base}_psc`)
+                ?? getValCI(`${base} PSC`)
+                ?? getValCI(`${base}_pci`)
+                ?? getValCI(`${base} PCI`)
+                ?? getValCI(`${base}_identity`)
+                ?? getValCI(`${base} Identity`);
+            const rscp = getValCI(`${base}_rscp`) ?? getValCI(`${base} RSCP`) ?? getValCI(`${base}_rsrp`) ?? getValCI(`${base} RSRP`);
+            const ecno = getValCI(`${base}_ecno`) ?? getValCI(`${base} EcNo`) ?? getValCI(`${base}_rsrq`) ?? getValCI(`${base} RSRQ`);
+            const freq = getValCI(`${base}_freq`)
+                ?? getValCI(`${base} Freq`)
+                ?? getValCI(`${base}_uarfcn`)
+                ?? getValCI(`${base} UARFCN`)
+                ?? getValCI(`${base}_earfcn`)
+                ?? getValCI(`${base} EARFCN`)
+                ?? sFreq;
             const fuzzyNameByBase = (() => {
                 const b = String(base || '').toLowerCase();
                 const check = (obj) => {
@@ -14129,15 +14154,39 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         };
         const servingScKey = normalizeCellKeyPart(showDualServing ? cellServingScForDedup : sSC);
         const servingFreqKey = normalizeCellKeyPart(showDualServing ? cellServingFreqForDedup : sFreq);
+        const toFiniteMetric = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
         const isServingEquivalentNeighbor = (n) => {
             if (!n) return false;
             const nScKey = normalizeCellKeyPart(n.sc);
             const nFreqKey = normalizeCellKeyPart(n.freq);
             if (!nScKey || !servingScKey) return false;
             if (nScKey !== servingScKey) return false;
-            // If frequency is missing on either side, SC match alone is enough to avoid duplicate serving row.
-            if (!servingFreqKey || !nFreqKey) return true;
-            return nFreqKey === servingFreqKey;
+            if (servingFreqKey && nFreqKey && nFreqKey !== servingFreqKey) return false;
+
+            const neighborRscp = toFiniteMetric(n.rscp ?? n.rsrp);
+            const neighborEcno = toFiniteMetric(n.ecno ?? n.rsrq);
+            const servingRscp = toFiniteMetric(sRSCP);
+            const servingEcno = toFiniteMetric(sEcNo);
+
+            // If the neighbor carries no distinct RF metrics, treat it as a duplicate serving snapshot.
+            if (neighborRscp === null && neighborEcno === null) return true;
+
+            const sameRscp = (neighborRscp !== null && servingRscp !== null)
+                ? Math.abs(neighborRscp - servingRscp) < 0.15
+                : false;
+            const sameEcno = (neighborEcno !== null && servingEcno !== null)
+                ? Math.abs(neighborEcno - servingEcno) < 0.15
+                : false;
+
+            if (neighborRscp !== null && servingRscp !== null) {
+                if (neighborEcno !== null && servingEcno !== null) return sameRscp && sameEcno;
+                return sameRscp;
+            }
+            if (neighborEcno !== null && servingEcno !== null) return sameEcno;
+            return true;
         };
 
         const getNeighborSourceFilter = () => {
@@ -17446,6 +17495,26 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'Cell Name': sName,
             'Tech': isLTE ? 'LTE' : 'UMTS'
         });
+        if (isLTE) {
+            delete stashDataLog.RSCP;
+            delete stashDataLog.EcNo;
+            delete stashDataLog['Serving RSCP'];
+            delete stashDataLog['Serving EcNo'];
+            delete stashDataLog['Serving SC'];
+            delete stashDataLog['Serving Freq'];
+        }
+        const logAnalysisButtonsHtml = isLTE
+            ? (
+                '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare LTE Analysis</button>' +
+                '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep LTE Analysis</button>' +
+                '<button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>'
+            )
+            : (
+                '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
+                '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>' +
+                '<button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>' +
+                '<button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>'
+            );
 
         pushHeader('Neighbors');
         for (let i = 1; i <= 4; i++) {
@@ -17658,10 +17727,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             extraMetricsSection +
 
             '<div class="point-analysis-actions" style="display:none; flex-wrap:wrap; gap:5px; margin-top:15px; border-top:1px solid #444; padding-top:10px;">' +
-            '<button class="btn btn-blue" onclick="window.analyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px;">SmartCare Analysis</button>' +
-            '<button class="btn btn-blue" onclick="window.deepAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0f766e; color:#fff;">Deep Analysis</button>' +
-            '<button class="btn btn-blue" onclick="window.dtAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#0ea5e9; color:#fff;">DT Analysis</button>' +
-            '<button class="btn btn-blue" onclick="window.dtLteAnalyzePoint(this)" style="flex:1; justify-content: center; min-width: 120px; background-color:#2563eb; color:#fff;">DT LTE Analysis</button>' +
+            logAnalysisButtonsHtml +
             '</div>' +
 
             '<!-- Hidden data stash for the analyzer -->' +
@@ -21855,7 +21921,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         filtered.forEach(s => {
             const tr = document.createElement('tr');
             tr.style.background = '#0f172a';
-            const isUmtsCall = String(s?.kind || '').toUpperCase() === 'UMTS_CALL' || s?.drop === true || s?.setupFailure === true;
+            const sessionKind = String(s?.kind || '').toUpperCase();
+            const isCallSession =
+                sessionKind === 'UMTS_CALL' ||
+                sessionKind === 'CALL_SESSION' ||
+                !!String(s?.callTransactionId || s?.callId || '').trim() ||
+                s?.drop === true ||
+                s?.setupFailure === true;
 
             const startMs = parseSessionTimeToMs(s.startTime);
             const endMs = parseSessionTimeToMs(s.endTime);
@@ -21866,13 +21938,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const rabCount = Array.isArray(s.rabLifecycle) ? s.rabLifecycle.length : 0;
             const measCount = Array.isArray(s.radioMeasurementsTimeline) ? s.radioMeasurementsTimeline.length : 0;
             const idsText = [s.imsi || '-', s.tmsi || '-'].join(' / ');
-            const endType = isUmtsCall ? (s.endType || '-') : (s.endType || 'RRC_SESSION');
+            const endType = isCallSession ? (s.endType || '-') : (s.endType || 'RRC_SESSION');
             const failureReason = s.failureReason?.label || '-';
             const ynHtml = (val) => val
                 ? '<span style="color:#f87171; font-weight:600;">Yes</span>'
                 : '<span style="color:#22c55e; font-weight:600;">No</span>';
-            const dropText = ynHtml(isUmtsCall ? !!s.drop : false);
-            const setupFailureText = ynHtml(isUmtsCall ? !!s.setupFailure : false);
+            const dropText = ynHtml(isCallSession ? !!s.drop : false);
+            const setupFailureText = ynHtml(isCallSession ? !!s.setupFailure : false);
 
             const td = (value) => '<td style="padding:6px; border:1px solid #334155; vertical-align:top;">' + value + '</td>';
             tr.innerHTML =
@@ -21892,7 +21964,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
             const dropCell = tr.children[8];
             const setupCell = tr.children[9];
-            if (dropCell && isUmtsCall && s.drop) {
+            if (dropCell && isCallSession && s.drop) {
                 dropCell.style.cursor = 'pointer';
                 dropCell.style.color = '#fca5a5';
                 dropCell.title = 'Click to analyze drop and sync map';
@@ -21902,7 +21974,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     renderDropAnalysis(log, s);
                 };
             }
-            if (setupCell && isUmtsCall && s.setupFailure) {
+            if (setupCell && isCallSession && s.setupFailure) {
                 setupCell.style.cursor = 'pointer';
                 setupCell.style.color = '#fde68a';
                 setupCell.title = 'Click to analyze setup failure and sync map';
@@ -23143,7 +23215,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     container.appendChild(item);
                     return;
                 }
-                const groups = log.trpRunId ? {
+                const isLteNmfLog = Boolean(!log.trpRunId && /LTE/i.test(String(log.tech || '')));
+                const groups = (log.trpRunId || isLteNmfLog) ? {
                     'Serving Metrics': [],
                     'Neighbor Metrics': [],
                     'Throughput': [],
@@ -23224,10 +23297,71 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     if (n === 'freq' || n === 'servingfreq') return 'Serving Freq';
                     return metric;
                 };
+                const isLteServingMetric = (metric) => {
+                    const n = normMetricName(metric);
+                    return n === 'level' ||
+                        n === 'rsrp' ||
+                        n === 'servingrsrp' ||
+                        n === 'ecno' ||
+                        n === 'rsrq' ||
+                        n === 'servingrsrq' ||
+                        n === 'sc' ||
+                        n === 'pci' ||
+                        n === 'servingsc' ||
+                        n === 'servingpci' ||
+                        n === 'cellid' ||
+                        n === 'servingcellid' ||
+                        n === 'freq' ||
+                        n === 'servingfreq' ||
+                        n === 'earfcn' ||
+                        n === 'servingearfcn' ||
+                        n === 'lac' ||
+                        n === 'tac' ||
+                        n === 'servinglac' ||
+                        n === 'servingtac' ||
+                        n === 'band' ||
+                        n === 'servingband' ||
+                        n === 'rssi' ||
+                        n === 'servingrssi';
+                };
+                const isLteNeighborMetric = (metric) => {
+                    const flat = normMetricName(metric);
+                    return /^[amdn]\d+(rscp|ecno|sc|freq|rsrp|rsrq|pci|earfcn)$/.test(flat);
+                };
+                const formatServingLabelLte = (metric) => {
+                    const n = normMetricName(metric);
+                    if (n === 'level' || n === 'rsrp' || n === 'servingrsrp') return 'Serving RSRP';
+                    if (n === 'ecno' || n === 'rsrq' || n === 'servingrsrq') return 'Serving RSRQ';
+                    if (n === 'sc' || n === 'pci' || n === 'servingsc' || n === 'servingpci') return 'Serving PCI';
+                    if (n === 'cellid' || n === 'servingcellid') return 'Serving Cell ID';
+                    if (n === 'freq' || n === 'servingfreq' || n === 'earfcn' || n === 'servingearfcn') return 'Serving EARFCN';
+                    if (n === 'lac' || n === 'tac' || n === 'servinglac' || n === 'servingtac') return 'Serving TAC';
+                    if (n === 'band' || n === 'servingband') return 'Serving Band';
+                    if (n === 'rssi' || n === 'servingrssi') return 'Serving RSSI';
+                    return metric;
+                };
+                const formatLteNeighborLabel = (metric) => {
+                    const flat = normMetricName(metric);
+                    const m = flat.match(/^([amdn])(\d+)(rscp|ecno|sc|freq|rsrp|rsrq|pci|earfcn)$/);
+                    if (!m) return metric;
+                    const prefix = m[1].toUpperCase();
+                    const idx = m[2];
+                    const field = m[3];
+                    if (field === 'rscp' || field === 'rsrp') return `${prefix}${idx} RSRP`;
+                    if (field === 'ecno' || field === 'rsrq') return `${prefix}${idx} RSRQ`;
+                    if (field === 'sc' || field === 'pci') return `${prefix}${idx} PCI`;
+                    if (field === 'freq' || field === 'earfcn') return `${prefix}${idx} EARFCN`;
+                    return metric;
+                };
 
                 log.customMetrics.forEach(m => {
                     const low = String(m || '').toLowerCase();
-                    if (log.trpRunId) {
+                    if (log.trpRunId || isLteNmfLog) {
+                        if (isLteNmfLog && isLteNeighborMetric(m)) {
+                            groups['Neighbor Metrics'].push(m);
+                        } else if (isLteNmfLog && isLteServingMetric(m)) {
+                            groups['Serving Metrics'].push(m);
+                        } else
                         if (low.includes('neighbor') || low.includes('neighbour') || low.includes('.cell[') || low.includes('[64].') || low.includes('adjacent')) {
                             groups['Neighbor Metrics'].push(m);
                         } else if (low.includes('throughput') || low.includes('rate') || low.includes('bitrate') || low.includes('kbit') || low.includes('mbit')) {
@@ -23284,7 +23418,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     body.style.gap = '4px';
 
                     // Open "Serving set" by default
-                    if (groupName === 'Serving set') {
+                    if (groupName === 'Serving set' || (isLteNmfLog && groupName === 'Serving Metrics')) {
                         body.style.display = 'flex';
                         header.innerHTML = '▼ ' + groupName;
                     }
@@ -23296,7 +23430,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         header.innerHTML = (isHidden ? '▼ ' : '▶ ') + groupName;
                     };
 
-                    if (!log.trpRunId && groupName === 'Serving set') {
+                    if (!log.trpRunId && !isLteNmfLog && groupName === 'Serving set') {
                         const serving3G = list.filter((metric) => isServing3GMetric(metric));
                         const serving2G = list.filter((metric) => isServing2GMetric(metric));
                         const renderServingSubset = (title, subset, formatter) => {
@@ -23342,11 +23476,18 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         list.forEach(metric => {
                             if (String(metric).toLowerCase() === 'analyze point') return;
                             let label = metric;
-                            if (metric === 'level' || metric === 'Level') label = 'RSCP';
-                            if (metric === 'ecno' || metric === 'EcNo') label = 'Serving EcNo';
-                            if (metric === 'sc' || metric === 'SC') label = 'Scrambling Code';
-                            if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
-                            if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
+                            if (isLteNmfLog) {
+                                if (groupName === 'Serving Metrics') label = formatServingLabelLte(metric);
+                                else if (groupName === 'Neighbor Metrics') label = formatLteNeighborLabel(metric);
+                                else if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
+                                else if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
+                            } else {
+                                if (metric === 'level' || metric === 'Level') label = 'RSCP';
+                                if (metric === 'ecno' || metric === 'EcNo') label = 'Serving EcNo';
+                                if (metric === 'sc' || metric === 'SC') label = 'Scrambling Code';
+                                if (metric === 'throughput_dl') label = 'DL Throughput (Kbps)';
+                                if (metric === 'throughput_ul') label = 'UL Throughput (Kbps)';
+                            }
                             const labelKey = String(label).toLowerCase();
                             if (seenLabels.has(labelKey)) return;
                             seenLabels.add(labelKey);
