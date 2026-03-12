@@ -19,6 +19,7 @@ data/
 runs/
 uploads/
 node_modules/
+backend-cache/
 
 # Local environment
 .env

@@ -217,3 +217,68 @@ Tune these before changing classifier code.
 - The current implementation is production-oriented but still heuristic when logs lack explicit LTE signaling.
 - `A3/A5` decoding, CIO, and target selection quality improve when the raw log exposes those fields explicitly.
 - The current UI is a dedicated modal rather than a separate route; it is still backed by a standalone analysis module and API surface.
+
+## Self-hosted backend for Vercel
+
+If you want to keep LTE IntraFreq HO and exact A3 analysis inside this codebase without Railway, the practical setup is:
+
+1. Host the frontend on Vercel.
+2. Host [server.py](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/server.py) from the same repo on your own backend service.
+3. Point Vercel proxy env var `OPTIM_BACKEND_URL` to that backend.
+
+This keeps the LTE exact A3 logic in your own code while avoiding Vercel Python bundle-size limits.
+
+### Container image
+
+Use:
+
+- [Dockerfile.backend](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/Dockerfile.backend)
+- [requirements.backend.txt](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/requirements.backend.txt)
+
+This backend image intentionally avoids `libsql` and uses the built-in SQLite path by default. `libsql` is only needed if you explicitly enable Turso mode.
+
+Build locally:
+
+```bash
+docker build -f Dockerfile.backend -t optim-analyzer-backend .
+```
+
+Run locally:
+
+```bash
+docker run --rm -p 8000:8000 optim-analyzer-backend
+```
+
+### What the backend serves
+
+Important routes used by the hosted frontend:
+
+- `POST /api/lte_rrc/precompute`
+- `POST /api/lte_rrc/decode`
+- `POST /api/lte_rrc/decode_batch`
+- `POST /api/ho-analysis/run`
+
+### Pointing Vercel to your backend
+
+Set one of these in the Vercel project:
+
+- `OPTIM_BACKEND_URL`
+- `RAILWAY_BACKEND_URL`
+- `API_BASE_URL`
+
+Recommended:
+
+```text
+OPTIM_BACKEND_URL=https://your-backend-host.example.com
+```
+
+### Recommended deployment shape
+
+Use any container-friendly host you control. Examples:
+
+- a VPS with Docker
+- Render web service
+- Fly.io app
+- any internal container platform
+
+The important part is that the backend runs [server.py](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/server.py) from this repo, so LTE exact A3 stays inside your own code.

@@ -1,0 +1,18 @@
+.git
+.gitignore
+.vercel
+.env
+node_modules
+uploads
+logs/Export Nemo
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+outputs
+Site.png
+site_tower.png
+25Dec16_195209.1.nmfs
+Rabat.xlsx
+export_Nemo.csv

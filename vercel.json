@@ -2,9 +2,6 @@
   "functions": {
     "api/**/*.js": {
       "maxDuration": 60
-    },
-    "api/**/*.py": {
-      "maxDuration": 60
     }
   }
 }
