@@ -4067,9 +4067,14 @@ const NMFParser = {
                 }
                 if (!direction) direction = inferDirectionFromMessage(message);
 
+                const payloadHex = (() => {
+                    const candidate = String(parts[parts.length - 1] || '').replace(/^"|"$/g, '').trim();
+                    return (/^[0-9A-F]+$/i.test(candidate) && candidate.length >= 16) ? candidate : '';
+                })();
+                const eventName = String(message || '').trim() || 'Unknown';
                 allPoints.push({
                     lat: gps ? gps.lat : null, lng: gps ? gps.lng : null,
-                    time, type: 'SIGNALING', message, details: line,
+                    time, type: 'SIGNALING', event: eventName, event_name: eventName, message, details: line,
                     radioSnapshot: { cellId: state.cid, lac: state.lac, psc: state.psc, rnc: state.rnc, neighbors: currentNeighbors.slice(0, 8) },
                     rrc_rel_cause: state.rrc_cause || 'N/A',
                     cs_rel_cause: state.cs_cause || 'N/A',
@@ -4080,13 +4085,15 @@ const NMFParser = {
                     properties: {
                         'Time': time,
                         'Type': 'SIGNALING',
+                        'Event': eventName,
                         'Message': message,
                         'RRC Release Cause': state.rrc_cause || 'N/A',
                         'CS Release Cause': state.cs_cause || 'N/A',
                         'Direction': direction || 'N/A',
                         'Channel': channel || 'N/A',
                         'Freq': !isNaN(freq) ? freq : 'N/A',
-                        'SC': !isNaN(sc) ? sc : 'N/A'
+                        'SC': !isNaN(sc) ? sc : 'N/A',
+                        ...(payloadHex ? { 'RRC raw payload hex': payloadHex } : {})
                     }
                 });
             } else if (upperHeader === 'RLCBLER' || upperHeader === 'MACBLER') {

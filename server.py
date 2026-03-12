@@ -48,11 +48,17 @@ from trp_importer import (
     fetch_run_track,
     fetch_run_events,
 )
-from lte_rrc_per_decoder import decode_rrc_event_payload
+from lte_rrc_per_decoder import (
+    decode_measurement_report_payload,
+    decode_rrc_event_payload,
+    decode_rrc_reconfiguration_payload,
+)
 
 UPLOAD_DIR = os.environ.get("OPTIM_UPLOAD_DIR", "/tmp/optim_uploads")
 DB_PATH = None  # kept for backward compatibility; in-memory store ignores it
 NMFS_CONFIG_PATH = os.environ.get("OPTIM_NMFS_CONFIG_PATH", os.path.join(UPLOAD_DIR, "nmfs_converter_config.json"))
+HO_ANALYSIS_STORE = {}
+HO_ANALYSIS_SEQ = 0
 
 
 def _json(handler: SimpleHTTPRequestHandler, obj, status: int = 200):
@@ -336,6 +342,43 @@ def _run_nmfs_converter(input_path: str) -> dict:
     return result
 
 
+def _run_ho_analysis(payload: dict) -> dict:
+    cli_path = os.path.join(os.path.dirname(__file__), "ho_analysis_cli.js")
+    if not os.path.isfile(cli_path):
+        raise RuntimeError("ho_analysis_cli.js is missing")
+    proc = subprocess.run(
+        ["node", cli_path],
+        input=json.dumps(payload).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    stdout = (proc.stdout or b"").decode("utf-8", errors="replace")
+    stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise RuntimeError(f"HO analysis failed: {stderr or stdout or proc.returncode}")
+    try:
+        parsed = json.loads(stdout)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid HO analysis response: {exc}") from exc
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("error") or "HO analysis failed")
+    return parsed["result"]
+
+
+def _store_ho_analysis(result: dict, source: dict | None = None) -> str:
+    global HO_ANALYSIS_SEQ
+    HO_ANALYSIS_SEQ += 1
+    analysis_id = f"ho-analysis-{HO_ANALYSIS_SEQ:05d}"
+    HO_ANALYSIS_STORE[analysis_id] = {
+        "id": analysis_id,
+        "createdAt": result.get("generatedAt"),
+        "result": result,
+        "source": source or {},
+    }
+    return analysis_id
+
+
 class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         # quieter logs
@@ -361,6 +404,56 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/nmfs/config":
                 cfg = _get_nmfs_effective_config()
                 _json(self, {"status": "success", "config": cfg, "configPath": NMFS_CONFIG_PATH})
+                return
+
+            if path.startswith("/api/ho-analysis/"):
+                parts = path.strip("/").split("/")
+                if len(parts) < 3:
+                    _json(self, {"status": "error", "message": "Bad request"}, 400)
+                    return
+                analysis_id = parts[2]
+                record = HO_ANALYSIS_STORE.get(analysis_id)
+                if not record:
+                    _json(self, {"status": "error", "message": "HO analysis not found"}, 404)
+                    return
+                result = record["result"]
+                if len(parts) == 4 and parts[3] == "events":
+                    qs = parse_qs(parsed.query or "")
+                    page = max(1, int((qs.get("page") or ["1"])[0]))
+                    page_size = max(1, min(500, int((qs.get("pageSize") or ["100"])[0])))
+                    events = list(result.get("events") or [])
+                    start = (page - 1) * page_size
+                    end = start + page_size
+                    _json(self, {
+                        "status": "success",
+                        "analysisId": analysis_id,
+                        "page": page,
+                        "pageSize": page_size,
+                        "total": len(events),
+                        "events": events[start:end],
+                    })
+                    return
+                if len(parts) == 5 and parts[3] == "events":
+                    event_id = parts[4]
+                    event = next((ev for ev in result.get("events") or [] if str(ev.get("id")) == event_id), None)
+                    if not event:
+                        _json(self, {"status": "error", "message": "HO event not found"}, 404)
+                        return
+                    _json(self, {"status": "success", "analysisId": analysis_id, "event": event})
+                    return
+                if len(parts) == 4 and parts[3] == "kpis":
+                    _json(self, {"status": "success", "analysisId": analysis_id, "kpis": result.get("kpis")})
+                    return
+                if len(parts) == 4 and parts[3] == "export":
+                    _json(self, {"status": "success", "analysisId": analysis_id, "result": result})
+                    return
+                _json(self, {
+                    "status": "success",
+                    "analysisId": analysis_id,
+                    "summary": result.get("kpis", {}).get("summary"),
+                    "normalization": result.get("normalization"),
+                    "debug": result.get("debug"),
+                })
                 return
 
             if path == "/api/runs":
@@ -536,8 +629,76 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception:
                     _json(self, {"status": "error", "message": "Invalid payloadHex"}, 400)
                     return
-                decoded = decode_rrc_event_payload(payload_bytes, event_name)
+                name_lc = event_name.lower()
+                if "measurementreport" in name_lc:
+                    decoded = decode_measurement_report_payload(payload_bytes)
+                elif "rrcconnectionreconfiguration" in name_lc and "complete" not in name_lc:
+                    decoded = decode_rrc_reconfiguration_payload(payload_bytes)
+                else:
+                    decoded = decode_rrc_event_payload(payload_bytes, event_name)
                 _json(self, {"status": "success", "decoded": decoded})
+                return
+
+            if path == "/api/lte_rrc/decode_batch":
+                payload = _parse_json_body(self)
+                items = payload.get("items")
+                if not isinstance(items, list) or not items:
+                    _json(self, {"status": "error", "message": "items array is required"}, 400)
+                    return
+                decoded_items = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    event_name = str(item.get("eventName") or item.get("event_name") or "").strip()
+                    payload_hex = str(item.get("payloadHex") or item.get("payload_hex") or "").strip()
+                    if not event_name or not payload_hex:
+                        continue
+                    try:
+                        payload_bytes = bytes.fromhex(payload_hex)
+                    except Exception:
+                        decoded_items.append({
+                            "eventName": event_name,
+                            "payloadHex": payload_hex,
+                            "decoded": None,
+                            "error": "Invalid payloadHex",
+                        })
+                        continue
+                    name_lc = event_name.lower()
+                    if "measurementreport" in name_lc:
+                        decoded = decode_measurement_report_payload(payload_bytes)
+                    elif "rrcconnectionreconfiguration" in name_lc and "complete" not in name_lc:
+                        decoded = decode_rrc_reconfiguration_payload(payload_bytes)
+                    else:
+                        decoded = decode_rrc_event_payload(payload_bytes, event_name)
+                    decoded_items.append({
+                        "eventName": event_name,
+                        "payloadHex": payload_hex,
+                        "decoded": decoded,
+                    })
+                _json(self, {"status": "success", "items": decoded_items})
+                return
+
+            if path == "/api/ho-analysis/run":
+                payload = _parse_json_body(self)
+                dataset = payload.get("dataset")
+                if dataset is None:
+                    _json(self, {"status": "error", "message": "dataset is required"}, 400)
+                    return
+                result = _run_ho_analysis({
+                    "dataset": dataset,
+                    "options": payload.get("options") or {},
+                })
+                analysis_id = _store_ho_analysis(result, {
+                    "label": payload.get("label"),
+                    "source": payload.get("source"),
+                })
+                _json(self, {
+                    "status": "success",
+                    "analysisId": analysis_id,
+                    "summary": result.get("kpis", {}).get("summary"),
+                    "normalization": result.get("normalization"),
+                    "eventCount": len(result.get("events") or []),
+                })
                 return
 
             if path == "/api/trp/import":

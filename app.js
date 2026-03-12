@@ -682,6 +682,19 @@ document.addEventListener('DOMContentLoaded', () => {
             if (modal) modal.style.display = 'block';
         };
     }
+    const btnLteHoAnalysis = document.getElementById('btnLteHoAnalysis');
+    if (btnLteHoAnalysis) {
+        btnLteHoAnalysis.onclick = async () => {
+            try {
+                if (typeof window.openLteHoAnalysisForActiveLog === 'function') {
+                    await window.openLteHoAnalysisForActiveLog();
+                }
+            } catch (err) {
+                console.error('LTE HO analysis open failed:', err);
+                alert('LTE HO analysis error: ' + (err && err.message ? err.message : err));
+            }
+        };
+    }
 
     const btnImportSites = document.getElementById('btnImportSites');
     if (btnImportSites) {
@@ -2419,11 +2432,114 @@ document.addEventListener('DOMContentLoaded', () => {
         return [];
     };
 
+    const getUnifiedLogEvents = (log, options = {}) => {
+        if (!log || typeof log !== 'object') return [];
+        const includePointEventsFallback = options.includePointEventsFallback !== false;
+        const out = [];
+        const seen = new Set();
+        const addRows = (rows) => {
+            (Array.isArray(rows) ? rows : []).forEach((row) => {
+                if (!row || typeof row !== 'object' || seen.has(row)) return;
+                seen.add(row);
+                out.push(row);
+            });
+        };
+        addRows(log.events);
+        addRows(log.signaling);
+        if (!out.length && includePointEventsFallback) {
+            addRows((Array.isArray(log.points) ? log.points : []).filter((row) => String(row && row.type || '').toUpperCase() === 'EVENT'));
+        }
+        return out;
+    };
+
+    const runTasksWithConcurrency = async (items, worker, limit = 8) => {
+        const rows = Array.isArray(items) ? items : [];
+        if (!rows.length) return [];
+        const concurrency = Math.max(1, Number(limit) || 1);
+        const results = new Array(rows.length);
+        let nextIndex = 0;
+        const runner = async () => {
+            while (nextIndex < rows.length) {
+                const idx = nextIndex++;
+                results[idx] = await worker(rows[idx], idx);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, () => runner()));
+        return results;
+    };
+
+    const decodeLteRrcPayloadCached = async (cache, pending, eventName, payloadHex) => {
+        const cacheKey = `${eventName}|${payloadHex}`;
+        if (cache.has(cacheKey)) return cache.get(cacheKey);
+        if (pending.has(cacheKey)) return pending.get(cacheKey);
+        const promise = (async () => {
+            try {
+                const res = await fetch('/api/lte_rrc/decode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ eventName, payloadHex })
+                });
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success') return null;
+                const decoded = data.decoded || null;
+                cache.set(cacheKey, decoded);
+                return decoded;
+            } catch (_err) {
+                return null;
+            } finally {
+                pending.delete(cacheKey);
+            }
+        })();
+        pending.set(cacheKey, promise);
+        return promise;
+    };
+
+    const populateLteRrcDecodeCacheBatch = async (cache, pending, items, chunkSize = 120) => {
+        const uniqueItems = [];
+        const seen = new Set();
+        (Array.isArray(items) ? items : []).forEach((item) => {
+            const eventName = String(item && item.eventName || '').trim();
+            const payloadHex = String(item && item.payloadHex || '').trim();
+            if (!eventName || !payloadHex) return;
+            const cacheKey = `${eventName}|${payloadHex}`;
+            if (cache.has(cacheKey) || pending.has(cacheKey) || seen.has(cacheKey)) return;
+            seen.add(cacheKey);
+            uniqueItems.push({ eventName, payloadHex, cacheKey });
+        });
+        if (!uniqueItems.length) return;
+        const batches = [];
+        for (let i = 0; i < uniqueItems.length; i += chunkSize) {
+            batches.push(uniqueItems.slice(i, i + chunkSize));
+        }
+        for (const batch of batches) {
+            try {
+                const res = await fetch('/api/lte_rrc/decode_batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        items: batch.map((row) => ({ eventName: row.eventName, payloadHex: row.payloadHex }))
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success' || !Array.isArray(data.items)) continue;
+                data.items.forEach((row) => {
+                    const eventName = String(row && row.eventName || '').trim();
+                    const payloadHex = String(row && row.payloadHex || '').trim();
+                    if (!eventName || !payloadHex) return;
+                    cache.set(`${eventName}|${payloadHex}`, row.decoded || null);
+                });
+            } catch (_err) {
+                break;
+            }
+        }
+    };
+
     window.enrichLteSibEvents = async (log) => {
-        if (!log || !Array.isArray(log.events) || !log.events.length || typeof fetch !== 'function') return;
+        const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
+        if (!log || !allEvents.length || typeof fetch !== 'function') return;
         if (log.__sibEnrichmentDone) return;
         if (log.__sibEnrichmentPromise) return log.__sibEnrichmentPromise;
-        const sibEvents = log.events.filter((ev) => {
+        const sibEvents = allEvents.filter((ev) => {
             const name = String(ev && (ev.event_name || ev.event || ev.message || ev?.properties?.Event) || '').trim();
             return /^SystemInformation - SIB(?:2,SIB3|3|5)$/i.test(name);
         });
@@ -2432,6 +2548,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         const cache = log.__sibDecodeCache || (log.__sibDecodeCache = new Map());
+        const pending = log.__sibDecodePending || (log.__sibDecodePending = new Map());
         const getPropCI = (obj, wanted) => {
             if (!obj || typeof obj !== 'object') return undefined;
             const key = Object.keys(obj).find((k) => String(k || '').toLowerCase() === String(wanted || '').toLowerCase());
@@ -2466,28 +2583,18 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         log.__sibEnrichmentPromise = (async () => {
             let successCount = 0;
-            await Promise.all(sibEvents.map(async (ev) => {
+            await populateLteRrcDecodeCacheBatch(cache, pending, sibEvents.map((ev) => {
+                const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
+                const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+                const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+                return { eventName, payloadHex };
+            }), 80);
+            await runTasksWithConcurrency(sibEvents, async (ev) => {
                 const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : (ev.properties = {});
                 const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
                 const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
                 if (!eventName || !payloadHex) return;
-                const cacheKey = `${eventName}|${payloadHex}`;
-                let decoded = cache.get(cacheKey);
-                if (!decoded) {
-                    try {
-                        const res = await fetch('/api/lte_rrc/decode', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ eventName, payloadHex })
-                        });
-                        const data = await res.json();
-                        if (!res.ok || data.status !== 'success') return;
-                        decoded = data.decoded || null;
-                        cache.set(cacheKey, decoded);
-                    } catch (_e) {
-                        return;
-                    }
-                }
+                const decoded = await decodeLteRrcPayloadCached(cache, pending, eventName, payloadHex);
                 if (!decoded || !decoded.ok || !decoded.summary) return;
                 const profile = String(decoded.message_id || '').toLowerCase();
                 props['RRC decoder'] = String(decoded.decoder || 'pycrate_rrclte');
@@ -2500,12 +2607,337 @@ document.addEventListener('DOMContentLoaded', () => {
                     props['SIB5 decoded JSON'] = JSON.stringify(decoded.summary);
                     successCount += 1;
                 }
-            }));
+            }, 6);
             log.__sibEnrichmentDone = successCount > 0;
             log.__sibEnrichmentPromise = null;
             return successCount;
         })();
         return log.__sibEnrichmentPromise;
+    };
+
+    window.enrichLteRrcMobilityEvents = async (log) => {
+        const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
+        if (!log || !allEvents.length || typeof fetch !== 'function') return;
+        if (log.__lteRrcMobilityEnrichmentDone) return;
+        if (log.__lteRrcMobilityEnrichmentPromise) return log.__lteRrcMobilityEnrichmentPromise;
+        const toNumIfFinite = (v) => {
+            if (v === null || v === undefined || v === '') return null;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const toInt = (v) => {
+            const n = toNumIfFinite(v);
+            return Number.isFinite(n) ? Math.round(n) : null;
+        };
+        const sanitizeLteEarfcn = (v) => {
+            const n = toNumIfFinite(v);
+            if (!Number.isFinite(n)) return null;
+            const rounded = Math.round(n);
+            return rounded >= 0 ? rounded : null;
+        };
+        const parseJsonSafe = (raw) => {
+            if (raw === null || raw === undefined) return null;
+            if (typeof raw === 'object') return raw;
+            const txt = String(raw || '').trim();
+            if (!txt || txt === '-' || /^n\/?a$/i.test(txt)) return null;
+            try {
+                return JSON.parse(txt);
+            } catch (_e) {
+                return null;
+            }
+        };
+        const getPropCI = (obj, wanted) => {
+            if (!obj || typeof obj !== 'object') return undefined;
+            const key = Object.keys(obj).find((k) => String(k || '').toLowerCase() === String(wanted || '').toLowerCase());
+            return key ? obj[key] : undefined;
+        };
+        const eventTsMs = (ev) => {
+            const raw = ev && (ev.time ?? ev.timestamp ?? ev.ts ?? ev?.properties?.Time);
+            const iso = Date.parse(String(raw || '').trim());
+            if (!Number.isNaN(iso)) return iso;
+            const txt = String(raw || '').trim();
+            const m = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+            if (!m) return NaN;
+            const hh = parseInt(m[1], 10);
+            const mm = parseInt(m[2], 10);
+            const ss = parseInt(m[3], 10);
+            const ms = parseInt(String(m[4] || '0').padEnd(3, '0').slice(0, 3), 10);
+            return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+        };
+        const formatTimeLabel = (value) => {
+            const ts = Number(value);
+            if (!Number.isFinite(ts)) return 'N/A';
+            const msOfDay = ((ts % 86400000) + 86400000) % 86400000;
+            const hh = String(Math.floor(msOfDay / 3600000)).padStart(2, '0');
+            const mm = String(Math.floor((msOfDay % 3600000) / 60000)).padStart(2, '0');
+            const ss = String(Math.floor((msOfDay % 60000) / 1000)).padStart(2, '0');
+            const ms = String(Math.floor(msOfDay % 1000)).padStart(3, '0');
+            return `${hh}:${mm}:${ss}.${ms}`;
+        };
+        const resolveA3ForMeasurementReport = (mrEvent, decodedMr, recfgRows) => {
+            if (!mrEvent || !decodedMr || !decodedMr.summary) return null;
+            const measId = toInt(decodedMr.summary.measId);
+            if (!Number.isFinite(measId)) return null;
+            const mrTs = eventTsMs(mrEvent);
+            const matchingRecfg = (Array.isArray(recfgRows) ? recfgRows : [])
+                .filter((row) => row && row.decodedMeasResolver && Array.isArray(row.decodedMeasResolver.a3Resolvers) && row.decodedMeasResolver.a3Resolvers.some((r) => toInt(r && r.measId) === measId))
+                .sort((a, b) => {
+                    const aTs = Number(a.ts);
+                    const bTs = Number(b.ts);
+                    const aDelta = Number.isFinite(mrTs) && Number.isFinite(aTs) ? ((aTs <= mrTs) ? (mrTs - aTs) : (1e12 + (aTs - mrTs))) : 1e15;
+                    const bDelta = Number.isFinite(mrTs) && Number.isFinite(bTs) ? ((bTs <= mrTs) ? (mrTs - bTs) : (1e12 + (bTs - mrTs))) : 1e15;
+                    return aDelta - bDelta;
+                })[0];
+            if (!matchingRecfg) return null;
+            const a3Resolver = matchingRecfg.decodedMeasResolver.a3Resolvers.find((r) => toInt(r && r.measId) === measId) || null;
+            if (!a3Resolver) return null;
+            const reportCfg = a3Resolver.reportConfig && typeof a3Resolver.reportConfig === 'object' ? a3Resolver.reportConfig : {};
+            const measObject = a3Resolver.measObject && typeof a3Resolver.measObject === 'object' ? a3Resolver.measObject : {};
+            const triggerQuantity = String(reportCfg.triggerQuantity || 'RSRP').toUpperCase();
+            const serving = decodedMr.serving && typeof decodedMr.serving === 'object' ? decodedMr.serving : {};
+            const neighborRows = Array.isArray(decodedMr.neighbors_lte) ? decodedMr.neighbors_lte : [];
+            const sourcePci = toInt(mrEvent && getPropCI(mrEvent.properties || {}, 'Serving PCI'));
+            const sourceEarfcn = sanitizeLteEarfcn(getPropCI(mrEvent.properties || {}, 'Serving EARFCN'));
+            const measurementKey = triggerQuantity === 'RSRQ' ? 'rsrq_db' : 'rsrp_dbm';
+            const Ms = toNumIfFinite(serving[measurementKey]);
+            const Ofn = toNumIfFinite(measObject.offsetFreqDb);
+            const inferredServingFreq = sanitizeLteEarfcn(measObject.carrierFreq);
+            const sameFreqAssumption = Number.isFinite(sourceEarfcn) && Number.isFinite(inferredServingFreq)
+                ? sourceEarfcn === inferredServingFreq
+                : true;
+            const Ofs = sameFreqAssumption ? Ofn : 0;
+            const servingCellCfg = (Array.isArray(measObject.cells) ? measObject.cells : []).find((cell) => toInt(cell && cell.physCellId) === sourcePci) || null;
+            const Ocs = toNumIfFinite(servingCellCfg && servingCellCfg.cellIndividualOffsetDb);
+            const Off = toNumIfFinite(reportCfg.a3OffsetDb);
+            const Hys = toNumIfFinite(reportCfg.hysteresisDb);
+            const assumptions = [];
+            if (!Number.isFinite(Ofn)) assumptions.push('Neighbor offsetFreq not configured; assumed 0 dB.');
+            if (!Number.isFinite(Ofs)) assumptions.push(sameFreqAssumption ? 'Serving offsetFreq assumed same as target measObject (same-frequency).' : 'Serving offsetFreq unavailable; assumed 0 dB.');
+            if (!Number.isFinite(Ocs)) assumptions.push('Serving CIO not configured in measObject; assumed 0 dB.');
+            if (!Number.isFinite(Off)) assumptions.push('A3 offset unavailable in reportConfig.');
+            if (!Number.isFinite(Hys)) assumptions.push('A3 hysteresis unavailable in reportConfig.');
+            if (!Number.isFinite(Ms)) assumptions.push(`Serving ${triggerQuantity} unavailable in MeasurementReport.`);
+            const evaluatedNeighbors = neighborRows.map((row) => {
+                const pci = toInt(row && row.pci);
+                const Mn = toNumIfFinite(row && row[measurementKey]);
+                const cellCfg = (Array.isArray(measObject.cells) ? measObject.cells : []).find((cell) => toInt(cell && cell.physCellId) === pci) || null;
+                const Ocn = toNumIfFinite(cellCfg && cellCfg.cellIndividualOffsetDb);
+                const lhsEnter = Number.isFinite(Mn) ? Mn + (Number.isFinite(Ofn) ? Ofn : 0) + (Number.isFinite(Ocn) ? Ocn : 0) - (Number.isFinite(Hys) ? Hys : 0) : null;
+                const rhs = Number.isFinite(Ms) ? Ms + (Number.isFinite(Ofs) ? Ofs : 0) + (Number.isFinite(Ocs) ? Ocs : 0) + (Number.isFinite(Off) ? Off : 0) : null;
+                const lhsLeave = Number.isFinite(Mn) ? Mn + (Number.isFinite(Ofn) ? Ofn : 0) + (Number.isFinite(Ocn) ? Ocn : 0) + (Number.isFinite(Hys) ? Hys : 0) : null;
+                return {
+                    pci,
+                    Mn,
+                    Ocn: Number.isFinite(Ocn) ? Ocn : 0,
+                    lhsEnter,
+                    rhs,
+                    lhsLeave,
+                    enterSatisfied: Number.isFinite(lhsEnter) && Number.isFinite(rhs) ? lhsEnter > rhs : null,
+                    leaveSatisfied: Number.isFinite(lhsLeave) && Number.isFinite(rhs) ? lhsLeave < rhs : null,
+                    deltaVsThreshold: (Number.isFinite(lhsEnter) && Number.isFinite(rhs)) ? (lhsEnter - rhs) : null
+                };
+            }).filter((row) => Number.isFinite(row.pci) || Number.isFinite(row.Mn));
+            evaluatedNeighbors.sort((a, b) => {
+                const da = Number.isFinite(a.deltaVsThreshold) ? a.deltaVsThreshold : -Infinity;
+                const db = Number.isFinite(b.deltaVsThreshold) ? b.deltaVsThreshold : -Infinity;
+                return db - da;
+            });
+            const best = evaluatedNeighbors[0] || null;
+            const summaryBits = [];
+            summaryBits.push(`measId ${measId}`);
+            summaryBits.push(`reportConfig ${toInt(a3Resolver.reportConfigId)}`);
+            summaryBits.push(`measObject ${toInt(a3Resolver.measObjectId)}`);
+            if (Number.isFinite(inferredServingFreq)) summaryBits.push(`EARFCN ${inferredServingFreq}`);
+            if (Number.isFinite(Off)) summaryBits.push(`Off ${Off.toFixed(1)} dB`);
+            if (Number.isFinite(Hys)) summaryBits.push(`Hys ${Hys.toFixed(1)} dB`);
+            if (Number.isFinite(toInt(reportCfg.timeToTriggerMs))) summaryBits.push(`TTT ${toInt(reportCfg.timeToTriggerMs)} ms`);
+            const evaluationSummary = best
+                ? `PCI ${Number.isFinite(best.pci) ? best.pci : '?'}: LHSenter ${Number.isFinite(best.lhsEnter) ? best.lhsEnter.toFixed(1) : 'N/A'} ${triggerQuantity === 'RSRQ' ? 'dB' : 'dBm'} vs RHS ${Number.isFinite(best.rhs) ? best.rhs.toFixed(1) : 'N/A'} ${triggerQuantity === 'RSRQ' ? 'dB' : 'dBm'} => enter ${best.enterSatisfied === null ? 'unknown' : (best.enterSatisfied ? 'true' : 'false')}`
+                : 'No LTE neighbors available for A3 evaluation.';
+            return {
+                measId,
+                triggerQuantity,
+                sourceTimeMs: matchingRecfg.ts,
+                sourceTimeLabel: formatTimeLabel(matchingRecfg.ts),
+                sourcePci: Number.isFinite(toInt(getPropCI(matchingRecfg.event.properties || {}, 'HO target PCI') || getPropCI(matchingRecfg.event.properties || {}, 'rrc_recfg_tgt_pci'))) ? toInt(getPropCI(matchingRecfg.event.properties || {}, 'HO target PCI') || getPropCI(matchingRecfg.event.properties || {}, 'rrc_recfg_tgt_pci')) : null,
+                reportConfigId: toInt(a3Resolver.reportConfigId),
+                measObjectId: toInt(a3Resolver.measObjectId),
+                carrierFreq: inferredServingFreq,
+                servingPci: sourcePci,
+                servingEarfcn: sourceEarfcn,
+                servingMetric: Ms,
+                neighborOffsetFreqDb: Number.isFinite(Ofn) ? Ofn : 0,
+                servingOffsetFreqDb: Number.isFinite(Ofs) ? Ofs : 0,
+                servingCioDb: Number.isFinite(Ocs) ? Ocs : 0,
+                a3OffsetDb: Off,
+                hysteresisDb: Hys,
+                timeToTriggerMs: toInt(reportCfg.timeToTriggerMs),
+                mappingSummary: summaryBits.join(' | '),
+                evaluationSummary,
+                assumptions,
+                bestNeighbor: best,
+                neighbors: evaluatedNeighbors
+            };
+        };
+        const candidateEvents = allEvents.filter((ev) => {
+            const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
+            const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+            const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+            return payloadHex && (/^MeasurementReport$/i.test(eventName) || /^RRCConnectionReconfiguration$/i.test(eventName));
+        });
+        if (!candidateEvents.length) {
+            log.__lteRrcMobilityEnrichmentDone = true;
+            return;
+        }
+        const cache = log.__lteRrcDecodeCache || (log.__lteRrcDecodeCache = new Map());
+        const pending = log.__lteRrcDecodePending || (log.__lteRrcDecodePending = new Map());
+        const renderResolverSummary = (resolver) => {
+            if (!resolver || typeof resolver !== 'object') return '';
+            const a3 = Array.isArray(resolver.a3Resolvers) ? resolver.a3Resolvers : [];
+            if (!a3.length) return '';
+            return a3.map((row) => {
+                const reportCfg = row && row.reportConfig || {};
+                const measObject = row && row.measObject || {};
+                const cell = Array.isArray(measObject.cells) ? measObject.cells[0] : null;
+                const bits = [];
+                if (Number.isFinite(toInt(row && row.measId))) bits.push(`measId ${toInt(row.measId)}`);
+                if (Number.isFinite(toInt(row && row.reportConfigId))) bits.push(`reportConfig ${toInt(row.reportConfigId)}`);
+                if (Number.isFinite(toInt(row && row.measObjectId))) bits.push(`measObject ${toInt(row.measObjectId)}`);
+                if (Number.isFinite(toInt(measObject && measObject.carrierFreq))) bits.push(`EARFCN ${toInt(measObject.carrierFreq)}`);
+                if (Number.isFinite(toNumIfFinite(reportCfg && reportCfg.a3OffsetDb))) bits.push(`A3 offset ${toNumIfFinite(reportCfg.a3OffsetDb)} dB`);
+                if (Number.isFinite(toNumIfFinite(reportCfg && reportCfg.hysteresisDb))) bits.push(`Hys ${toNumIfFinite(reportCfg.hysteresisDb)} dB`);
+                if (Number.isFinite(toInt(reportCfg && reportCfg.timeToTriggerMs))) bits.push(`TTT ${toInt(reportCfg.timeToTriggerMs)} ms`);
+                if (Number.isFinite(toNumIfFinite(measObject && measObject.offsetFreqDb))) bits.push(`offsetFreq ${toNumIfFinite(measObject.offsetFreqDb)} dB`);
+                if (cell && Number.isFinite(toInt(cell.physCellId))) bits.push(`PCI ${toInt(cell.physCellId)} CIO ${Number.isFinite(toNumIfFinite(cell.cellIndividualOffsetDb)) ? `${toNumIfFinite(cell.cellIndividualOffsetDb)} dB` : '0 dB'}`);
+                return bits.join(' | ');
+            }).join(' || ');
+        };
+        log.__lteRrcMobilityEnrichmentPromise = (async () => {
+            const diagnostics = {
+                candidateEvents: candidateEvents.length,
+                measurementReports: candidateEvents.filter((ev) => /^MeasurementReport$/i.test(String(ev && (ev.event_name || ev.event || ev.message || ev?.properties?.Event) || '').trim())).length,
+                reconfigurations: candidateEvents.filter((ev) => /^RRCConnectionReconfiguration$/i.test(String(ev && (ev.event_name || ev.event || ev.message || ev?.properties?.Event) || '').trim())).length,
+                decodedMeasurementReports: 0,
+                decodedReconfigurations: 0,
+                reconfigWithA3Resolvers: 0,
+                exactA3Reports: 0,
+                errors: []
+            };
+            let successCount = 0;
+            try {
+                await populateLteRrcDecodeCacheBatch(cache, pending, candidateEvents.map((ev) => {
+                    const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
+                    const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+                    const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+                    return { eventName, payloadHex };
+                }), 120);
+                await runTasksWithConcurrency(candidateEvents, async (ev) => {
+                const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : (ev.properties = {});
+                const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+                const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+                if (!eventName || !payloadHex) return;
+                const decoded = await decodeLteRrcPayloadCached(cache, pending, eventName, payloadHex);
+                if (!decoded || !decoded.ok) return;
+                props['RRC decoder'] = String(decoded.decoder || 'pycrate_rrclte');
+                if (decoded.message_id) props['rrc_message_id'] = String(decoded.message_id);
+                if (/^measurement_report$/i.test(String(decoded.message_id || eventName))) {
+                    diagnostics.decodedMeasurementReports += 1;
+                    props['measurement_report_full_decoded'] = 'Yes';
+                    props['measurement_report_full_type'] = String(decoded.decoder_type || '');
+                    if (decoded.summary && decoded.summary.measId != null) props['measurement_report_measid'] = String(decoded.summary.measId);
+                    if (decoded.serving && typeof decoded.serving === 'object') props['measurement_report_serving_json'] = JSON.stringify(decoded.serving);
+                    if (Array.isArray(decoded.neighbors_lte)) props['measurement_report_neighbors_json'] = JSON.stringify(decoded.neighbors_lte);
+                    if (Array.isArray(decoded.servfreq)) props['measurement_report_servfreq_json'] = JSON.stringify(decoded.servfreq);
+                    const summaryBits = [];
+                    if (decoded.summary && decoded.summary.measId != null) summaryBits.push(`measId ${decoded.summary.measId}`);
+                    if (decoded.serving && Number.isFinite(toNumIfFinite(decoded.serving.rsrp_dbm))) summaryBits.push(`serving RSRP ${toNumIfFinite(decoded.serving.rsrp_dbm)} dBm`);
+                    if (Array.isArray(decoded.neighbors_lte)) summaryBits.push(`neighbors ${decoded.neighbors_lte.length}`);
+                    if (summaryBits.length) props['rrc_message_summary'] = summaryBits.join(' | ');
+                    successCount += 1;
+                    return;
+                }
+                if (/^rrc_reconfiguration$/i.test(String(decoded.message_id || '')) || /^RRCConnectionReconfiguration$/i.test(eventName)) {
+                    diagnostics.decodedReconfigurations += 1;
+                    const resolver = (decoded.meas_resolver && typeof decoded.meas_resolver === 'object') ? decoded.meas_resolver : null;
+                    props['rrc_recfg_full_decoded'] = 'Yes';
+                    props['rrc_recfg_full_decoder'] = String(decoded.decoder || 'pycrate_rrclte');
+                    props['rrc_recfg_full_type'] = String(decoded.decoder_type || '');
+                    props['rrc_recfg_full_json'] = JSON.stringify(decoded.decoded_json || {});
+                    props['rrc_recfg_meas_config_present'] = decoded.summary && decoded.summary.has_measConfig ? 'Yes' : 'No';
+                    if (decoded.meas_config && typeof decoded.meas_config === 'object') props['rrc_recfg_meas_config_json'] = JSON.stringify(decoded.meas_config);
+                    if (resolver) props['rrc_recfg_meas_resolver_json'] = JSON.stringify(resolver);
+                    const a3Resolvers = Array.isArray(resolver && resolver.a3Resolvers) ? resolver.a3Resolvers : [];
+                    if (a3Resolvers.length) diagnostics.reconfigWithA3Resolvers += 1;
+                    const firstA3 = a3Resolvers[0] || null;
+                    if (firstA3 && typeof firstA3 === 'object') {
+                        const reportCfg = firstA3.reportConfig && typeof firstA3.reportConfig === 'object' ? firstA3.reportConfig : {};
+                        const measObject = firstA3.measObject && typeof firstA3.measObject === 'object' ? firstA3.measObject : {};
+                        props['rrc_recfg_a3_offset_db'] = reportCfg.a3OffsetDb != null ? String(reportCfg.a3OffsetDb) : '';
+                        props['rrc_recfg_hysteresis_db'] = reportCfg.hysteresisDb != null ? String(reportCfg.hysteresisDb) : '';
+                        props['rrc_recfg_ttt_ms'] = reportCfg.timeToTriggerMs != null ? String(reportCfg.timeToTriggerMs) : '';
+                        props['rrc_recfg_meas_id'] = firstA3.measId != null ? String(firstA3.measId) : '';
+                        props['rrc_recfg_meas_object_id'] = firstA3.measObjectId != null ? String(firstA3.measObjectId) : '';
+                        props['rrc_recfg_report_config_id'] = firstA3.reportConfigId != null ? String(firstA3.reportConfigId) : '';
+                        props['rrc_recfg_event_type'] = String(reportCfg.eventType || '');
+                        props['rrc_recfg_offset_freq_db'] = measObject.offsetFreqDb != null ? String(measObject.offsetFreqDb) : '';
+                        props['rrc_recfg_a3_resolver_summary'] = renderResolverSummary(resolver);
+                    }
+                    const summaryBits = [];
+                    if (decoded.summary && decoded.summary.has_measConfig) summaryBits.push('measConfig');
+                    if (decoded.summary && decoded.summary.has_mobilityControlInfo) summaryBits.push('mobilityControlInfo');
+                    if (a3Resolvers.length) summaryBits.push(`A3 resolvers ${a3Resolvers.length}`);
+                    if (summaryBits.length) props['rrc_message_summary'] = summaryBits.join(' | ');
+                    successCount += 1;
+                }
+            }, 4);
+            const sortedRows = candidateEvents
+                .map((ev) => {
+                    const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
+                    const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+                    return {
+                        event: ev,
+                        ts: eventTsMs(ev),
+                        eventName,
+                        decodedMeasResolver: parseJsonSafe(props['rrc_recfg_meas_resolver_json']),
+                        decodedMeasurement: (/^Yes$/i.test(String(props['measurement_report_full_decoded'] || '')))
+                            ? {
+                                summary: { measId: toInt(props['measurement_report_measid']) },
+                                serving: parseJsonSafe(props['measurement_report_serving_json']),
+                                neighbors_lte: parseJsonSafe(props['measurement_report_neighbors_json'])
+                            }
+                            : null
+                    };
+                })
+                .sort((a, b) => {
+                    const aTs = Number.isFinite(a.ts) ? a.ts : Number.POSITIVE_INFINITY;
+                    const bTs = Number.isFinite(b.ts) ? b.ts : Number.POSITIVE_INFINITY;
+                    return aTs - bTs;
+                });
+            const recfgRows = sortedRows.filter((row) => /^RRCConnectionReconfiguration$/i.test(String(row.eventName || '')) && row.decodedMeasResolver && typeof row.decodedMeasResolver === 'object');
+            sortedRows.forEach((row) => {
+                if (!/^MeasurementReport$/i.test(String(row.eventName || '')) || !row.decodedMeasurement) return;
+                const props = row.event && row.event.properties && typeof row.event.properties === 'object' ? row.event.properties : (row.event.properties = {});
+                const resolved = resolveA3ForMeasurementReport(row.event, row.decodedMeasurement, recfgRows);
+                if (!resolved) return;
+                props['measurement_report_a3_mapping_summary'] = resolved.mappingSummary;
+                props['measurement_report_a3_source_time'] = resolved.sourceTimeLabel;
+                props['measurement_report_a3_source_pci'] = Number.isFinite(resolved.sourcePci) ? String(resolved.sourcePci) : '';
+                props['measurement_report_a3_eval_summary'] = resolved.evaluationSummary;
+                props['measurement_report_a3_eval_json'] = JSON.stringify(resolved);
+                diagnostics.exactA3Reports += 1;
+            });
+            log.__lteRrcMobilityEnrichmentDone = successCount > 0;
+            log.__lteRrcMobilityDiag = diagnostics;
+            return successCount;
+            } catch (err) {
+                diagnostics.errors.push(String(err && err.message || err || 'Unknown LTE RRC enrichment error'));
+                log.__lteRrcMobilityDiag = diagnostics;
+                throw err;
+            } finally {
+                log.__lteRrcMobilityEnrichmentPromise = null;
+            }
+        })();
+        return log.__lteRrcMobilityEnrichmentPromise;
     };
 
     const parsePointTimeMs = (t) => {
@@ -2694,7 +3126,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.filterA3A5Events = (log, options = {}) => {
-        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
         const matches = allEvents.filter((ev) => isA3A5Event(ev));
         const synthetic = [];
         if (!matches.length) {
@@ -2764,7 +3196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.filterRLFEvents = (log, options = {}) => {
-        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
         const matches = allEvents.filter((ev) => isRLFEvent(ev));
         const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
         const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
@@ -2782,7 +3214,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.filterHOFEvents = (log, options = {}) => {
-        const allEvents = Array.isArray(log && log.events) ? log.events : [];
+        const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
         const matches = allEvents.filter((ev) => isHOFEvent(ev));
         const maxDeltaMs = Number.isFinite(Number(options.maxDeltaMs)) ? Number(options.maxDeltaMs) : 15000;
         const mapped = window.mapEventsToNearestLogPoints(log, matches, maxDeltaMs);
@@ -3205,12 +3637,1056 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadedLogs = [];
     let currentSignalingLogId = null;
     let currentCallSessionLogId = null;
+    let currentLteHoAnalysisState = null;
+
+    const hasFiniteLatLng = (row) => Number.isFinite(Number(row && row.lat)) && Number.isFinite(Number(row && row.lng));
+    const formatHoTs = (ts) => {
+        const n = Number(ts);
+        if (!Number.isFinite(n)) return 'N/A';
+        const msOfDay = n > 86400000 ? (((n % 86400000) + 86400000) % 86400000) : n;
+        const hh = String(Math.floor(msOfDay / 3600000)).padStart(2, '0');
+        const mm = String(Math.floor((msOfDay % 3600000) / 60000)).padStart(2, '0');
+        const ss = String(Math.floor((msOfDay % 60000) / 1000)).padStart(2, '0');
+        const ms = String(Math.floor(msOfDay % 1000)).padStart(3, '0');
+        return `${hh}:${mm}:${ss}.${ms}`;
+    };
+    const hoPct = (v) => Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : 'N/A';
+    const hoFmt = (v, d = 1, unit = '') => Number.isFinite(Number(v)) ? `${Number(v).toFixed(d)}${unit}` : 'N/A';
+    const escapeHtmlLocal = (value) => String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    const LTE_HO_ANALYSIS_LAYOUT_KEY = 'optimAnalyzer.lteHoAnalysis.layout';
+    const LTE_HO_MARKER_DEFAULT_VISIBILITY = {
+        decision: true,
+        target_better: true,
+        a3_like: true,
+        report: true,
+        command: true,
+        access: true,
+        complete: true,
+        fail: true
+    };
+
+    function readLteHoAnalysisLayout() {
+        try {
+            const raw = localStorage.getItem(LTE_HO_ANALYSIS_LAYOUT_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch (_err) {
+            return null;
+        }
+    }
+
+    function clampLteHoAnalysisLayout(layout) {
+        if (!layout || typeof layout !== 'object') return null;
+        const viewportWidth = window.innerWidth || 1600;
+        const viewportHeight = window.innerHeight || 900;
+        const width = Math.max(900, Math.min(Number(layout.width) || 1280, Math.max(900, viewportWidth - 32)));
+        const height = Math.max(480, Math.min(Number(layout.height) || 720, Math.max(480, viewportHeight - 32)));
+        const maxLeft = Math.max(0, viewportWidth - width);
+        const maxTop = Math.max(0, viewportHeight - height);
+        const left = Math.max(0, Math.min(Number(layout.left) || 0, maxLeft));
+        const top = Math.max(0, Math.min(Number(layout.top) || 70, maxTop));
+        return { left, top, width, height };
+    }
+
+    function persistLteHoAnalysisLayout(modal) {
+        if (!modal) return;
+        try {
+            const rect = modal.getBoundingClientRect();
+            const layout = clampLteHoAnalysisLayout({
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height
+            });
+            if (layout) localStorage.setItem(LTE_HO_ANALYSIS_LAYOUT_KEY, JSON.stringify(layout));
+        } catch (_err) { }
+    }
+
+    function applySavedLteHoAnalysisLayout(modal) {
+        if (!modal) return;
+        const layout = clampLteHoAnalysisLayout(readLteHoAnalysisLayout());
+        if (!layout) return;
+        modal.style.left = layout.left + 'px';
+        modal.style.top = layout.top + 'px';
+        modal.style.width = layout.width + 'px';
+        modal.style.height = layout.height + 'px';
+        modal.style.maxWidth = 'calc(100vw - 32px)';
+        modal.style.maxHeight = 'calc(100vh - 32px)';
+    }
+
+    function resetLteHoAnalysisLayout(modal) {
+        try {
+            localStorage.removeItem(LTE_HO_ANALYSIS_LAYOUT_KEY);
+        } catch (_err) { }
+        if (!modal) return;
+        modal.style.left = 'calc(50% - 640px)';
+        modal.style.top = '70px';
+        modal.style.width = '1280px';
+        modal.style.height = 'min(84vh, 900px)';
+        modal.style.maxWidth = '98vw';
+        modal.style.maxHeight = '';
+    }
+
+    function getPreferredLteHoLog() {
+        const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : loadedLogs;
+        const activeLogId = window.mapRenderer && window.mapRenderer.activeLogId;
+        const candidates = [];
+        if (activeLogId) {
+            const preferred = logs.find((l) => String(l && l.id) === String(activeLogId));
+            if (preferred) candidates.push(preferred);
+        }
+        logs.forEach((log) => { if (!candidates.includes(log)) candidates.push(log); });
+        return candidates.find((log) => {
+            if (!log || !Array.isArray(log.points) || !log.points.length) return false;
+            return log.points.some((p) => {
+                const tech = String(p?.technology || p?.tech || p?.Tech || '').toUpperCase();
+                return tech.includes('LTE') || tech.includes('4G') || Number.isFinite(Number(p?.pci ?? p?.['Serving PCI'] ?? p?.['Physical cell ID']));
+            });
+        }) || null;
+    }
+
+    async function runLteHoAnalysisForLog(log, force = false) {
+        if (!log || !Array.isArray(log.points) || !log.points.length) {
+            throw new Error('No LTE log available for HO analysis.');
+        }
+        if (/4g|lte/i.test(String(log?.technology || log?.tech || log?.radioTech || '')) || (Array.isArray(log.points) && log.points.some((p) => {
+            const tech = String(p?.technology || p?.tech || p?.Tech || '').toUpperCase();
+            return tech.includes('LTE') || tech.includes('4G');
+        }))) {
+            if (typeof window.enrichLteSibEvents === 'function') {
+                try { await window.enrichLteSibEvents(log); } catch (err) { console.warn('SIB enrichment before HO analysis failed:', err); }
+            }
+            if (typeof window.enrichLteRrcMobilityEvents === 'function') {
+                try { await window.enrichLteRrcMobilityEvents(log); } catch (err) { console.warn('LTE RRC enrichment before HO analysis failed:', err); }
+            }
+        }
+        const analysisEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
+        const logHasExactA3 = analysisEvents.some((ev) => {
+            const props = ev && ev.properties && typeof ev.properties === 'object' ? ev.properties : null;
+            return !!(props && props.measurement_report_a3_eval_json);
+        });
+        const resultHasExactA3 = (result) => Array.isArray(result?.events) && result.events.some((ev) => {
+            return !!(ev?.debug?.exactA3?.evaluation || ev?.exactA3 || Number.isFinite(ev?.metrics?.exactA3MarginAtReportDb));
+        });
+        if (!force && log.__lteHoAnalysisResult) {
+            if (!logHasExactA3 || resultHasExactA3(log.__lteHoAnalysisResult)) return log.__lteHoAnalysisResult;
+            log.__lteHoAnalysisResult = null;
+        }
+        const dataset = { points: log.points || [], events: analysisEvents };
+        let result = null;
+        try {
+            const res = await fetch('/api/ho-analysis/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    label: log.name || log.fileName || log.id,
+                    source: { logId: log.id, name: log.name || log.fileName || '' },
+                    dataset,
+                    options: {}
+                })
+            });
+            if (res.ok) {
+                const payload = await res.json();
+                if (payload && payload.analysisId) {
+                    const exportRes = await fetch('/api/ho-analysis/' + encodeURIComponent(payload.analysisId) + '/export');
+                    if (exportRes.ok) {
+                        const exportPayload = await exportRes.json();
+                        result = exportPayload && exportPayload.result ? exportPayload.result : null;
+                        if (result) result.analysisId = payload.analysisId;
+                    }
+                }
+            }
+        } catch (_err) {
+            result = null;
+        }
+        if (logHasExactA3 && !resultHasExactA3(result) && window.LteHoAnalysis && typeof window.LteHoAnalysis.analyzeIntraFreqHo === 'function') {
+            result = window.LteHoAnalysis.analyzeIntraFreqHo(dataset, {});
+        }
+        if (!result) {
+            if (!window.LteHoAnalysis || typeof window.LteHoAnalysis.analyzeIntraFreqHo !== 'function') {
+                throw new Error('LTE HO analysis module is not loaded.');
+            }
+            result = window.LteHoAnalysis.analyzeIntraFreqHo(dataset, {});
+        }
+        const matchedExactA3Count = Array.isArray(result?.events)
+            ? result.events.filter((ev) => !!(ev?.debug?.exactA3?.evaluation || ev?.exactA3 || Number.isFinite(ev?.metrics?.exactA3MarginAtReportDb))).length
+            : 0;
+        result.debugCounts = Object.assign({}, result.debugCounts || {}, log.__lteRrcMobilityDiag || {}, {
+            matchedExactA3Hos: matchedExactA3Count,
+            totalHoEvents: Array.isArray(result?.events) ? result.events.length : 0
+        });
+        log.__lteHoAnalysisResult = result;
+        return result;
+    }
+
+    function removeLteHoOverlay() {
+        if (window.__lteHoOverlay && window.map && window.map.hasLayer(window.__lteHoOverlay)) {
+            window.map.removeLayer(window.__lteHoOverlay);
+        }
+        window.__lteHoOverlay = null;
+    }
+    window.removeLteHoOverlay = removeLteHoOverlay;
+
+    function showLteHoEventOnMap(eventObj, fit = true) {
+        if (!eventObj || !window.map || !window.L) return;
+        removeLteHoOverlay();
+        const layer = L.layerGroup();
+        const poly = Array.isArray(eventObj?.map?.polyline) ? eventObj.map.polyline.filter((p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon))) : [];
+        if (poly.length >= 2) {
+            const line = L.polyline(poly.map((p) => [p.lat, p.lon]), { color: '#38bdf8', weight: 5, opacity: 0.9 }).addTo(layer);
+            if (fit) {
+                try { window.map.fitBounds(line.getBounds(), { padding: [30, 30] }); } catch (_e) {}
+            }
+        }
+        const markerSpecs = [
+            ['reportPoint', '#f59e0b', 'R'],
+            ['commandPoint', '#2563eb', 'C'],
+            ['completePoint', '#10b981', 'OK'],
+            ['failPoint', '#ef4444', '!']
+        ];
+        markerSpecs.forEach(([key, color, label]) => {
+            const pt = eventObj?.map?.[key];
+            if (!pt || !Number.isFinite(Number(pt.lat)) || !Number.isFinite(Number(pt.lon))) return;
+            L.circleMarker([pt.lat, pt.lon], {
+                radius: 9,
+                color,
+                weight: 3,
+                fillColor: '#111827',
+                fillOpacity: 0.95
+            }).bindTooltip(label, { permanent: true, direction: 'top', opacity: 0.95 }).addTo(layer);
+        });
+        layer.addTo(window.map);
+        window.__lteHoOverlay = layer;
+    }
+
+    function parseLteHoPointTs(value) {
+        const raw = String(value ?? '').trim();
+        if (!raw) return NaN;
+        const iso = Date.parse(raw);
+        if (!Number.isNaN(iso)) return iso;
+        const m = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+        if (!m) return NaN;
+        const hh = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        const ss = parseInt(m[3], 10);
+        const ms = parseInt(String(m[4] || '0').padEnd(3, '0').slice(0, 3), 10);
+        return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;
+    }
+
+    function findNearestLogPointIndexForHoEvent(log, eventObj) {
+        if (!log || !Array.isArray(log.points) || !log.points.length || !eventObj) return -1;
+        const anchorTs = Number.isFinite(Number(eventObj?.decisionSampleTs))
+            ? Number(eventObj.decisionSampleTs)
+            : (Number.isFinite(Number(eventObj?.commandTs))
+                ? Number(eventObj.commandTs)
+                : (Number.isFinite(Number(eventObj?.reportTs))
+                    ? Number(eventObj.reportTs)
+                    : (Number.isFinite(Number(eventObj?.startTs)) ? Number(eventObj.startTs) : NaN)));
+        const anchorPoint = eventObj?.map?.commandPoint || eventObj?.map?.reportPoint || eventObj?.map?.completePoint || null;
+        const anchorLat = Number(anchorPoint && anchorPoint.lat);
+        const anchorLon = Number(anchorPoint && anchorPoint.lon);
+        let bestIndex = -1;
+        let bestScore = Infinity;
+        for (let i = 0; i < log.points.length; i++) {
+            const pt = log.points[i];
+            if (!pt || !Number.isFinite(Number(pt.lat)) || !Number.isFinite(Number(pt.lng))) continue;
+            const ptTs = parseLteHoPointTs(pt.time ?? pt.timestamp ?? pt.ts ?? pt?.properties?.Time);
+            const timeScore = (Number.isFinite(anchorTs) && Number.isFinite(ptTs)) ? Math.abs(ptTs - anchorTs) : 1e9;
+            let geoScore = 0;
+            if (Number.isFinite(anchorLat) && Number.isFinite(anchorLon) && typeof window.distanceMeters === 'function') {
+                geoScore = window.distanceMeters(anchorLat, anchorLon, Number(pt.lat), Number(pt.lng));
+            }
+            const score = timeScore + (geoScore * 8);
+            if (score < bestScore) {
+                bestScore = score;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
+    }
+
+    function getPreferredLteHoSyncMetric(log) {
+        const currentChartMetric = String(window.currentChartParam || '').trim();
+        if (currentChartMetric && String(window.currentChartLogId || '') === String(log?.id || '')) return currentChartMetric;
+        const currentGridMetric = Array.isArray(window.currentGridColumns) && window.currentGridColumns.length
+            ? String(window.currentGridColumns[0] || '').trim()
+            : '';
+        if (currentGridMetric && String(window.currentGridLogId || '') === String(log?.id || '')) return currentGridMetric;
+        const activeMetric = String(window.mapRenderer && window.mapRenderer.activeMetric || '').trim();
+        if (activeMetric && String(window.mapRenderer && window.mapRenderer.activeLogId || '') === String(log?.id || '')) return activeMetric;
+        return 'rsrp';
+    }
+
+    function syncLteHoEventSelection(log, eventObj) {
+        if (!log || !eventObj) return;
+        const idx = findNearestLogPointIndexForHoEvent(log, eventObj);
+        const syncMetric = getPreferredLteHoSyncMetric(log);
+        const exactA3Debug = eventObj?.debug?.exactA3 || null;
+        const exactA3Eval = exactA3Debug?.evaluation && typeof exactA3Debug.evaluation === 'object' ? exactA3Debug.evaluation : null;
+        const exactA3Best = exactA3Eval?.bestNeighbor && typeof exactA3Eval.bestNeighbor === 'object' ? exactA3Eval.bestNeighbor : null;
+        const hoTime = String(
+            eventObj?.decisionSampleTs
+            || eventObj?.commandTs
+            || eventObj?.reportTs
+            || eventObj?.startTs
+            || eventObj?.time
+            || ''
+        ).trim();
+        window.__chartHoSyncContext = {
+            active: true,
+            logId: log.id,
+            time: hoTime,
+            sourcePci: eventObj?.sourceCell?.pci,
+            targetPci: eventObj?.targetCell?.pci
+        };
+        if (idx >= 0 && exactA3Eval && exactA3Best) {
+            const point = log.points[idx];
+            window.__pointDetailsA3Override = {
+                logId: log.id,
+                pointIndex: idx,
+                pointTime: String(point?.time || '').trim(),
+                evalObj: exactA3Eval,
+                best: exactA3Best,
+                mappingSummary: exactA3Debug?.mappingSummary || '',
+                sourceTime: exactA3Debug?.sourceTime || '',
+                evaluationSummary: exactA3Debug?.evaluationSummary || ''
+            };
+        } else {
+            window.__pointDetailsA3Override = null;
+        }
+        if (typeof window.openGridModal === 'function') {
+            const needOpenGrid = String(window.currentGridLogId || '') !== String(log.id)
+                || !(Array.isArray(window.currentGridColumns) && window.currentGridColumns.includes(syncMetric));
+            if (needOpenGrid) {
+                try { window.openGridModal(log, syncMetric); } catch (_e) { }
+            }
+        }
+        if (typeof window.openChartModal === 'function') {
+            const chartModal = document.getElementById('chartModal');
+            const needOpenChart = String(window.currentChartLogId || '') !== String(log.id)
+                || String(window.currentChartParam || '') !== String(syncMetric)
+                || (!chartModal && !window.isChartDocked);
+            if (needOpenChart) {
+                try { window.openChartModal(log, syncMetric, { preserveHoSyncContext: true }); } catch (_e) { }
+            } else if (typeof window.refreshChartModalTitle === 'function') {
+                try { window.refreshChartModalTitle(log, syncMetric); } catch (_e) { }
+            }
+        }
+        if (idx >= 0 && typeof window.globalSync === 'function') {
+            if (typeof window.updateDualCharts === 'function') {
+                try { window.updateDualCharts(idx, true); } catch (_e) { }
+            }
+            window.globalSync(log.id, idx, 'lte-ho');
+            const pt = log.points[idx];
+            if (window.map && pt && Number.isFinite(Number(pt.lat)) && Number.isFinite(Number(pt.lng))) {
+                const targetZoom = Math.max(window.map.getZoom(), 17);
+                window.map.flyTo([Number(pt.lat), Number(pt.lng)], targetZoom, { animate: true, duration: 0.45 });
+            }
+        } else if (window.map) {
+            const anchorPoint = eventObj?.map?.commandPoint || eventObj?.map?.reportPoint || eventObj?.map?.completePoint || null;
+            if (anchorPoint && Number.isFinite(Number(anchorPoint.lat)) && Number.isFinite(Number(anchorPoint.lon))) {
+                const targetZoom = Math.max(window.map.getZoom(), 17);
+                window.map.flyTo([Number(anchorPoint.lat), Number(anchorPoint.lon)], targetZoom, { animate: true, duration: 0.45 });
+            }
+        }
+        showLteHoEventOnMap(eventObj, false);
+    }
+
+    function formatChartHoSyncTitle(context) {
+        if (!context || !context.active) return '';
+        const time = String(context.time || '').trim() || 'Unknown time';
+        const sourcePci = Number.isFinite(Number(context.sourcePci)) ? String(Number(context.sourcePci)) : '?';
+        const targetPci = Number.isFinite(Number(context.targetPci)) ? String(Number(context.targetPci)) : '?';
+        return 'Synced from HO: ' + time + ' | ' + sourcePci + ' -> ' + targetPci;
+    }
+
+    function getChartTitleHtml(log, param) {
+        const isComposite = (param === 'rscp_not_combined');
+        const baseTitle = (log.name) + ' - ' + (isComposite ? 'RSCP & Neighbors' : param.toUpperCase()) + ' (Snapshot)';
+        const context = window.__chartHoSyncContext;
+        const syncTitle = context && String(context.logId || '') === String(log?.id || '')
+            ? formatChartHoSyncTitle(context)
+            : '';
+        if (!syncTitle) return baseTitle;
+        return baseTitle
+            + '<div style="font-size:11px; font-weight:500; color:#7dd3fc; margin-top:4px;">'
+            + syncTitle
+            + '</div>';
+    }
+
+    function refreshChartModalTitle(log, param) {
+        const titleEl = document.getElementById('chartTitleText');
+        if (!titleEl || !log) return;
+        titleEl.innerHTML = getChartTitleHtml(log, param || window.currentChartParam || '');
+    }
+
+    function buildLteHoChart(canvas, eventObj) {
+        if (!canvas || !window.Chart || !eventObj || !eventObj.chart) return;
+        if (window.__lteHoDetailChart) {
+            try { window.__lteHoDetailChart.destroy(); } catch (_e) {}
+            window.__lteHoDetailChart = null;
+        }
+        const markerPalette = {
+            decision: { line: '#f8fafc', label: '#f8fafc' },
+            target_better: { line: '#f59e0b', label: '#fcd34d' },
+            a3_like: { line: '#a78bfa', label: '#c4b5fd' },
+            report: { line: '#38bdf8', label: '#7dd3fc' },
+            command: { line: '#2563eb', label: '#93c5fd' },
+            access: { line: '#14b8a6', label: '#5eead4' },
+            complete: { line: '#22c55e', label: '#86efac' },
+            fail: { line: '#ef4444', label: '#fca5a5' }
+        };
+        const markerVisibility = currentLteHoAnalysisState?.markerVisibility || LTE_HO_MARKER_DEFAULT_VISIBILITY;
+        const markers = (Array.isArray(eventObj.chart.markers) ? eventObj.chart.markers : []).filter((m) => markerVisibility[m.key] !== false);
+        const seriesToDataset = (label, arr, color) => ({
+            label,
+            data: (Array.isArray(arr) ? arr : []).map((row) => ({ x: row.ts, y: row.value })),
+            parsing: false,
+            borderColor: color,
+            backgroundColor: color,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.2
+        });
+        const markerPlugin = {
+            id: 'hoMarkers',
+            afterDatasetsDraw(chart) {
+                const xScale = chart.scales.x;
+                const yScale = chart.scales.y;
+                if (!xScale || !yScale) return;
+                const ctx = chart.ctx;
+                markers.forEach((m) => {
+                    const x = xScale.getPixelForValue(m.ts);
+                    const palette = markerPalette[m.key] || { line: '#94a3b8', label: '#e5e7eb' };
+                    ctx.save();
+                    ctx.strokeStyle = palette.line;
+                    ctx.setLineDash([4, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, yScale.top);
+                    ctx.lineTo(x, yScale.bottom);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = palette.label;
+                    ctx.font = '11px IBM Plex Sans';
+                    ctx.fillText(m.key, x + 4, yScale.top + 12);
+                    ctx.restore();
+                });
+            }
+        };
+        window.__lteHoDetailChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    seriesToDataset('Serving RSRP', eventObj.chart.series.servingRsrp, '#38bdf8'),
+                    seriesToDataset('Target RSRP', eventObj.chart.series.targetRsrp, '#22c55e'),
+                    seriesToDataset('Best Same-Freq Neighbor', eventObj.chart.series.bestSameFreqNeighborRsrp, '#f59e0b'),
+                    seriesToDataset('Effective Delta', eventObj.chart.series.effectiveDelta, '#f472b6'),
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'linear',
+                        ticks: {
+                            color: '#cbd5e1',
+                            callback: (value) => formatHoTs(value)
+                        },
+                        grid: { color: 'rgba(148,163,184,0.15)' }
+                    },
+                    y: {
+                        ticks: { color: '#cbd5e1' },
+                        grid: { color: 'rgba(148,163,184,0.15)' }
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: '#e5e7eb' } }
+                }
+            },
+            plugins: [markerPlugin]
+        });
+    }
+
+    function getLteHoMarkerPalette() {
+        return {
+            decision: { line: '#f8fafc', label: 'Decision' },
+            target_better: { line: '#f59e0b', label: 'Target better' },
+            a3_like: { line: '#a78bfa', label: 'A3-like' },
+            report: { line: '#38bdf8', label: 'Report' },
+            command: { line: '#2563eb', label: 'Command' },
+            access: { line: '#14b8a6', label: 'Access' },
+            complete: { line: '#22c55e', label: 'Complete' },
+            fail: { line: '#ef4444', label: 'Fail' }
+        };
+    }
+
+    function getLteHoInterpretationTheme(classification) {
+        const cls = String(classification || '').toLowerCase();
+        if (cls === 'successful') {
+            return {
+                border: '#16a34a',
+                background: 'rgba(6, 78, 59, 0.32)',
+                text: '#dcfce7',
+                accent: '#86efac'
+            };
+        }
+        if (cls === 'too-late' || cls === 'too-early' || cls === 'ping-pong') {
+            return {
+                border: '#f59e0b',
+                background: 'rgba(120, 53, 15, 0.32)',
+                text: '#fef3c7',
+                accent: '#fcd34d'
+            };
+        }
+        if (cls === 'wrong-target' || cls === 'execution-failure' || cls === 'missing-report/config-issue') {
+            return {
+                border: '#ef4444',
+                background: 'rgba(127, 29, 29, 0.34)',
+                text: '#fee2e2',
+                accent: '#fca5a5'
+            };
+        }
+        return {
+            border: '#334155',
+            background: '#0b1220',
+            text: '#cbd5e1',
+            accent: '#93c5fd'
+        };
+    }
+
+    function buildLteHoInterpretationHtml(eventObj) {
+        if (!eventObj) return '<div style="font-size:12px;color:#94a3b8;">No interpretation available.</div>';
+        const decisionTime = formatHoTs(eventObj.decisionSampleTs);
+        const decisionSource = eventObj.decisionSampleSource || 'N/A';
+        const sourcePci = eventObj?.sourceCell?.pci ?? '?';
+        const targetPci = eventObj?.targetCell?.pci ?? '?';
+        const sourceName = String(eventObj?.sourceCell?.name || '').trim();
+        const targetName = String(eventObj?.targetCell?.name || '').trim();
+        const bestAltPci = eventObj?.bestAlternative?.pci;
+        const bestAltName = String(eventObj?.bestAlternative?.name || '').trim();
+        const chosenTargetDelta = Number(eventObj?.metrics?.effectiveDeltaAtCommandDb);
+        const bestAlternativeDelta = Number(eventObj?.bestAlternative?.bestDeltaDb);
+        const deltaGap = (Number.isFinite(bestAlternativeDelta) && Number.isFinite(chosenTargetDelta))
+            ? (bestAlternativeDelta - chosenTargetDelta)
+            : null;
+        const servingRsrp = Number(eventObj?.metrics?.servingRsrpAtCommandDbm);
+        const targetRsrp = Number(eventObj?.metrics?.targetRsrpAtCommandDbm);
+        const bestAltRsrp = Number(eventObj?.bestAlternative?.rsrp);
+
+        const lines = [];
+        lines.push(`Decision sample ${escapeHtmlLocal(decisionTime)} from ${escapeHtmlLocal(decisionSource)} was used as the reference point for HO target selection.`);
+        lines.push(`At that sample, serving PCI ${escapeHtmlLocal(String(sourcePci))}${sourceName ? ` (${escapeHtmlLocal(sourceName)})` : ''} was ${escapeHtmlLocal(hoFmt(servingRsrp, 1, ' dBm'))} and chosen target PCI ${escapeHtmlLocal(String(targetPci))}${targetName ? ` (${escapeHtmlLocal(targetName)})` : ''} was ${escapeHtmlLocal(hoFmt(targetRsrp, 1, ' dBm'))}, giving a chosen-target delta of ${escapeHtmlLocal(hoFmt(chosenTargetDelta, 1, ' dB'))}.`);
+        if (bestAltPci !== undefined && bestAltPci !== null && bestAltPci !== '') {
+            lines.push(`The strongest same-frequency alternative was PCI ${escapeHtmlLocal(String(bestAltPci))}${bestAltName ? ` (${escapeHtmlLocal(bestAltName)})` : ''} at ${escapeHtmlLocal(hoFmt(bestAltRsrp, 1, ' dBm'))}, with an alternative delta of ${escapeHtmlLocal(hoFmt(bestAlternativeDelta, 1, ' dB'))}.`);
+        }
+        if (Number.isFinite(deltaGap)) {
+            lines.push(`Delta gap = best alternative delta - chosen target delta = ${escapeHtmlLocal(hoFmt(deltaGap, 1, ' dB'))}. Positive gap means another same-frequency candidate looked stronger than the target at the decision sample.`);
+        }
+        return lines.map((line) => `<div style="margin-bottom:6px;">${line}</div>`).join('');
+    }
+
+    function renderLteHoDetail(eventObj) {
+        const host = document.getElementById('lteHoDetailHost');
+        if (!host || !eventObj) return;
+        if (!currentLteHoAnalysisState?.markerVisibility) {
+            currentLteHoAnalysisState = Object.assign({}, currentLteHoAnalysisState || {}, {
+                markerVisibility: Object.assign({}, LTE_HO_MARKER_DEFAULT_VISIBILITY)
+            });
+        }
+        const reasons = (eventObj.reasons || []).map((x) => `<li>${escapeHtmlLocal(x)}</li>`).join('');
+        const actions = (eventObj.recommendedActions || []).map((x) => `<li>${escapeHtmlLocal(x)}</li>`).join('');
+        const assumptions = (eventObj.assumptions || []).map((x) => `<li>${escapeHtmlLocal(x)}</li>`).join('');
+        const debugJson = escapeHtmlLocal(JSON.stringify(eventObj.debug || {}, null, 2));
+        const exactA3Debug = eventObj?.debug?.exactA3 || null;
+        const sourceLabel = `${eventObj?.sourceCell?.pci ?? '?'} / ${eventObj?.sourceCell?.earfcn ?? '?'}`;
+        const targetLabel = `${eventObj?.targetCell?.pci ?? '?'} / ${eventObj?.targetCell?.earfcn ?? '?'}`;
+        const sourceName = String(eventObj?.sourceCell?.name || '').trim();
+        const targetName = String(eventObj?.targetCell?.name || '').trim();
+        const bestAlternativeName = String(eventObj?.bestAlternative?.name || '').trim();
+        const chosenTargetPci = eventObj?.targetCell?.pci;
+        const bestAlternativePci = eventObj?.bestAlternative?.pci;
+        const chosenTargetDelta = Number(eventObj?.metrics?.effectiveDeltaAtCommandDb);
+        const bestAlternativeDelta = Number(eventObj?.bestAlternative?.bestDeltaDb);
+        const deltaGap = (Number.isFinite(bestAlternativeDelta) && Number.isFinite(chosenTargetDelta))
+            ? (bestAlternativeDelta - chosenTargetDelta)
+            : null;
+        const interpretationTheme = getLteHoInterpretationTheme(eventObj.classification);
+        const markerPalette = getLteHoMarkerPalette();
+        const markerVisibility = currentLteHoAnalysisState?.markerVisibility || LTE_HO_MARKER_DEFAULT_VISIBILITY;
+        const exactA3Best = exactA3Debug && exactA3Debug.evaluation && exactA3Debug.evaluation.bestNeighbor ? exactA3Debug.evaluation.bestNeighbor : null;
+        const exactA3EnterSatisfied = Number.isFinite(Number(exactA3Best?.lhsEnter)) && Number.isFinite(Number(exactA3Best?.rhs))
+            ? Number(exactA3Best.lhsEnter) > Number(exactA3Best.rhs)
+            : null;
+        const exactA3Payload = exactA3Debug && exactA3Best
+            ? encodeURIComponent(JSON.stringify({
+                evalObj: exactA3Debug.evaluation || {},
+                best: exactA3Best,
+                enterSatisfied: exactA3EnterSatisfied,
+                statusLabel: exactA3EnterSatisfied ? 'Meet criteria' : "Doesn't meet criteria",
+                sourceTime: exactA3Debug.sourceTime || '',
+                unit: String(exactA3Debug?.evaluation?.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm'
+            }))
+            : '';
+        const exactA3BadgeHtml = exactA3Best && exactA3EnterSatisfied !== null
+            ? `<div style="background:#0f172a; border:1px solid #334155; padding:10px; border-radius:10px;">` +
+              `<div style="font-size:11px; color:#93c5fd;">A3 entering</div>` +
+              `<button onclick="window.openA3EnteringExplanationFromPayload('${exactA3Payload}')" style="margin-top:6px; display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; border:1px solid ${exactA3EnterSatisfied ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)'}; background:${exactA3EnterSatisfied ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color:${exactA3EnterSatisfied ? '#86efac' : '#fca5a5'}; font-weight:700; cursor:pointer;">${exactA3EnterSatisfied ? 'Meet criteria' : `Doesn&#39;t meet criteria`}</button>` +
+              `</div>`
+            : '';
+        const exactA3Html = exactA3Debug && (exactA3Debug.mappingSummary || exactA3Debug.evaluationSummary || exactA3Best)
+            ? (
+                `<div style="margin-top:10px;">` +
+                `  <div style="font-weight:700; margin-bottom:6px;">Exact A3 Resolver</div>` +
+                `  <div style="background:#071326; border:1px solid #334155; border-radius:10px; padding:10px; font-size:12px; color:#cbd5e1; line-height:1.6;">` +
+                `    <div><span style="color:#93c5fd;">Mapping:</span> ${escapeHtmlLocal(exactA3Debug.mappingSummary || 'N/A')}</div>` +
+                `    <div><span style="color:#93c5fd;">Source time:</span> ${escapeHtmlLocal(exactA3Debug.sourceTime || 'N/A')}${exactA3Debug.sourcePci ? ` | <span style="color:#93c5fd;">Source PCI:</span> ${escapeHtmlLocal(String(exactA3Debug.sourcePci))}` : ''}</div>` +
+                `    <div><span style="color:#93c5fd;">Evaluation:</span> ${escapeHtmlLocal(exactA3Debug.evaluationSummary || 'N/A')}</div>` +
+                (exactA3Best
+                    ? `    <div><span style="color:#93c5fd;">Best neighbor terms:</span> PCI ${escapeHtmlLocal(String(exactA3Best.pci ?? '?'))} | Mn ${escapeHtmlLocal(Number.isFinite(exactA3Best.Mn) ? exactA3Best.Mn.toFixed(1) : 'N/A')} | LHSenter ${escapeHtmlLocal(Number.isFinite(exactA3Best.lhsEnter) ? exactA3Best.lhsEnter.toFixed(1) : 'N/A')} | RHS ${escapeHtmlLocal(Number.isFinite(exactA3Best.rhs) ? exactA3Best.rhs.toFixed(1) : 'N/A')}</div>`
+                    : '') +
+                `  </div>` +
+                `</div>`
+            )
+            : '';
+        const markerLegendHtml = Object.keys(markerPalette).map((key) => {
+            const item = markerPalette[key];
+            const enabled = markerVisibility[key] !== false;
+            return `<button type="button" data-ho-marker-key="${escapeHtmlLocal(key)}" style="display:inline-flex; align-items:center; gap:6px; padding:5px 8px; border-radius:999px; border:1px solid ${enabled ? item.line : '#334155'}; background:${enabled ? 'rgba(15,23,42,0.85)' : '#0f172a'}; color:${enabled ? '#e5e7eb' : '#64748b'}; cursor:pointer; font-size:11px;">` +
+                `<span style="display:inline-block; width:10px; height:10px; border-radius:999px; background:${item.line}; opacity:${enabled ? '1' : '0.35'};"></span>` +
+                `<span>${escapeHtmlLocal(item.label)}</span>` +
+                `</button>`;
+        }).join('');
+        const targetSelectionHtml = '' +
+            `<div style="margin-bottom:12px; border:1px solid #334155; border-radius:10px; overflow:hidden;">` +
+            `  <div style="padding:8px 12px; background:#0f172a; font-weight:700; color:#bfdbfe;">Target Selection</div>` +
+            `  <div style="display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:8px; padding:10px; background:#071326;">` +
+            `    <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Chosen target PCI</div><div>${escapeHtmlLocal(chosenTargetPci !== undefined && chosenTargetPci !== null && chosenTargetPci !== '' ? String(chosenTargetPci) : 'N/A')}</div>${targetName ? `<div style="font-size:11px;color:#93c5fd; margin-top:4px;">${escapeHtmlLocal(targetName)}</div>` : ''}</div>` +
+            `    <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Best alternative PCI</div><div>${escapeHtmlLocal(bestAlternativePci !== undefined && bestAlternativePci !== null && bestAlternativePci !== '' ? String(bestAlternativePci) : 'N/A')}</div>${bestAlternativeName ? `<div style="font-size:11px;color:#93c5fd; margin-top:4px;">${escapeHtmlLocal(bestAlternativeName)}</div>` : ''}</div>` +
+            `    <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Chosen target delta</div><div>${hoFmt(chosenTargetDelta,1,' dB')}</div></div>` +
+            `    <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Best alternative delta</div><div>${hoFmt(bestAlternativeDelta,1,' dB')}</div></div>` +
+            `    <div style="background:${Number.isFinite(deltaGap) && deltaGap >= 2 ? '#3f1d1d' : '#111827'}; border:1px solid ${Number.isFinite(deltaGap) && deltaGap >= 2 ? '#ef4444' : '#334155'}; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Delta gap</div><div>${hoFmt(deltaGap,1,' dB')}</div></div>` +
+            `  </div>` +
+            `</div>`;
+        host.innerHTML = '' +
+            `<div style="display:grid; grid-template-columns:repeat(${exactA3BadgeHtml ? '5' : '4'}, minmax(0,1fr)); gap:8px; margin-bottom:12px;">` +
+            `  <div style="background:#0f172a; border:1px solid #334155; padding:10px; border-radius:10px;"><div style="font-size:11px; color:#93c5fd;">Classification</div><div style="font-weight:700;">${escapeHtmlLocal(eventObj.classification || 'N/A')}</div></div>` +
+            `  <div style="background:#0f172a; border:1px solid #334155; padding:10px; border-radius:10px;"><div style="font-size:11px; color:#93c5fd;">Confidence</div><div style="font-weight:700;">${hoPct(eventObj.confidence)}</div></div>` +
+            `  <div style="background:#0f172a; border:1px solid #334155; padding:10px; border-radius:10px;"><div style="font-size:11px; color:#93c5fd;">Source</div><div style="font-weight:700;">${escapeHtmlLocal(sourceLabel)}</div>${sourceName ? `<div style="font-size:11px; color:#cbd5e1; margin-top:4px;">${escapeHtmlLocal(sourceName)}</div>` : ''}</div>` +
+            `  <div style="background:#0f172a; border:1px solid #334155; padding:10px; border-radius:10px;"><div style="font-size:11px; color:#93c5fd;">Target</div><div style="font-weight:700;">${escapeHtmlLocal(targetLabel)}</div>${targetName ? `<div style="font-size:11px; color:#cbd5e1; margin-top:4px;">${escapeHtmlLocal(targetName)}</div>` : ''}</div>` +
+            exactA3BadgeHtml +
+            `</div>` +
+            targetSelectionHtml +
+            `<div style="display:grid; grid-template-columns:repeat(5, minmax(0,1fr)); gap:8px; margin-bottom:12px;">` +
+            `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Δ@Command</div><div>${hoFmt(eventObj?.metrics?.effectiveDeltaAtCommandDb,1,' dB')}</div></div>` +
+            `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Serving RSRP</div><div>${hoFmt(eventObj?.metrics?.servingRsrpAtCommandDbm,1,' dBm')}</div></div>` +
+            `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Target RSRP</div><div>${hoFmt(eventObj?.metrics?.targetRsrpAtCommandDbm,1,' dBm')}</div></div>` +
+            `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Report→Command</div><div>${hoFmt(eventObj?.metrics?.reportToCommandMs,0,' ms')}</div></div>` +
+            `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Command→Complete</div><div>${hoFmt(eventObj?.metrics?.commandToCompleteMs,0,' ms')}</div></div>` +
+            `</div>` +
+            `<div style="display:grid; grid-template-columns:1.1fr 1fr; gap:14px;">` +
+            `  <div>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Reasons</div><ul style="margin:0 0 12px 16px; color:#dbeafe;">${reasons || '<li>N/A</li>'}</ul>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Recommended Actions</div><ul style="margin:0 0 12px 16px; color:#d1fae5;">${actions || '<li>N/A</li>'}</ul>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Assumptions</div><ul style="margin:0 0 12px 16px; color:#fde68a;">${assumptions || '<li>None</li>'}</ul>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Timeline</div>` +
+            `    <div style="font-size:12px; color:#cbd5e1; line-height:1.6;">` +
+            `      T_better: ${escapeHtmlLocal(formatHoTs(eventObj.T_better))}<br>` +
+            `      T_a3_like: ${escapeHtmlLocal(formatHoTs(eventObj.T_a3_like))}<br>` +
+            `      Decision sample time used: ${escapeHtmlLocal(formatHoTs(eventObj.decisionSampleTs))}<br>` +
+            `      Decision sample source: ${escapeHtmlLocal(eventObj.decisionSampleSource || 'N/A')}<br>` +
+            `      Report: ${escapeHtmlLocal(formatHoTs(eventObj.reportTs))}<br>` +
+            `      Command: ${escapeHtmlLocal(formatHoTs(eventObj.commandTs))}<br>` +
+            `      Complete: ${escapeHtmlLocal(formatHoTs(eventObj.completeTs))}<br>` +
+            `      Fail: ${escapeHtmlLocal(formatHoTs(eventObj.failTs))}` +
+            `    </div>` +
+            `  </div>` +
+            `  <div>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Interpretation</div>` +
+            `    <div style="margin-bottom:12px; font-size:12px; color:${interpretationTheme.text}; line-height:1.6; background:${interpretationTheme.background}; border:1px solid ${interpretationTheme.border}; border-radius:10px; padding:10px; box-shadow:inset 0 0 0 1px rgba(15,23,42,0.18);"><div style="font-size:11px; color:${interpretationTheme.accent}; font-weight:700; margin-bottom:8px; text-transform:uppercase;">${escapeHtmlLocal(eventObj.classification || 'analysis')}</div>${buildLteHoInterpretationHtml(eventObj)}</div>` +
+            `    <div style="font-weight:700; margin-bottom:6px;">Chart</div>` +
+            `    <div style="height:260px; background:#0b1220; border:1px solid #334155; border-radius:10px; padding:8px;"><canvas id="lteHoDetailChartCanvas"></canvas></div>` +
+            `    <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">${markerLegendHtml}</div>` +
+            `    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">` +
+            `      <button id="btnShowLteHoOnMap" class="btn header-btn" style="padding:6px 10px;">Show on Map</button>` +
+            `      <button id="btnHideLteHoMap" class="btn header-btn" style="padding:6px 10px;">Clear Map</button>` +
+            `    </div>` +
+            exactA3Html +
+            `    <div style="margin-top:10px; font-weight:700;">Debug</div>` +
+            `    <pre style="margin:6px 0 0; max-height:180px; overflow:auto; background:#020617; border:1px solid #334155; padding:10px; border-radius:10px; color:#93c5fd; font-size:11px;">${debugJson}</pre>` +
+            `  </div>` +
+            `</div>`;
+        const canvas = document.getElementById('lteHoDetailChartCanvas');
+        buildLteHoChart(canvas, eventObj);
+        Array.from(host.querySelectorAll('[data-ho-marker-key]')).forEach((btn) => {
+            btn.onclick = () => {
+                const key = btn.getAttribute('data-ho-marker-key');
+                if (!key) return;
+                const nextVisibility = Object.assign({}, currentLteHoAnalysisState?.markerVisibility || LTE_HO_MARKER_DEFAULT_VISIBILITY);
+                nextVisibility[key] = nextVisibility[key] === false;
+                currentLteHoAnalysisState = Object.assign({}, currentLteHoAnalysisState || {}, {
+                    markerVisibility: nextVisibility
+                });
+                renderLteHoDetail(eventObj);
+            };
+        });
+        const showBtn = document.getElementById('btnShowLteHoOnMap');
+        const hideBtn = document.getElementById('btnHideLteHoMap');
+        if (showBtn) showBtn.onclick = () => showLteHoEventOnMap(eventObj, true);
+        if (hideBtn) hideBtn.onclick = () => removeLteHoOverlay();
+    }
+
+    function refreshLteHoTable() {
+        const state = currentLteHoAnalysisState;
+        if (!state) return;
+        const tbody = document.getElementById('lteHoEventsTableBody');
+        const thead = document.getElementById('lteHoEventsTableHead');
+        const table = document.getElementById('lteHoEventsTable');
+        const debugCountsHost = document.getElementById('lteHoDebugCounts');
+        const a3FilterSelect = document.getElementById('lteHoFilterA3Status');
+        if (!tbody) return;
+        const showNames = Boolean(document.getElementById('lteHoToggleNameColumns')?.checked);
+        const showExactA3 = Boolean(document.getElementById('lteHoToggleExactA3Columns')?.checked);
+        const a3Status = String(a3FilterSelect?.value || '');
+        const allEvents = Array.isArray(state.result?.events) ? state.result.events : [];
+        const a3Counts = allEvents.reduce((acc, ev) => {
+            const exactA3 = ev?.debug?.exactA3?.evaluation || null;
+            const exactA3Best = exactA3 && typeof exactA3 === 'object' && exactA3.bestNeighbor && typeof exactA3.bestNeighbor === 'object' ? exactA3.bestNeighbor : null;
+            const exactA3Satisfied = Number.isFinite(Number(exactA3Best?.lhsEnter)) && Number.isFinite(Number(exactA3Best?.rhs))
+                ? Number(exactA3Best.lhsEnter) > Number(exactA3Best.rhs)
+                : null;
+            if (exactA3Satisfied === true) acc.satisfied += 1;
+            else if (exactA3Satisfied === false) acc.notSatisfied += 1;
+            else acc.unavailable += 1;
+            return acc;
+        }, { satisfied: 0, notSatisfied: 0, unavailable: 0 });
+        if (table) {
+            table.style.minWidth = showExactA3
+                ? (showNames ? '3000px' : '2620px')
+                : (showNames ? '2140px' : '1760px');
+        }
+        if (a3FilterSelect) {
+            const currentValue = String(a3FilterSelect.value || '');
+            a3FilterSelect.innerHTML =
+                '<option value="">All</option>' +
+                `<option value="satisfied">A3 satisfied (${a3Counts.satisfied})</option>` +
+                `<option value="not_satisfied">A3 not satisfied (${a3Counts.notSatisfied})</option>` +
+                `<option value="unavailable">A3 unavailable (${a3Counts.unavailable})</option>`;
+            a3FilterSelect.value = currentValue;
+        }
+        if (debugCountsHost) {
+            const dbg = state.result?.debugCounts || {};
+            debugCountsHost.innerHTML =
+                `MR decoded: <b>${Number(dbg.decodedMeasurementReports || 0)}</b> | ` +
+                `Reconfigs decoded: <b>${Number(dbg.decodedReconfigurations || 0)}</b> | ` +
+                `Reconfigs with A3: <b>${Number(dbg.reconfigWithA3Resolvers || 0)}</b> | ` +
+                `Exact A3 reports: <b>${Number(dbg.exactA3Reports || 0)}</b> | ` +
+                `HO rows with exact A3: <b>${Number(dbg.matchedExactA3Hos || 0)}</b>` +
+                ((Array.isArray(dbg.errors) && dbg.errors.length)
+                    ? ` | <span style="color:#fca5a5;">Errors: ${escapeHtmlLocal(dbg.errors[0])}</span>`
+                    : '');
+        }
+        if (thead) {
+            thead.innerHTML = '<tr>' +
+                '<th style="padding:8px;">#</th>' +
+                '<th style="padding:8px;">Time</th>' +
+                '<th style="padding:8px;">Pair</th>' +
+                '<th style="padding:8px;">Type</th>' +
+                '<th style="padding:8px;">Class</th>' +
+                '<th style="padding:8px;">Confidence</th>' +
+                '<th style="padding:8px;">A3 status</th>' +
+                (showNames ? '<th style="padding:8px;">Source name</th><th style="padding:8px;">Target name</th><th style="padding:8px;">Best alternative name</th>' : '') +
+                '<th style="padding:8px;">Chosen target PCI</th>' +
+                '<th style="padding:8px;">Best alternative PCI</th>' +
+                '<th style="padding:8px;">Chosen target delta</th>' +
+                '<th style="padding:8px;">Best alternative delta</th>' +
+                '<th style="padding:8px;">Delta gap</th>' +
+                '<th style="padding:8px;">Decision sample time</th>' +
+                '<th style="padding:8px;">Decision sample source</th>' +
+                (showExactA3 ? '<th style="padding:8px;">A3 best PCI</th><th style="padding:8px;">Mn</th><th style="padding:8px;">Ms</th><th style="padding:8px;">Ofn</th><th style="padding:8px;">Ofs</th><th style="padding:8px;">Ocn</th><th style="padding:8px;">Ocs</th><th style="padding:8px;">Hys</th><th style="padding:8px;">Off</th><th style="padding:8px;">LHSenter</th><th style="padding:8px;">RHS</th><th style="padding:8px;">A3 margin</th></tr>' : '') +
+                (!showExactA3 ? '<th style="padding:8px;">Reason</th></tr>' : '');
+        }
+        const cls = String(document.getElementById('lteHoFilterClass')?.value || '');
+        const pair = String(document.getElementById('lteHoFilterPair')?.value || '');
+        const minConfidence = Number(document.getElementById('lteHoFilterConfidence')?.value || 0);
+        const filtered = (state.result.events || []).filter((ev) => {
+            const exactA3 = ev?.debug?.exactA3?.evaluation || null;
+            const exactA3Best = exactA3 && typeof exactA3 === 'object' && exactA3.bestNeighbor && typeof exactA3.bestNeighbor === 'object' ? exactA3.bestNeighbor : null;
+            const exactA3Satisfied = Number.isFinite(Number(exactA3Best?.lhsEnter)) && Number.isFinite(Number(exactA3Best?.rhs))
+                ? Number(exactA3Best.lhsEnter) > Number(exactA3Best.rhs)
+                : null;
+            if (cls && ev.classification !== cls) return false;
+            if (pair) {
+                const evPair = `${ev?.sourceCell?.pci ?? '?'}->${ev?.targetCell?.pci ?? '?'}`;
+                if (evPair !== pair) return false;
+            }
+            if (a3Status === 'satisfied' && exactA3Satisfied !== true) return false;
+            if (a3Status === 'not_satisfied' && exactA3Satisfied !== false) return false;
+            if (a3Status === 'unavailable' && exactA3Satisfied !== null) return false;
+            if (Number.isFinite(minConfidence) && Number(ev.confidence || 0) < minConfidence) return false;
+            return true;
+        });
+        state.filteredEvents = filtered;
+        tbody.innerHTML = filtered.map((ev, idx) => {
+            const pairLabel = `${ev?.sourceCell?.pci ?? '?'} -> ${ev?.targetCell?.pci ?? '?'}`;
+            const exactA3 = ev?.debug?.exactA3?.evaluation || null;
+            const exactA3Best = exactA3 && typeof exactA3 === 'object' && exactA3.bestNeighbor && typeof exactA3.bestNeighbor === 'object' ? exactA3.bestNeighbor : null;
+            const exactA3EnterSatisfied = Number.isFinite(Number(exactA3Best?.lhsEnter)) && Number.isFinite(Number(exactA3Best?.rhs))
+                ? Number(exactA3Best.lhsEnter) > Number(exactA3Best.rhs)
+                : null;
+            const activeStyle = state.selectedEventId === ev.id
+                ? 'background:rgba(37,99,235,0.18);'
+                : (showExactA3 && exactA3EnterSatisfied === true ? 'background:rgba(16,185,129,0.08);' : '');
+            const sourceName = String(ev?.sourceCell?.name || '').trim() || 'N/A';
+            const targetName = String(ev?.targetCell?.name || '').trim() || 'N/A';
+            const bestAlternativeName = String(ev?.bestAlternative?.name || '').trim() || 'N/A';
+            const chosenTargetPci = (ev?.targetCell?.pci !== undefined && ev?.targetCell?.pci !== null && ev?.targetCell?.pci !== '') ? String(ev.targetCell.pci) : 'N/A';
+            const bestAlternativePci = (ev?.bestAlternative?.pci !== undefined && ev?.bestAlternative?.pci !== null && ev?.bestAlternative?.pci !== '') ? String(ev.bestAlternative.pci) : 'N/A';
+            const decisionSampleTime = formatHoTs(ev?.decisionSampleTs);
+            const decisionSampleSource = ev?.decisionSampleSource || 'N/A';
+            const exactUnit = String(exactA3 && exactA3.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? ' dB' : ' dBm';
+            const chosenTargetDelta = hoFmt(ev?.metrics?.effectiveDeltaAtCommandDb, 1, ' dB');
+            const bestAlternativeDelta = hoFmt(ev?.bestAlternative?.bestDeltaDb, 1, ' dB');
+            const deltaGapRaw = (Number.isFinite(Number(ev?.bestAlternative?.bestDeltaDb)) && Number.isFinite(Number(ev?.metrics?.effectiveDeltaAtCommandDb)))
+                ? (Number(ev.bestAlternative.bestDeltaDb) - Number(ev.metrics.effectiveDeltaAtCommandDb))
+                : null;
+            const deltaGap = hoFmt(deltaGapRaw, 1, ' dB');
+            const deltaGapStyle = Number.isFinite(deltaGapRaw) && deltaGapRaw >= 2 ? 'color:#fca5a5; font-weight:700;' : '';
+            const exactA3MarginRaw = Number(exactA3Best?.deltaVsThreshold);
+            const exactA3MarginStyle = Number.isFinite(exactA3MarginRaw)
+                ? (exactA3MarginRaw > 0
+                    ? 'color:#86efac; font-weight:700;'
+                    : (exactA3MarginRaw < 0 ? 'color:#fca5a5; font-weight:700;' : 'color:#cbd5e1; font-weight:700;'))
+                : '';
+            const a3StatusBadgeHtml = (() => {
+                if (exactA3EnterSatisfied === true) {
+                    return '<button type="button" data-a3-filter-value="satisfied" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid rgba(34,197,94,0.45); background:rgba(34,197,94,0.16); color:#86efac; font-weight:700; font-size:11px; cursor:pointer;">Meet</button>';
+                }
+                if (exactA3EnterSatisfied === false) {
+                    return '<button type="button" data-a3-filter-value="not_satisfied" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid rgba(239,68,68,0.45); background:rgba(239,68,68,0.16); color:#fca5a5; font-weight:700; font-size:11px; cursor:pointer;">No</button>';
+                }
+                return '<button type="button" data-a3-filter-value="unavailable" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid rgba(148,163,184,0.28); background:rgba(15,23,42,0.55); color:#94a3b8; font-weight:700; font-size:11px; cursor:pointer;">N/A</button>';
+            })();
+            return `<tr data-ho-event-id="${escapeHtmlLocal(ev.id)}" style="cursor:pointer; ${activeStyle}">` +
+                `<td style="padding:8px;">${idx + 1}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(formatHoTs(ev.commandTs || ev.startTs))}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(pairLabel)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(ev.isIntraFreq === true ? 'IntraFreq' : (ev.isIntraFreq === false ? 'InterFreq' : 'Unknown'))}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(ev.classification || 'N/A')}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(hoPct(ev.confidence))}</td>` +
+                `<td style="padding:8px;">${a3StatusBadgeHtml}</td>` +
+                (showNames ? `<td style="padding:8px;">${escapeHtmlLocal(sourceName)}</td><td style="padding:8px;">${escapeHtmlLocal(targetName)}</td><td style="padding:8px;">${escapeHtmlLocal(bestAlternativeName)}</td>` : '') +
+                `<td style="padding:8px;">${escapeHtmlLocal(chosenTargetPci)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(bestAlternativePci)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(chosenTargetDelta)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(bestAlternativeDelta)}</td>` +
+                `<td style="padding:8px; ${deltaGapStyle}">${escapeHtmlLocal(deltaGap)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(decisionSampleTime)}</td>` +
+                `<td style="padding:8px;">${escapeHtmlLocal(decisionSampleSource)}</td>` +
+                (showExactA3
+                    ? (
+                        `<td style="padding:8px;">${escapeHtmlLocal(Number.isFinite(Number(exactA3Best?.pci)) ? String(exactA3Best.pci) : 'N/A')}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3Best?.Mn, 1, exactUnit))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.servingMetric, 1, exactUnit))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.neighborOffsetFreqDb, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.servingOffsetFreqDb, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3Best?.Ocn, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.servingCioDb, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.hysteresisDb, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px;">${escapeHtmlLocal(hoFmt(exactA3?.a3OffsetDb, 1, ' dB'))}</td>` +
+                        `<td style="padding:8px; ${exactA3EnterSatisfied === true ? 'color:#86efac; font-weight:700;' : ''}">${escapeHtmlLocal(hoFmt(exactA3Best?.lhsEnter, 1, exactUnit))}</td>` +
+                        `<td style="padding:8px; ${exactA3EnterSatisfied === true ? 'color:#86efac; font-weight:700;' : ''}">${escapeHtmlLocal(hoFmt(exactA3Best?.rhs, 1, exactUnit))}</td>` +
+                        `<td style="padding:8px; ${exactA3MarginStyle}">${escapeHtmlLocal(hoFmt(exactA3Best?.deltaVsThreshold, 1, ' dB'))}</td>`
+                    )
+                    : `<td style="padding:8px;">${escapeHtmlLocal(ev.reasons && ev.reasons[0] ? ev.reasons[0] : '')}</td>`) +
+                `</tr>`;
+        }).join('');
+        Array.from(tbody.querySelectorAll('button[data-a3-filter-value]')).forEach((btn) => {
+            btn.onclick = (ev) => {
+                ev.stopPropagation();
+                const next = String(btn.getAttribute('data-a3-filter-value') || '');
+                const filterEl = document.getElementById('lteHoFilterA3Status');
+                if (filterEl) filterEl.value = next;
+                refreshLteHoTable();
+            };
+        });
+        Array.from(tbody.querySelectorAll('tr[data-ho-event-id]')).forEach((row) => {
+            row.onclick = () => {
+                const eventId = row.getAttribute('data-ho-event-id');
+                currentLteHoAnalysisState.selectedEventId = eventId;
+                refreshLteHoTable();
+                const eventObj = currentLteHoAnalysisState.filteredEvents.find((ev) => ev.id === eventId) || currentLteHoAnalysisState.result.events.find((ev) => ev.id === eventId);
+                renderLteHoDetail(eventObj);
+                syncLteHoEventSelection(currentLteHoAnalysisState.log, eventObj);
+            };
+        });
+        if (!filtered.length) {
+            const colspan = showExactA3 ? (showNames ? 29 : 26) : (showNames ? 18 : 15);
+            tbody.innerHTML = `<tr><td colspan="${colspan}" style="padding:12px; color:#94a3b8;">No HO events match the current filters.</td></tr>`;
+            document.getElementById('lteHoDetailHost').innerHTML = '<div style="color:#94a3b8;">Select an HO event to inspect detail.</div>';
+            return;
+        }
+        if (!state.selectedEventId || !filtered.some((ev) => ev.id === state.selectedEventId)) {
+            state.selectedEventId = filtered[0].id;
+        }
+        const selected = filtered.find((ev) => ev.id === state.selectedEventId) || filtered[0];
+        renderLteHoDetail(selected);
+    }
+
+    function renderLteHoAnalysisModal(result, log) {
+        const existing = document.getElementById('lteHoAnalysisModal');
+        if (existing) {
+            if (typeof existing.__persistLayout === 'function') existing.__persistLayout();
+            if (typeof existing.__cleanup === 'function') existing.__cleanup();
+            existing.remove();
+        }
+        removeLteHoOverlay();
+        currentLteHoAnalysisState = {
+            result,
+            log,
+            filteredEvents: [],
+            selectedEventId: null,
+            markerVisibility: Object.assign({}, LTE_HO_MARKER_DEFAULT_VISIBILITY)
+        };
+        const summary = result?.kpis?.summary || {};
+        const overlay = document.createElement('div');
+        overlay.id = 'lteHoAnalysisModal';
+        overlay.className = 'lte-ho-analysis-overlay';
+        overlay.style.zIndex = '10005';
+        overlay.style.pointerEvents = 'none';
+        overlay.style.background = 'transparent';
+        overlay.style.backdropFilter = 'none';
+        overlay.style.webkitBackdropFilter = 'none';
+        overlay.innerHTML = '' +
+            `<div class="analysis-modal" style="width:1280px; max-width:98vw; height:min(84vh, 900px); background:#06111f; border:1px solid #334155; color:#e5e7eb; position:fixed; top:70px; left:calc(50% - 640px); resize:both; overflow:hidden; min-width:900px; min-height:480px; pointer-events:auto; box-shadow:0 28px 60px rgba(2,6,23,0.62);">` +
+            `  <div class="analysis-header" style="background:#0f172a; display:flex; justify-content:space-between; align-items:center;">` +
+            `    <h3>LTE IntraFreq HO Analysis - ${escapeHtmlLocal(log?.name || log?.fileName || log?.id || 'log')}</h3>` +
+            `    <div style="display:flex; gap:8px; align-items:center;">` +
+              `      <button id="btnRefreshLteHoAnalysis" class="btn header-btn" style="padding:6px 10px;">Refresh</button>` +
+              `      <button id="btnResetLteHoWindow" class="btn header-btn" style="padding:6px 10px;">Reset window</button>` +
+              `      <button id="btnCloseLteHoAnalysis" class="analysis-close-btn">×</button>` +
+            `    </div>` +
+            `  </div>` +
+            `  <div class="analysis-content" style="padding:14px; height:calc(100% - 56px); overflow:auto;">` +
+            `    <div style="display:grid; grid-template-columns:repeat(8, minmax(0,1fr)); gap:10px; margin-bottom:14px;">` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Total LTE HOs</div><div style="font-size:20px;font-weight:700;">${summary.totalLteHos ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">IntraFreq</div><div style="font-size:20px;font-weight:700;">${summary.totalIntraFreqHos ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Success Rate</div><div style="font-size:20px;font-weight:700;">${hoPct(summary.intrafreqHoSuccessRate)}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Exec Failure</div><div style="font-size:20px;font-weight:700;">${summary.executionFailureCount ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Too Late</div><div style="font-size:20px;font-weight:700;">${summary.tooLateCount ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Too Early</div><div style="font-size:20px;font-weight:700;">${summary.tooEarlyCount ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Ping-Pong</div><div style="font-size:20px;font-weight:700;">${summary.pingPongCount ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Wrong Target</div><div style="font-size:20px;font-weight:700;">${summary.wrongTargetCount ?? 0}</div></div>` +
+            `    </div>` +
+            `    <div style="display:flex; gap:10px; align-items:end; margin-bottom:12px; flex-wrap:wrap;">` +
+            `      <div><div style="font-size:11px;color:#94a3b8;">Classification</div><select id="lteHoFilterClass" class="setting-input" style="min-width:180px;"><option value=\"\">All</option><option value=\"successful\">successful</option><option value=\"too-late\">too-late</option><option value=\"too-early\">too-early</option><option value=\"ping-pong\">ping-pong</option><option value=\"wrong-target\">wrong-target</option><option value=\"execution-failure\">execution-failure</option><option value=\"missing-report/config-issue\">missing-report/config-issue</option></select></div>` +
+            `      <div><div style="font-size:11px;color:#94a3b8;">Source -> Target</div><select id="lteHoFilterPair" class="setting-input" style="min-width:180px;"><option value=\"\">All</option>${Array.from(new Set((result.events || []).map((ev) => `${ev?.sourceCell?.pci ?? '?'}->${ev?.targetCell?.pci ?? '?'}`))).map((pair) => `<option value=\"${escapeHtmlLocal(pair)}\">${escapeHtmlLocal(pair)}</option>`).join('')}</select></div>` +
+            `      <div><div style="font-size:11px;color:#94a3b8;">Min Confidence</div><input id="lteHoFilterConfidence" type="number" min="0" max="1" step="0.05" value="0" class="setting-input" style="width:120px;"></div>` +
+            `      <div><div style="font-size:11px;color:#94a3b8;">Exact A3</div><select id="lteHoFilterA3Status" class="setting-input" style="min-width:170px;"><option value=\"\">All</option><option value=\"satisfied\">A3 satisfied</option><option value=\"not_satisfied\">A3 not satisfied</option><option value=\"unavailable\">A3 unavailable</option></select></div>` +
+            `      <label style="display:flex; align-items:center; gap:8px; color:#cbd5e1; font-size:12px; padding-bottom:6px;"><input id="lteHoToggleNameColumns" type="checkbox"> Show name columns</label>` +
+            `      <label style="display:flex; align-items:center; gap:8px; color:#cbd5e1; font-size:12px; padding-bottom:6px;"><input id="lteHoToggleExactA3Columns" type="checkbox"> Show exact A3 columns</label>` +
+            `    </div>` +
+            `    <div style="display:flex; gap:10px; align-items:center; margin:-4px 0 12px; flex-wrap:wrap; font-size:11px; color:#cbd5e1;">` +
+            `      <span style="color:#94a3b8;">A3 legend:</span>` +
+            `      <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; border:1px solid #14532d; background:rgba(16,185,129,0.08);"><span style="width:10px;height:10px;border-radius:999px;background:#86efac;display:inline-block;"></span>Row tint: LHSenter &gt; RHS</span>` +
+            `      <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; border:1px solid #14532d; background:#0f172a;"><span style="width:10px;height:10px;border-radius:999px;background:#86efac;display:inline-block;"></span>A3 margin &gt; 0</span>` +
+            `      <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; border:1px solid #7f1d1d; background:#0f172a;"><span style="width:10px;height:10px;border-radius:999px;background:#fca5a5;display:inline-block;"></span>A3 margin &lt; 0</span>` +
+            `    </div>` +
+            `    <div id="lteHoDebugCounts" style="margin:-4px 0 12px; font-size:11px; color:#94a3b8;"></div>` +
+            `    <div class="lte-ho-analysis-main-grid">` +
+            `      <div class="lte-ho-analysis-table-pane" style="border:1px solid #334155; border-radius:10px;">` +
+            `        <div style="padding:10px 12px; background:#0f172a; font-weight:700;">HO Events</div>` +
+            `        <div class="lte-ho-analysis-table-scroll">` +
+            `          <table id="lteHoEventsTable" style="width:max-content; min-width:100%; border-collapse:collapse; font-size:12px;">` +
+            `            <thead id="lteHoEventsTableHead" style="position:sticky; top:0; background:#111827;"></thead>` +
+            `            <tbody id="lteHoEventsTableBody"></tbody>` +
+            `          </table>` +
+            `        </div>` +
+            `      </div>` +
+            `      <div id="lteHoDetailHost" class="lte-ho-analysis-detail-pane" style="border:1px solid #334155; border-radius:10px; padding:12px; min-height:420px; background:#071326; overflow:auto;"></div>` +
+            `    </div>` +
+            `  </div>` +
+            `</div>`;
+        document.body.appendChild(overlay);
+        if (typeof window.attachAnalysisDrag === 'function') {
+            window.attachAnalysisDrag(overlay);
+        }
+        const modal = overlay.querySelector('.analysis-modal');
+        if (modal) {
+            applySavedLteHoAnalysisLayout(modal);
+            const persistLayout = () => persistLteHoAnalysisLayout(modal);
+            overlay.__persistLayout = persistLayout;
+            modal.addEventListener('codex:dragend', persistLayout);
+            let resizeObserver = null;
+            if (typeof ResizeObserver !== 'undefined') {
+                resizeObserver = new ResizeObserver(() => persistLayout());
+                resizeObserver.observe(modal);
+            }
+            overlay.__cleanup = () => {
+                modal.removeEventListener('codex:dragend', persistLayout);
+                if (resizeObserver) resizeObserver.disconnect();
+            };
+        }
+        const refreshBtn = document.getElementById('btnRefreshLteHoAnalysis');
+        if (refreshBtn) {
+            refreshBtn.onclick = async () => {
+                const fresh = await runLteHoAnalysisForLog(log, true);
+                renderLteHoAnalysisModal(fresh, log);
+            };
+        }
+        const resetBtn = document.getElementById('btnResetLteHoWindow');
+        if (resetBtn) {
+            resetBtn.onclick = () => {
+                const modal = overlay.querySelector('.analysis-modal');
+                resetLteHoAnalysisLayout(modal);
+                if (typeof overlay.__persistLayout === 'function') overlay.__persistLayout();
+            };
+        }
+        const closeBtn = document.getElementById('btnCloseLteHoAnalysis');
+        if (closeBtn) {
+            closeBtn.onclick = () => {
+                if (typeof overlay.__persistLayout === 'function') overlay.__persistLayout();
+                if (typeof overlay.__cleanup === 'function') overlay.__cleanup();
+                overlay.remove();
+                if (window.__lteHoDetailChart && window.__lteHoDetailChart.destroy) window.__lteHoDetailChart.destroy();
+                removeLteHoOverlay();
+            };
+        }
+        ['lteHoFilterClass', 'lteHoFilterPair', 'lteHoFilterConfidence', 'lteHoFilterA3Status', 'lteHoToggleNameColumns', 'lteHoToggleExactA3Columns'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.oninput = refreshLteHoTable;
+            if (el) el.onchange = refreshLteHoTable;
+        });
+        refreshLteHoTable();
+    }
+
+    window.openLteHoAnalysisForActiveLog = async function () {
+        const log = getPreferredLteHoLog();
+        if (!log) {
+            alert('No LTE log is loaded.');
+            return;
+        }
+        const status = document.getElementById('fileStatus');
+        if (status) status.textContent = 'Running LTE IntraFreq HO analysis...';
+        const result = await runLteHoAnalysisForLog(log, false);
+        renderLteHoAnalysisModal(result, log);
+        if (status) status.textContent = `LTE HO analysis ready: ${result?.events?.length || 0} events`;
+    };
 
 
-    function openChartModal(log, param) {
+    function openChartModal(log, param, options = {}) {
         // Store for Docking/Sync
         window.currentChartLogId = log.id;
         window.currentChartParam = param;
+        if (!options || !options.preserveHoSyncContext) {
+            window.__chartHoSyncContext = null;
+        }
 
         let activeIndex = 0; // Track selected point index
 
@@ -3350,7 +4826,7 @@ document.addEventListener('DOMContentLoaded', () => {
         container.innerHTML = '\n' +
             '                    <div id="' + (headerId) + '" style="padding:10px; background:#2d2d2d; border-bottom:1px solid #444; display:flex; justify-content:space-between; align-items:center; cursor:' + (dragCursor) + '; user-select:none;">\n' +
             '                        <div style="display:flex; align-items:center; pointer-events:none;">\n' +
-            '                            <h3 style="margin:0; margin-right:20px; pointer-events:auto; font-size:14px;">' + (log.name) + ' - ' + (isComposite ? 'RSCP & Neighbors' : param.toUpperCase()) + ' (Snapshot)</h3>\n' +
+            '                            <h3 id="chartTitleText" style="margin:0; margin-right:20px; pointer-events:auto; font-size:14px;">' + (getChartTitleHtml(log, param)) + '</h3>\n' +
             '                            <button id="styleToggleBtn" style="background:#333; color:#ccc; border:1px solid #555; padding:5px 10px; cursor:pointer; pointer-events:auto; font-size:11px;">⚙️ Style</button>\n' +
             '                        </div>\n' +
             '                        <div style="pointer-events:auto; display:flex; gap:10px;">\n' +
@@ -5595,6 +7071,9 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             document.onmouseup = null;
             document.onmousemove = null;
             headerEl.style.cursor = 'grab';
+            try {
+                containerEl.dispatchEvent(new CustomEvent('codex:dragend'));
+            } catch (_err) { }
         }
 
         headerEl.style.cursor = 'grab';
@@ -9867,8 +11346,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             const rrcStateDecodedExact = getValFromObj(d, 'RRC State (decoded exact)');
             const rrcState = getValFromObj(d, 'RRC State');
             const hoEvent = getValFromObj(d, 'HO Start/Complete');
-            const a3a5Triggers = getValFromObj(d, 'A3/A5 triggers');
-            const a3a5Thresholds = getValFromObj(d, 'A3/A5 event thresholds', 'A3/A5 thresholds');
+            const a3a5Triggers = getValFromObj(d, 'A3/A5 triggers (Connected-mode HO)', 'A3/A5 triggers');
+            const a3a5Thresholds = getValFromObj(d, 'A3/A5 event thresholds (Connected-mode HO)', 'A3/A5 event thresholds', 'A3/A5 thresholds');
             const a3a5ThresholdSourceTime = getValFromObj(d, 'A3/A5 threshold source time', 'A3/A5 source time');
             const a3a5ThresholdSourcePci = getValFromObj(d, 'A3/A5 threshold source PCI', 'A3/A5 source PCI');
             const a3a5ThresholdContextCheck = getValFromObj(d, 'A3/A5 threshold context check', 'A3/A5 context check');
@@ -10343,7 +11822,7 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
                 ['BLER DL', fmt(blerDl, ' %')], ['CQI (DL)', fmt(cqi)], ['DL MCS', fmt(dlMcs)], ['Rank/Layers', fmt(rank)],
                 ['Modulation (DL/UL)', fmt(modulation)], ['MIMO/CA', fmt(mimoCa)], ['RRC State (decoded exact)', fmt(rrcStateDecodedExact)], ['RRC State', fmt(rrcState)],
                 ['HO Start/Complete', fmt(hoEvent)], ['Cell/PCI Change', fmt(pciChange)], ['EARFCN/Band Change', fmt(earfcnChange)],
-                ['A3/A5 triggers', fmt(a3a5Triggers)], ['A3/A5 event thresholds', fmt(a3a5Thresholds)],
+                ['A3/A5 triggers (Connected-mode HO)', fmt(a3a5Triggers)], ['A3/A5 event thresholds (Connected-mode HO)', fmt(a3a5Thresholds)],
                 ['A3/A5 threshold source time', fmt(a3a5ThresholdSourceTime)], ['A3/A5 threshold source PCI', fmt(a3a5ThresholdSourcePci)], ['A3/A5 threshold context check', fmt(a3a5ThresholdContextCheck)],
                 ['HO command', fmt(hoCommand)], ['HO execution time', fmt(hoExecutionTime)],
                 ['HO failure', fmt(hoFailure)], ['RLF', fmt(rlf)], ['RRC State Transition', fmt(rrcTransition)],
@@ -10579,8 +12058,8 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
             'Rank/Layers (feedback proxy)',
             'RRC State (decoded exact)',
             'RRC State',
-            'A3/A5 triggers',
-            'A3/A5 event thresholds',
+            'A3/A5 triggers (Connected-mode HO)',
+            'A3/A5 event thresholds (Connected-mode HO)',
             'A3/A5 threshold source time',
             'A3/A5 threshold source PCI',
             'A3/A5 threshold context check',
@@ -12059,13 +13538,21 @@ Use caution around inactivity timers and short bursts.`),
         'HO Start/Complete': doc(`10) RRC state, handover, and failure chains (LTE)
 Meaning: estimated HO start/complete timing.
 Use: correlate mobility with throughput gaps, RTT spikes, and TA jumps.`),
-        'A3/A5 triggers': doc(`10) RRC state, handover, and failure chains (LTE)
-Meaning: decoded HO trigger logic:
+        'A3/A5 triggers (Connected-mode HO)': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: decoded HO trigger logic used in RRC_CONNECTED:
 - A3: neighbor better than serving by offset
 - A5: serving below threshold1 and neighbor above threshold2
 Why it matters: explains HO cause (coverage/quality/load policy behavior).`),
-        'A3/A5 event thresholds': doc(`10) RRC state, handover, and failure chains (LTE)
-Meaning: configured offsets/thresholds/hysteresis/TTT for A3/A5 logic.
+        'A3/A5 event thresholds (Connected-mode HO)': doc(`10) RRC state, handover, and failure chains (LTE)
+Meaning: configured offsets/thresholds/hysteresis/TTT for A3/A5 logic in RRC_CONNECTED.
+Core connected-mode relations:
+- A3: Mn + Ofn + Ocn - Hys > Ms + Ofs + Ocs + Off
+- A5: Ms + Hys < Thresh1 AND Mn - Hys > Thresh2
+where:
+- Ms = serving measurement
+- Mn = neighbor measurement
+- Hys = hysteresis
+- TTT = time-to-trigger must also expire
 Why it matters: key mobility tuning lever:
 - too aggressive => ping-pong
 - too conservative => late HO and higher RLF risk.`),
@@ -12110,22 +13597,29 @@ Interpretation: serving must usually drop below this level before the A5 conditi
         'A5 neighbor threshold': doc(`10) RRC state, handover, and failure chains (LTE)
 Meaning: decoded/inferred A5 neighbor threshold (threshold2) in dBm.
 Interpretation: target neighbor must usually exceed this level before the A5 condition can trigger.`),
-        'SIB3 reselection thresholds': doc(`10) LTE broadcast reselection thresholds (idle mode)
-Meaning: decoded LTE SIB3 parameters broadcast by the serving cell for intra-frequency idle-mode reselection.
+        'SIB3 reselection thresholds (Idle-mode reselection)': doc(`10) LTE broadcast reselection thresholds (idle mode)
+Meaning: decoded LTE SIB3 parameters broadcast by the serving cell for intra-frequency idle-mode reselection in RRC_IDLE.
 Typical fields shown here:
 - q-Hyst
 - cellReselectionPriority
 - s-IntraSearch / s-NonIntraSearch
 - threshServingLow
 - q-RxLevMin / q-QualMin
+Key idle-mode relation:
+- Srxlev = Qrxlevmeas - (Qrxlevmin + Pcompensation)
+- cell is suitable when Srxlev > 0
+This is camping/reselection policy, not HO execution logic.
 This is not A3/A5 HO config. SIB3 is broadcast idle-mode policy.`),
-        'SIB5 reselection thresholds': doc(`10) LTE broadcast reselection thresholds (idle mode)
-Meaning: decoded LTE SIB5 parameters broadcast for inter-frequency idle-mode reselection.
+        'SIB5 reselection thresholds (Idle-mode reselection)': doc(`10) LTE broadcast reselection thresholds (idle mode)
+Meaning: decoded LTE SIB5 parameters broadcast for inter-frequency idle-mode reselection in RRC_IDLE.
 Typical fields shown here per target EARFCN:
 - cellReselectionPriority
 - q-RxLevMin
 - threshX-High / threshX-Low
 - q-OffsetFreq
+Key idle-mode relation:
+- threshold decisions use priority-based reselection criteria and threshX-High / threshX-Low
+- these are not connected-mode HO thresholds
 This is not A3/A5 HO config. SIB5 is broadcast idle-mode policy.`),
         'HO command': doc(`10) RRC state, handover, and failure chains (LTE)
 Meaning: decoded HO command message with target/reconfiguration details.
@@ -13205,8 +14699,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return 'unknown';
         };
         const buildLteNeighborContextCache = (log) => {
-            if (!log || !Array.isArray(log.events)) return null;
-            const events = log.events;
+            if (!log) return null;
+            const events = getUnifiedLogEvents(log, { includePointEventsFallback: false });
+            if (!events.length) return null;
             const points = Array.isArray(log.points) ? log.points : [];
             const lastEventTs = events.length ? toTsMs(events[events.length - 1] && (events[events.length - 1].time ?? events[events.length - 1].timestamp ?? events[events.length - 1].ts)) : null;
             const sig = `${events.length}:${points.length}:${Number.isFinite(lastEventTs) ? lastEventTs : 0}`;
@@ -13338,6 +14833,35 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     }
                     return null;
                 };
+                const mergeConfiguredCells = (prevCells, nextCells) => {
+                    const out = [];
+                    const byKey = new Map();
+                    const ingestCell = (cell) => {
+                        if (!cell || typeof cell !== 'object') return;
+                        const pci = toInt(cell.physCellId ?? cell.pci);
+                        const cellIndex = toInt(cell.cellIndex);
+                        const cioDb = toNumIfFinite(cell.cellIndividualOffsetDb ?? cell.cellIndividualOffset ?? cell.cioDb);
+                        if (!Number.isFinite(pci) && !Number.isFinite(cellIndex)) return;
+                        const key = `${Number.isFinite(pci) ? pci : '-'}|${Number.isFinite(cellIndex) ? cellIndex : '-'}`;
+                        const prev = byKey.get(key);
+                        if (!prev) {
+                            const row = {
+                                physCellId: Number.isFinite(pci) ? pci : null,
+                                cellIndex: Number.isFinite(cellIndex) ? cellIndex : null,
+                                cellIndividualOffsetDb: Number.isFinite(cioDb) ? cioDb : null
+                            };
+                            byKey.set(key, row);
+                            out.push(row);
+                            return;
+                        }
+                        if (!Number.isFinite(prev.physCellId) && Number.isFinite(pci)) prev.physCellId = pci;
+                        if (!Number.isFinite(prev.cellIndex) && Number.isFinite(cellIndex)) prev.cellIndex = cellIndex;
+                        if (!Number.isFinite(prev.cellIndividualOffsetDb) && Number.isFinite(cioDb)) prev.cellIndividualOffsetDb = cioDb;
+                    };
+                    (Array.isArray(prevCells) ? prevCells : []).forEach((cell) => ingestCell(cell));
+                    (Array.isArray(nextCells) ? nextCells : []).forEach((cell) => ingestCell(cell));
+                    return out;
+                };
                 const ingestMeasConfigJson = (jsonObj) => {
                     const walk = (node, depth = 0) => {
                         if (depth > 12 || !node || typeof node !== 'object') return;
@@ -13363,7 +14887,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 cache.measObjects[String(objId)] = {
                                     rat: rat || prev.rat || 'LTE',
                                     earfcn: Number.isFinite(earfcnDeep) ? earfcnDeep : (Number.isFinite(prev.earfcn) ? prev.earfcn : null),
-                                    cells: Array.from(new Set([...prevCells, ...configuredPcis]))
+                                    cells: mergeConfiguredCells(prevCells, configuredPcis.map((pci) => ({ physCellId: pci })))
                                 };
                             } else if (configuredPcis.length) {
                                 const prev = cache.measObjects[String(objId)] || {};
@@ -13371,7 +14895,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 cache.measObjects[String(objId)] = {
                                     ...prev,
                                     rat: prev.rat || rat || 'LTE',
-                                    cells: Array.from(new Set([...prevCells, ...configuredPcis]))
+                                    cells: mergeConfiguredCells(prevCells, configuredPcis.map((pci) => ({ physCellId: pci })))
                                 };
                             }
                         }
@@ -13385,10 +14909,60 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     };
                     walk(jsonObj, 0);
                 };
+                const ingestMeasResolverJson = (resolverObj) => {
+                    if (!resolverObj || typeof resolverObj !== 'object') return;
+                    (Array.isArray(resolverObj.measObjects) ? resolverObj.measObjects : []).forEach((objRow) => {
+                        if (!objRow || typeof objRow !== 'object') return;
+                        const objId = toInt(objRow.measObjectId);
+                        if (!Number.isFinite(objId)) return;
+                        const prev = cache.measObjects[String(objId)] || {};
+                        cache.measObjects[String(objId)] = {
+                            ...prev,
+                            rat: String(objRow.rat || prev.rat || 'LTE').toUpperCase(),
+                            earfcn: Number.isFinite(sanitizeLteEarfcn(objRow.carrierFreq ?? objRow.earfcn))
+                                ? sanitizeLteEarfcn(objRow.carrierFreq ?? objRow.earfcn)
+                                : (Number.isFinite(prev.earfcn) ? prev.earfcn : null),
+                            offsetFreqDb: Number.isFinite(toNumIfFinite(objRow.offsetFreqDb)) ? toNumIfFinite(objRow.offsetFreqDb) : (Number.isFinite(toNumIfFinite(prev.offsetFreqDb)) ? toNumIfFinite(prev.offsetFreqDb) : null),
+                            cells: mergeConfiguredCells(prev.cells, objRow.cells)
+                        };
+                    });
+                    (Array.isArray(resolverObj.reportConfigs) ? resolverObj.reportConfigs : []).forEach((cfgRow) => {
+                        if (!cfgRow || typeof cfgRow !== 'object') return;
+                        const repId = toInt(cfgRow.reportConfigId);
+                        if (!Number.isFinite(repId)) return;
+                        const prev = cache.reportConfigs[String(repId)] || {};
+                        cache.reportConfigs[String(repId)] = {
+                            ...prev,
+                            eventType: String(cfgRow.eventType || prev.eventType || '').toUpperCase() || prev.eventType || null,
+                            triggerQuantity: cfgRow.triggerQuantity ?? prev.triggerQuantity ?? null,
+                            reportQuantity: cfgRow.reportQuantity ?? prev.reportQuantity ?? null,
+                            reportOnLeave: cfgRow.reportOnLeave ?? prev.reportOnLeave ?? null,
+                            a3OffsetDb: Number.isFinite(toNumIfFinite(cfgRow.a3OffsetDb)) ? toNumIfFinite(cfgRow.a3OffsetDb) : (Number.isFinite(toNumIfFinite(prev.a3OffsetDb)) ? toNumIfFinite(prev.a3OffsetDb) : null),
+                            hysteresisDb: Number.isFinite(toNumIfFinite(cfgRow.hysteresisDb)) ? toNumIfFinite(cfgRow.hysteresisDb) : (Number.isFinite(toNumIfFinite(prev.hysteresisDb)) ? toNumIfFinite(prev.hysteresisDb) : null),
+                            timeToTriggerMs: Number.isFinite(toInt(cfgRow.timeToTriggerMs)) ? toInt(cfgRow.timeToTriggerMs) : (Number.isFinite(toInt(prev.timeToTriggerMs)) ? toInt(prev.timeToTriggerMs) : null),
+                            a5Threshold1: cfgRow.a5Threshold1 ?? prev.a5Threshold1 ?? null,
+                            a5Threshold2: cfgRow.a5Threshold2 ?? prev.a5Threshold2 ?? null
+                        };
+                    });
+                    (Array.isArray(resolverObj.measIdLinks) ? resolverObj.measIdLinks : []).forEach((linkRow) => {
+                        if (!linkRow || typeof linkRow !== 'object') return;
+                        const measId = toInt(linkRow.measId);
+                        const measObjectId = toInt(linkRow.measObjectId);
+                        const reportConfigId = toInt(linkRow.reportConfigId);
+                        if (Number.isFinite(measId) && Number.isFinite(measObjectId) && Number.isFinite(reportConfigId)) {
+                            cache.measIdMap[String(measId)] = { measObjectId, reportConfigId };
+                        }
+                    });
+                };
                 const measCfgPair = (Array.isArray(pairs) ? pairs : []).find(([k]) => String(k || '').toLowerCase() === 'rrc_recfg_meas_config_json');
                 if (measCfgPair && measCfgPair[1] !== undefined && measCfgPair[1] !== null) {
                     const parsedCfg = parseJsonSafe(measCfgPair[1]);
                     if (parsedCfg && typeof parsedCfg === 'object') ingestMeasConfigJson(parsedCfg);
+                }
+                const measResolverPair = (Array.isArray(pairs) ? pairs : []).find(([k]) => String(k || '').toLowerCase() === 'rrc_recfg_meas_resolver_json');
+                if (measResolverPair && measResolverPair[1] !== undefined && measResolverPair[1] !== null) {
+                    const parsedResolver = parseJsonSafe(measResolverPair[1]);
+                    if (parsedResolver && typeof parsedResolver === 'object') ingestMeasResolverJson(parsedResolver);
                 }
                 (Array.isArray(pairs) ? pairs : []).forEach(([k, v]) => {
                     const key = String(k || '').toLowerCase();
@@ -13531,8 +15105,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         const cfgEarfcn = Number.isFinite(measObj && measObj.earfcn)
                             ? measObj.earfcn
                             : sanitizeLteEarfcn(servingState.earfcn);
-                        measCells.forEach((pciRaw) => {
-                            const pci = toInt(pciRaw);
+                        measCells.forEach((cellRow) => {
+                            const pci = toInt(cellRow && (cellRow.physCellId ?? cellRow.pci));
                             if (!Number.isFinite(pci) || pci < 0 || pci > 503) return;
                             if (Number.isFinite(servingState.pci) && Number.isFinite(cfgEarfcn) &&
                                 pci === servingState.pci && cfgEarfcn === sanitizeLteEarfcn(servingState.earfcn)) {
@@ -13544,6 +15118,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 rsrp: null,
                                 rsrq: null,
                                 sinr: null,
+                                cioDb: Number.isFinite(toNumIfFinite(cellRow && (cellRow.cellIndividualOffsetDb ?? cellRow.cioDb))) ? toNumIfFinite(cellRow && (cellRow.cellIndividualOffsetDb ?? cellRow.cioDb)) : null,
                                 configured_only: true
                             });
                         });
@@ -13603,6 +15178,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                             rxlev,
                             rxqual,
                             sinr,
+                            cioDb: Number.isFinite(toNumIfFinite(r && (r.cioDb ?? r.cellIndividualOffsetDb))) ? toNumIfFinite(r && (r.cioDb ?? r.cellIndividualOffsetDb)) : null,
                             rat,
                             neighbor_type: neighborType,
                             source_kind: isConfiguredOnly ? 'configured' : 'decoded',
@@ -13968,6 +15544,91 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     }
 
     // --- NEW: Log View Generator ---
+    window.closeA3EnteringExplanation = function () {
+        const modal = document.getElementById('a3EnteringExplainModal');
+        if (modal) modal.remove();
+    };
+
+    window.showA3EnteringExplanation = function () {
+        const payload = window.__pointDetailsA3Explanation;
+        if (!payload || typeof payload !== 'object') return;
+        window.closeA3EnteringExplanation();
+        const esc = (value) => String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+        const fmtNum = (value, suffix = '') => {
+            const n = Number(value);
+            return Number.isFinite(n) ? `${n.toFixed(1)}${suffix}` : 'N/A';
+        };
+        const evalObj = payload.evalObj && typeof payload.evalObj === 'object' ? payload.evalObj : {};
+        const best = payload.best && typeof payload.best === 'object' ? payload.best : {};
+        const unit = payload.unit || 'dBm';
+        const titleColor = payload.enterSatisfied ? '#86efac' : '#fca5a5';
+        const badgeBg = payload.enterSatisfied ? 'rgba(34,197,94,0.16)' : 'rgba(239,68,68,0.16)';
+        const badgeBorder = payload.enterSatisfied ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)';
+        const assumptions = Array.isArray(evalObj.assumptions) ? evalObj.assumptions.filter(Boolean) : [];
+        const modal = document.createElement('div');
+        modal.id = 'a3EnteringExplainModal';
+        modal.style.cssText = 'position:fixed; inset:0; z-index:3100; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,0.55);';
+        modal.innerHTML =
+            '<div style="width:min(760px, calc(100vw - 32px)); max-height:min(84vh, 820px); overflow:auto; background:#071329; border:1px solid #294264; border-radius:16px; box-shadow:0 24px 70px rgba(0,0,0,0.45); color:#e5eefc;">' +
+            '  <div style="display:flex; align-items:center; justify-content:space-between; padding:16px 18px; border-bottom:1px solid rgba(148,163,184,0.18);">' +
+            '    <div>' +
+            '      <div style="font-size:18px; font-weight:800; color:#fff;">A3 Entering - Exact Decoded Evaluation</div>' +
+            '      <div style="font-size:12px; color:#93c5fd; margin-top:4px;">' + esc(payload.sourceTime || 'Unknown source time') + '</div>' +
+            '    </div>' +
+            '    <button onclick="window.closeA3EnteringExplanation()" style="background:none; border:none; color:#cbd5e1; font-size:24px; cursor:pointer;">×</button>' +
+            '  </div>' +
+            '  <div style="padding:16px 18px 18px 18px;">' +
+            '    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px;">' +
+            '      <span style="font-size:12px; color:#94a3b8;">A3 entering</span>' +
+            '      <span style="display:inline-flex; align-items:center; padding:5px 10px; border-radius:999px; border:1px solid ' + badgeBorder + '; background:' + badgeBg + '; color:' + titleColor + '; font-weight:800;">' + esc(payload.statusLabel || 'Unknown') + '</span>' +
+            '      <span style="font-size:12px; color:#cbd5e1;">Best neighbor PCI ' + esc(Number.isFinite(Number(best.pci)) ? String(Number(best.pci)) : '?') + '</span>' +
+            '    </div>' +
+            '    <div style="font-size:13px; color:#cbd5e1; line-height:1.55; margin-bottom:14px;">' +
+            '      <div style="margin-bottom:8px;"><b style="color:#fff;">Step 1.</b> LTE A3 entering condition is met when:</div>' +
+            '      <div style="font-family:ui-monospace, SFMono-Regular, Menlo, monospace; background:rgba(15,23,42,0.65); border:1px solid rgba(148,163,184,0.16); border-radius:10px; padding:10px 12px; color:#e2e8f0;">Mn + Ofn + Ocn - Hys &gt; Ms + Ofs + Ocs + Off</div>' +
+            '      <div style="margin-top:10px;"><b style="color:#fff;">Step 2.</b> Build the left side (neighbor side):</div>' +
+            '      <div style="margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#93c5fd;">LHSenter = Mn + Ofn + Ocn - Hys</div>' +
+            '      <div style="margin-top:4px;">Mn = ' + esc(fmtNum(best.Mn, ' ' + unit)) + ', Ofn = ' + esc(fmtNum(evalObj.neighborOffsetFreqDb, ' dB')) + ', Ocn = ' + esc(fmtNum(best.Ocn, ' dB')) + ', Hys = ' + esc(fmtNum(evalObj.hysteresisDb, ' dB')) + '</div>' +
+            '      <div style="margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#e2e8f0;">LHSenter = ' + esc(fmtNum(best.Mn, ' ' + unit)) + ' + ' + esc(fmtNum(evalObj.neighborOffsetFreqDb, ' dB')) + ' + ' + esc(fmtNum(best.Ocn, ' dB')) + ' - ' + esc(fmtNum(evalObj.hysteresisDb, ' dB')) + ' = ' + esc(fmtNum(best.lhsEnter, ' ' + unit)) + '</div>' +
+            '      <div style="margin-top:10px;"><b style="color:#fff;">Step 3.</b> Build the right side (serving side):</div>' +
+            '      <div style="margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#93c5fd;">RHS = Ms + Ofs + Ocs + Off</div>' +
+            '      <div style="margin-top:4px;">Ms = ' + esc(fmtNum(evalObj.servingMetric, ' ' + unit)) + ', Ofs = ' + esc(fmtNum(evalObj.servingOffsetFreqDb, ' dB')) + ', Ocs = ' + esc(fmtNum(evalObj.servingCioDb, ' dB')) + ', Off = ' + esc(fmtNum(evalObj.a3OffsetDb, ' dB')) + '</div>' +
+            '      <div style="margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#e2e8f0;">RHS = ' + esc(fmtNum(evalObj.servingMetric, ' ' + unit)) + ' + ' + esc(fmtNum(evalObj.servingOffsetFreqDb, ' dB')) + ' + ' + esc(fmtNum(evalObj.servingCioDb, ' dB')) + ' + ' + esc(fmtNum(evalObj.a3OffsetDb, ' dB')) + ' = ' + esc(fmtNum(best.rhs, ' ' + unit)) + '</div>' +
+            '      <div style="margin-top:10px;"><b style="color:#fff;">Step 4.</b> Compare both sides:</div>' +
+            '      <div style="margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:' + titleColor + ';">' + esc(fmtNum(best.lhsEnter, ' ' + unit)) + ' &gt; ' + esc(fmtNum(best.rhs, ' ' + unit)) + ' =&gt; ' + esc(payload.enterSatisfied ? 'meet criteria' : 'does not meet criteria') + '</div>' +
+            '      <div style="margin-top:8px;"><b style="color:#fff;">Step 5.</b> Margin over threshold: <span style="color:' + (Number(best.deltaVsThreshold) >= 0 ? '#86efac' : '#fca5a5') + '; font-weight:700;">' + esc(fmtNum(best.deltaVsThreshold, ' dB')) + '</span></div>' +
+            '    </div>' +
+            (assumptions.length
+                ? ('<div style="margin-top:12px; padding:12px; background:rgba(15,23,42,0.55); border:1px solid rgba(148,163,184,0.14); border-radius:12px;">' +
+                   '  <div style="font-size:12px; font-weight:700; color:#fff; margin-bottom:8px;">Assumptions used</div>' +
+                   '  <ul style="margin:0; padding-left:18px; color:#cbd5e1; font-size:12px; line-height:1.5;">' +
+                   assumptions.map((item) => '<li>' + esc(item) + '</li>').join('') +
+                   '  </ul>' +
+                   '</div>')
+                : '') +
+            '  </div>' +
+            '</div>';
+        modal.addEventListener('click', (ev) => {
+            if (ev.target === modal) window.closeA3EnteringExplanation();
+        });
+        document.body.appendChild(modal);
+    };
+
+    window.openA3EnteringExplanationFromPayload = function (payloadEncoded) {
+        if (!payloadEncoded) return;
+        try {
+            const parsed = JSON.parse(decodeURIComponent(String(payloadEncoded)));
+            if (!parsed || typeof parsed !== 'object') return;
+            window.__pointDetailsA3Explanation = parsed;
+            window.showA3EnteringExplanation();
+        } catch (_e) { }
+    };
+
     function generatePointInfoHTMLLog(p, logColor) {
         // Extract Serving
         let sName = 'Unknown', sSC = '-', sRSCP = '-', sEcNo = '-', sFreq = '-', sRnc = null, sCid = null, sLac = null;
@@ -15261,8 +16922,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'NodeB Tx Power': ['NodeB Tx Power', 'NodeB Tx', 'NodeB TxPower', 'NodeB Tx power'],
             'A5 event': ['A5 event', 'A5 Event', 'Event A5', 'A3/A5 Event'],
             'HO Start/Complete': ['HO Start/Complete'],
-            'A3/A5 triggers': ['A3/A5 triggers', 'A3 Trigger', 'A5 Trigger'],
-            'A3/A5 event thresholds': ['A3/A5 event thresholds', 'A3/A5 thresholds', 'rrc_recfg_a3a5_thresholds_inferred'],
+            'A3/A5 triggers (Connected-mode HO)': ['A3/A5 triggers (Connected-mode HO)', 'A3/A5 triggers', 'A3 Trigger', 'A5 Trigger'],
+            'A3/A5 event thresholds (Connected-mode HO)': ['A3/A5 event thresholds (Connected-mode HO)', 'A3/A5 event thresholds', 'A3/A5 thresholds', 'rrc_recfg_a3a5_thresholds_inferred'],
             'A3/A5 threshold source time': ['A3/A5 threshold source time', 'A3/A5 source time', 'rrc_recfg_meas_report_time'],
             'A3/A5 threshold source PCI': ['A3/A5 threshold source PCI', 'A3/A5 source PCI', 'rrc_recfg_src_pci', 'rrc_recfg_tgt_pci'],
             'A3/A5 threshold context check': ['A3/A5 threshold context check', 'A3/A5 context check'],
@@ -15276,8 +16937,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'HO TTT': ['HO TTT', 'Time-to-Trigger', 'Time To Trigger', 'rrc_recfg_ttt_ms'],
             'A5 serving threshold': ['A5 serving threshold', 'A5 Threshold1', 'A5 serving threshold (dBm)', 'rrc_recfg_a5_serving_threshold_est_dbm'],
             'A5 neighbor threshold': ['A5 neighbor threshold', 'A5 Threshold2', 'A5 neighbor threshold (dBm)', 'rrc_recfg_a5_neighbor_threshold_est_dbm'],
-            'SIB3 reselection thresholds': ['SIB3 reselection thresholds'],
-            'SIB5 reselection thresholds': ['SIB5 reselection thresholds'],
+            'SIB3 reselection thresholds (Idle-mode reselection)': ['SIB3 reselection thresholds (Idle-mode reselection)', 'SIB3 reselection thresholds'],
+            'SIB5 reselection thresholds (Idle-mode reselection)': ['SIB5 reselection thresholds (Idle-mode reselection)', 'SIB5 reselection thresholds'],
             'HO command': ['HO command', 'HO Command', 'Handover Command'],
             'HO execution time': ['HO execution time', 'HO Execution Time', 'Handover Execution Time'],
             'HO failure': ['HO failure', 'HO Failure', 'Handover Failure', 'HOF'],
@@ -16210,11 +17871,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         };
         const nearEventsDetailed = (() => {
             if (!activeLog || !p.time) return [];
-            const eventSource = (Array.isArray(activeLog.events) && activeLog.events.length)
-                ? activeLog.events
-                : ((Array.isArray(activeLog.points) && activeLog.points.length)
-                    ? activeLog.points.filter((row) => String(row && row.type || '').toUpperCase() === 'EVENT')
-                    : []);
+            const eventSource = getUnifiedLogEvents(activeLog);
             if (!Array.isArray(eventSource) || !eventSource.length) return [];
             const target = pointDetailsTsMs(p.time);
             if (!Number.isFinite(target)) return [];
@@ -16271,6 +17928,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     name,
                     ms: te,
                     time: new Date(te).toISOString(),
+                    properties: (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {},
                     decodedRrcRecfg: (decodedRrcRecfg === undefined || decodedRrcRecfg === null) ? undefined : String(decodedRrcRecfg),
                     hoCommandInferred: (hoCmdInf === undefined || hoCmdInf === null) ? undefined : String(hoCmdInf),
                     recfgCompleteDelayMs: Number.isFinite(recfgCompleteDelayMs) ? recfgCompleteDelayMs : null,
@@ -16318,11 +17976,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return match ? ev.properties[match] : undefined;
         };
         const findNearestSibSummary = (nameRegex, summaryProp, maxDeltaMs = 120000) => {
-            if (!activeLog || !Array.isArray(activeLog.events) || !p.time) return undefined;
+            if (!activeLog || !p.time) return undefined;
+            const allEvents = getUnifiedLogEvents(activeLog);
+            if (!allEvents.length) return undefined;
             const target = pointDetailsTsMs(p.time);
             if (!Number.isFinite(target)) return undefined;
             let best = null;
-            activeLog.events.forEach((ev) => {
+            allEvents.forEach((ev) => {
                 const name = String(ev && (ev.event_name || ev.event || ev.message || getEventPropertyCiLocal(ev, 'Event')) || '').trim();
                 if (!nameRegex.test(name)) return;
                 const summary = getEventPropertyCiLocal(ev, summaryProp);
@@ -16335,8 +17995,6 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             });
             return best ? best.summary : undefined;
         };
-        const sib3ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB(?:2,SIB3|3)$/i, 'SIB3 reselection thresholds');
-        const sib5ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB5$/i, 'SIB5 reselection thresholds');
         const nearEventNames = (() => {
             const seen = new Set();
             const out = [];
@@ -16386,6 +18044,69 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
             return undefined;
         };
+        const parseJsonSafe = (raw) => {
+            if (raw === undefined || raw === null) return null;
+            if (typeof raw === 'object') return raw;
+            const txt = String(raw || '').trim();
+            if (!txt || txt === '-' || /^n\/?a$/i.test(txt)) return null;
+            try {
+                return JSON.parse(txt);
+            } catch (_e) {
+                return null;
+            }
+        };
+        const toNumIfFinite = (v) => {
+            if (v === null || v === undefined || v === '') return null;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+        const toInt = (v) => {
+            const n = toNumIfFinite(v);
+            return Number.isFinite(n) ? Math.round(n) : null;
+        };
+        const sib3ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB(?:2,SIB3|3)$/i, 'SIB3 reselection thresholds');
+        const sib5ThresholdsValue = findNearestSibSummary(/^SystemInformation - SIB5$/i, 'SIB5 reselection thresholds');
+        const a3ExactMappingValue = pickNearEventPropertyValue(/^MeasurementReport$/i, ['measurement_report_a3_mapping_summary'], 4);
+        const a3ExactSourceTimeValue = pickNearEventPropertyValue(/^MeasurementReport$/i, ['measurement_report_a3_source_time'], 4);
+        const a3ExactEvalValue = pickNearEventPropertyValue(/^MeasurementReport$/i, ['measurement_report_a3_eval_summary'], 4);
+        const a3ExactEvalJsonValue = pickNearEventPropertyValue(/^MeasurementReport$/i, ['measurement_report_a3_eval_json'], 4);
+        const a3Override = (() => {
+            const override = window.__pointDetailsA3Override;
+            if (!override || typeof override !== 'object' || !activeLog) return null;
+            if (String(override.logId || '') !== String(activeLog.id || '')) return null;
+            if (String(override.pointTime || '') && String(override.pointTime || '') === String(p?.time || '').trim()) return override;
+            return null;
+        })();
+        const a3ExactEvalObj = a3Override?.evalObj || parseJsonSafe(a3ExactEvalJsonValue);
+        const a3ExactBest = a3Override?.best || ((a3ExactEvalObj && typeof a3ExactEvalObj === 'object' && a3ExactEvalObj.bestNeighbor && typeof a3ExactEvalObj.bestNeighbor === 'object')
+            ? a3ExactEvalObj.bestNeighbor
+            : null);
+        const a3ExactEnterSatisfied = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter)) && Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.rhs))
+            ? toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter) > toNumIfFinite(a3ExactBest && a3ExactBest.rhs)
+            : null;
+        const a3ExactMappingResolvedValue = a3Override?.mappingSummary || a3ExactMappingValue;
+        const a3ExactSourceTimeResolvedValue = a3Override?.sourceTime || a3ExactSourceTimeValue;
+        const a3ExactEvalResolvedValue = a3Override?.evaluationSummary || a3ExactEvalValue;
+        const a3ExactMnValue = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.Mn)) ? `${toNumIfFinite(a3ExactBest && a3ExactBest.Mn).toFixed(1)} ${String(a3ExactEvalObj && a3ExactEvalObj.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm'}` : undefined;
+        const a3ExactMsValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingMetric)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingMetric).toFixed(1)} ${String(a3ExactEvalObj && a3ExactEvalObj.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm'}` : undefined;
+        const a3ExactOfnValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.neighborOffsetFreqDb)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.neighborOffsetFreqDb).toFixed(1)} dB` : undefined;
+        const a3ExactOfsValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingOffsetFreqDb)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingOffsetFreqDb).toFixed(1)} dB` : undefined;
+        const a3ExactOcnValue = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.Ocn)) ? `${toNumIfFinite(a3ExactBest && a3ExactBest.Ocn).toFixed(1)} dB` : undefined;
+        const a3ExactOcsValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingCioDb)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.servingCioDb).toFixed(1)} dB` : undefined;
+        const a3ExactHysValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.hysteresisDb)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.hysteresisDb).toFixed(1)} dB` : undefined;
+        const a3ExactOffValue = Number.isFinite(toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.a3OffsetDb)) ? `${toNumIfFinite(a3ExactEvalObj && a3ExactEvalObj.a3OffsetDb).toFixed(1)} dB` : undefined;
+        const a3ExactLhsEnterValue = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter)) ? `${toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter).toFixed(1)} ${String(a3ExactEvalObj && a3ExactEvalObj.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm'}` : undefined;
+        const a3ExactRhsValue = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.rhs)) ? `${toNumIfFinite(a3ExactBest && a3ExactBest.rhs).toFixed(1)} ${String(a3ExactEvalObj && a3ExactEvalObj.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm'}` : undefined;
+        const a3ExactMarginValue = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.deltaVsThreshold)) ? `${toNumIfFinite(a3ExactBest && a3ExactBest.deltaVsThreshold).toFixed(1)} dB` : undefined;
+        const a3ExactBestPciValue = Number.isFinite(toInt(a3ExactBest && a3ExactBest.pci)) ? String(toInt(a3ExactBest && a3ExactBest.pci)) : undefined;
+        const a3ExactEvaluationStyledValue = (() => {
+            if (!hasValue(a3ExactEvalResolvedValue)) return a3ExactEvalResolvedValue;
+            if (a3ExactEnterSatisfied === null) return `<span style="color:#e2e8f0; font-weight:700;">${escapeHtml(a3ExactEvalResolvedValue)}</span>`;
+            const color = a3ExactEnterSatisfied ? '#86efac' : '#fca5a5';
+            const bg = a3ExactEnterSatisfied ? 'rgba(34,197,94,0.10)' : 'rgba(239,68,68,0.10)';
+            const border = a3ExactEnterSatisfied ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)';
+            return `<span style="display:inline-block; color:${color}; background:${bg}; border:1px solid ${border}; border-radius:8px; padding:2px 6px; font-weight:700;">${escapeHtml(a3ExactEvalResolvedValue)}</span>`;
+        })();
         const findNearestEventGapMs = (startRows, endRows, maxGapMs = 30000) => {
             if (!Array.isArray(startRows) || !Array.isArray(endRows) || !startRows.length || !endRows.length) return null;
             let best = null;
@@ -16799,7 +18520,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (best.score > 0) return [best];
             return [best]; // fallback to nearest decoded row
         })();
-        const recfgThresholdSourceRow = (() => {
+        const recfgThresholdCandidateRows = (() => {
             const withThresholdHint = recfgDecodedRankedRows.filter((row) => {
                 if (!row) return false;
                 const hasText = hasValue(row.recfgA3a5Thresholds);
@@ -16809,10 +18530,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 return hasText || hasNums || hasMeasTime || hasDecodedCfg;
             });
             const base = withThresholdHint.length ? withThresholdHint : recfgDecodedPreferredRows;
-            if (!base.length) return null;
-            const sorted = base.slice().sort(sortRecfgRowsByBestContext);
-            return sorted[0] || null;
+            if (!base.length) return [];
+            return base.slice().sort(sortRecfgRowsByBestContext);
         })();
+        const recfgThresholdSourceRow = recfgThresholdCandidateRows[0] || null;
         const parseJsonSafeLocal = (raw) => {
             if (raw === undefined || raw === null) return null;
             if (typeof raw === 'object') return raw;
@@ -16825,14 +18546,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
         };
         const decodeA3A5FromMeasConfig = (() => {
-            const cfgRows = recfgDecodedPreferredRows.filter((row) => hasValue(row && row.rrcRecfgMeasConfigJson));
+            const cfgRows = recfgThresholdCandidateRows.filter((row) => hasValue(row && row.rrcRecfgMeasConfigJson));
             if (!cfgRows.length) {
                 return {
                     triggers: undefined,
                     thresholds: undefined,
                     a3OffsetDb: null,
                     hysteresisDb: null,
-                    ttt: undefined,
+                    tttMs: null,
                     a5ServingThresholdDbm: null,
                     a5NeighborThresholdDbm: null
                 };
@@ -16854,7 +18575,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             };
             let bestA3OffsetDb = null;
             let bestHysteresisDb = null;
-            let bestTtt = undefined;
+            let bestTttMs = null;
             let bestA5ServingThresholdDbm = null;
             let bestA5NeighborThresholdDbm = null;
             cfgRows.forEach((row) => {
@@ -16870,22 +18591,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 };
                 const a3Offset = findNum(/a3[-_ ]?offset[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
                 const hysteresis = findNum(/hysteresis[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
-                const ttt = (() => {
+                const tttMs = (() => {
                     const m = txt.match(/time[-_ ]?to[-_ ]?trigger[^a-z0-9]{0,8}(ms\d+|\d+)/i);
-                    return m ? String(m[1]) : null;
+                    if (!m) return null;
+                    const raw = String(m[1] || '').trim().toLowerCase();
+                    if (!raw) return null;
+                    if (raw.startsWith('ms')) {
+                        const n = Number(raw.slice(2));
+                        return Number.isFinite(n) ? n : null;
+                    }
+                    const n = Number(raw);
+                    return Number.isFinite(n) ? n : null;
                 })();
                 const a5s = findNum(/(?:a5[-_ ]?threshold1|threshold1|serving[^a-z0-9]{0,10}threshold)[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
                 const a5n = findNum(/(?:a5[-_ ]?threshold2|threshold2|neighbor[^a-z0-9]{0,10}threshold)[^0-9-]{0,16}(-?\d+(?:\.\d+)?)/i);
                 if (Number.isFinite(a3Offset)) pushThreshold(`A3 offset≈${a3Offset.toFixed(1)} dB`);
                 if (Number.isFinite(hysteresis)) pushThreshold(`hysteresis≈${hysteresis.toFixed(1)} dB`);
-                if (ttt) pushThreshold(`TTT=${ttt}`);
+                if (Number.isFinite(tttMs)) pushThreshold(`TTT=${Math.round(tttMs)} ms`);
                 const isValidA5Dbm = (v) => Number.isFinite(v) && v <= -40 && v >= -140;
                 if (isValidA5Dbm(a5s) || isValidA5Dbm(a5n)) {
                     pushThreshold(`A5 S≈${isValidA5Dbm(a5s) ? a5s.toFixed(1) : '?'} dBm, N≈${isValidA5Dbm(a5n) ? a5n.toFixed(1) : '?'} dBm`);
                 }
                 if (bestA3OffsetDb === null && Number.isFinite(a3Offset)) bestA3OffsetDb = a3Offset;
                 if (bestHysteresisDb === null && Number.isFinite(hysteresis)) bestHysteresisDb = hysteresis;
-                if (bestTtt === undefined && ttt) bestTtt = ttt;
+                if (bestTttMs === null && Number.isFinite(tttMs)) bestTttMs = tttMs;
                 if (bestA5ServingThresholdDbm === null && isValidA5Dbm(a5s)) bestA5ServingThresholdDbm = a5s;
                 if (bestA5NeighborThresholdDbm === null && isValidA5Dbm(a5n)) bestA5NeighborThresholdDbm = a5n;
             });
@@ -16903,7 +18632,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 thresholds: thresholdsOut.length ? `${thresholdsOut.join('; ')} (decoded measConfig)` : undefined,
                 a3OffsetDb: bestA3OffsetDb,
                 hysteresisDb: bestHysteresisDb,
-                ttt: bestTtt,
+                tttMs: bestTttMs,
                 a5ServingThresholdDbm: bestA5ServingThresholdDbm,
                 a5NeighborThresholdDbm: bestA5NeighborThresholdDbm
             };
@@ -16917,14 +18646,14 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             return Math.min(...vals);
         })();
         const a3a5Decoded = (() => {
-            const rows = recfgDecodedPreferredRows
+            const rows = recfgThresholdCandidateRows
                 .map((row) => String(row && row.recfgA3a5 || '').trim())
                 .filter(Boolean);
             return rows.length ? rows[0] : undefined;
         })();
         const a3a5DecodedDirect = decodeA3A5FromMeasConfig.triggers;
         const a3a5ThresholdsDecoded = (() => {
-            const rows = recfgDecodedPreferredRows
+            const rows = recfgThresholdCandidateRows
                 .map((row) => String(row && row.recfgA3a5Thresholds || '').trim())
                 .filter(Boolean);
             return rows.length ? rows[0] : undefined;
@@ -17255,20 +18984,37 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const drxValueFinal = drxValue ?? drxDecoded;
         const bearerActiveValue = inferBearerActive(bearerRaw);
         const rrcTransitionFromEvents = pickNearEventSummary(/rrc.*(state|transition|setup|release|reconfig|connection)/i, 2);
-        const a3a5TriggersValue = getAny('A3/A5 triggers', 'A3 Trigger', 'A5 Trigger', 'A3A5 Trigger') ?? a3a5DecodedDirect ?? a3a5Decoded ?? a3a5TriggersInferred;
-        const a3a5ThresholdsValue = getAny('A3/A5 event thresholds', 'A3/A5 thresholds', 'A3 threshold', 'A5 threshold') ?? a3a5ThresholdsDecodedDirect ?? a3a5ThresholdsDecoded;
+        const a3a5TriggersValue = getAny('A3/A5 triggers (Connected-mode HO)', 'A3/A5 triggers', 'A3 Trigger', 'A5 Trigger', 'A3A5 Trigger') ?? a3a5DecodedDirect ?? a3a5Decoded ?? a3a5TriggersInferred;
+        const a3a5ThresholdsValue = getAny('A3/A5 event thresholds (Connected-mode HO)', 'A3/A5 event thresholds', 'A3/A5 thresholds', 'A3 threshold', 'A5 threshold') ?? a3a5ThresholdsDecodedDirect ?? a3a5ThresholdsDecoded;
+        const formatThresholdContextTime = (rawValue, fallbackMs = null) => {
+            const raw = String(rawValue ?? '').trim();
+            if (raw) {
+                const tod = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/);
+                if (tod) {
+                    const hh = tod[1].padStart(2, '0');
+                    const mm = tod[2].padStart(2, '0');
+                    const ss = tod[3].padStart(2, '0');
+                    const frac = String(tod[4] || '').padEnd(3, '0').slice(0, 3);
+                    return `${hh}:${mm}:${ss}.${frac}`;
+                }
+            }
+            const ts = Number.isFinite(pointDetailsTsMs(raw)) ? pointDetailsTsMs(raw) : fallbackMs;
+            if (!Number.isFinite(ts)) return raw || undefined;
+            const msOfDay = ((ts % 86400000) + 86400000) % 86400000;
+            const hh = String(Math.floor(msOfDay / 3600000)).padStart(2, '0');
+            const mm = String(Math.floor((msOfDay % 3600000) / 60000)).padStart(2, '0');
+            const ss = String(Math.floor((msOfDay % 60000) / 1000)).padStart(2, '0');
+            const ms = String(Math.floor(msOfDay % 1000)).padStart(3, '0');
+            return `${hh}:${mm}:${ss}.${ms}`;
+        };
         const a3a5ThresholdSourceTimeValue = (() => {
             const direct = getAny('A3/A5 threshold source time', 'A3/A5 source time');
             if (hasValue(direct)) return direct;
             const row = recfgThresholdSourceRow;
             if (!row) return undefined;
             const measRaw = String(row.recfgMeasReportTime || '').trim();
-            if (measRaw) {
-                const measMs = pointDetailsTsMs(measRaw);
-                if (Number.isFinite(measMs)) return new Date(measMs).toISOString();
-                return measRaw;
-            }
-            return Number.isFinite(Number(row.ms)) ? new Date(Number(row.ms)).toISOString() : undefined;
+            if (measRaw) return formatThresholdContextTime(measRaw, Number.isFinite(Number(row.ms)) ? Number(row.ms) : null);
+            return formatThresholdContextTime('', Number.isFinite(Number(row.ms)) ? Number(row.ms) : null);
         })();
         const a3a5ThresholdSourcePciValue = (() => {
             const direct = getAny('A3/A5 threshold source PCI', 'A3/A5 source PCI');
@@ -17277,7 +19023,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (!row) return undefined;
             const src = Number.isFinite(row.srcPci) ? `${row.srcPci}${Number.isFinite(row.srcEarfcn) ? `/${row.srcEarfcn}` : ''}` : null;
             const tgt = Number.isFinite(row.tgtPci) ? `${row.tgtPci}${Number.isFinite(row.tgtEarfcn) ? `/${row.tgtEarfcn}` : ''}` : null;
-            if (src && tgt) return `serving ${src} -> target ${tgt}`;
+            const trigger = String(row.recfgA3a5 || decodeA3A5FromMeasConfig.triggers || '').trim();
+            if (src && tgt) return `${trigger ? `${trigger} | ` : ''}serving ${src} -> target ${tgt}`;
             if (tgt) return `target ${tgt}`;
             if (src) return `serving ${src}`;
             return undefined;
@@ -17314,15 +19061,23 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             }
             if (diffs.length) return `Context differs: ${diffs.join('; ')}`;
             const notes = [];
+            const relation = [];
+            if (Number.isFinite(row.srcPci) || Number.isFinite(row.srcEarfcn)) {
+                relation.push(`serving ${Number.isFinite(row.srcPci) ? row.srcPci : '?'}${Number.isFinite(row.srcEarfcn) ? `/${row.srcEarfcn}` : ''}`);
+            }
+            if (Number.isFinite(row.tgtPci) || Number.isFinite(row.tgtEarfcn)) {
+                relation.push(`target ${Number.isFinite(row.tgtPci) ? row.tgtPci : '?'}${Number.isFinite(row.tgtEarfcn) ? `/${row.tgtEarfcn}` : ''}`);
+            }
             if (Number.isFinite(servingRsrpNow) && Number.isFinite(thrServ)) {
                 notes.push(`serving ${servingRsrpNow.toFixed(1)} vs A5 S ${thrServ.toFixed(1)} dBm`);
             }
             if (Number.isFinite(n1RsrpNow) && Number.isFinite(thrNeigh)) {
                 notes.push(`N1 ${n1RsrpNow.toFixed(1)} vs A5 N ${thrNeigh.toFixed(1)} dBm`);
             }
-            return notes.length ? `Aligned (${notes.join(', ')})` : undefined;
+            if (notes.length) return `Aligned (${[...relation, ...notes].join(', ')})`;
+            return relation.length ? `Aligned (${relation.join(' -> ')})` : undefined;
         })();
-        const hoContextRow = recfgDecodedPreferredRows[0] || recfgThresholdSourceRow || null;
+        const hoContextRow = recfgThresholdSourceRow || recfgDecodedPreferredRows[0] || null;
         const formatDbMaybe = (v, unit = 'dB') => {
             const n = Number(v);
             if (!Number.isFinite(n)) return undefined;
@@ -17353,7 +19108,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const hoTttValue = (() => {
             const direct = getAny('HO TTT', 'Time-to-Trigger', 'Time To Trigger');
             if (hasValue(direct)) return direct;
-            return hasValue(decodeA3A5FromMeasConfig.ttt) ? String(decodeA3A5FromMeasConfig.ttt) : undefined;
+            return Number.isFinite(decodeA3A5FromMeasConfig.tttMs) ? `${Math.round(decodeA3A5FromMeasConfig.tttMs)} ms` : undefined;
         })();
         const a5ServingThresholdValue = (() => {
             const direct = getAny('A5 serving threshold', 'A5 Threshold1', 'A5 serving threshold (dBm)');
@@ -17879,24 +19634,39 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         pushMetric('HO Start/Complete', hoStartCompleteValue, hoStartCompleteDecodedSource ? { source: 'decoded' } : metricMetaFromResolvedEntry(hoStartCompleteEntry, hasValue(hoStartCompleteValue) ? { source: 'event' } : {}));
         pushMetric('UL sync loss', ulSyncLossValue, metricMetaFromResolvedEntry(ulSyncLossEntry, hasValue(ulSyncLossValue) ? { source: 'event' } : {}));
         pushMetric('DL sync loss', dlSyncLossValue, metricMetaFromResolvedEntry(dlSyncLossEntry, hasValue(dlSyncLossValue) ? { source: 'event' } : {}));
-        pushMetric('SIB3 reselection thresholds', sib3ThresholdsValue, hasValue(sib3ThresholdsValue) ? { source: 'decoded' } : {});
-        pushMetric('SIB5 reselection thresholds', sib5ThresholdsValue, hasValue(sib5ThresholdsValue) ? { source: 'decoded' } : {});
+        pushMetric('SIB3 reselection thresholds (Idle-mode reselection)', sib3ThresholdsValue, hasValue(sib3ThresholdsValue) ? { source: 'decoded' } : {});
+        pushMetric('SIB5 reselection thresholds (Idle-mode reselection)', sib5ThresholdsValue, hasValue(sib5ThresholdsValue) ? { source: 'decoded' } : {});
         pushMetric('HO source PCI', hoSourcePciValue, hasValue(hoSourcePciValue) ? { source: 'decoded' } : {});
         pushMetric('HO source EARFCN', hoSourceEarfcnValue, hasValue(hoSourceEarfcnValue) ? { source: 'decoded' } : {});
         pushMetric('HO target PCI', hoTargetPciValue, hasValue(hoTargetPciValue) ? { source: 'decoded' } : {});
         pushMetric('HO target EARFCN', hoTargetEarfcnValue, hasValue(hoTargetEarfcnValue) ? { source: 'decoded' } : {});
         pushMetric('HO type', hoTypeValue, hasValue(hoTypeValue) ? { source: 'decoded' } : {});
-        pushMetric('A3/A5 triggers', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : (hasValue(a3a5TriggersValue) ? { source: 'event' } : {}));
+        pushMetric('A3/A5 triggers (Connected-mode HO)', a3a5TriggersValue, a3a5TriggersDecodedSource ? { source: 'decoded' } : (hasValue(a3a5TriggersValue) ? { source: 'event' } : {}));
         pushMetric('A5 event', a5EventValue, metricMetaFromResolvedEntry(a5EventEntry, hasValue(a5EventValue) ? { source: 'event' } : {}));
         pushMetric('A3 offset', a3OffsetValue, hasValue(a3OffsetValue) ? { source: 'decoded' } : {});
         pushMetric('HO hysteresis', hoHysteresisValue, hasValue(hoHysteresisValue) ? { source: 'decoded' } : {});
         pushMetric('HO TTT', hoTttValue, hasValue(hoTttValue) ? { source: 'decoded' } : {});
         pushMetric('A5 serving threshold', a5ServingThresholdValue, hasValue(a5ServingThresholdValue) ? { source: 'decoded' } : {});
         pushMetric('A5 neighbor threshold', a5NeighborThresholdValue, hasValue(a5NeighborThresholdValue) ? { source: 'decoded' } : {});
-        pushMetric('A3/A5 event thresholds', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : (hasValue(a3a5ThresholdsValue) ? { source: 'inferred' } : {}));
+        pushMetric('A3/A5 event thresholds (Connected-mode HO)', a3a5ThresholdsValue, a3a5ThresholdsDecodedSource ? { source: 'decoded' } : (hasValue(a3a5ThresholdsValue) ? { source: 'inferred' } : {}));
         pushMetric('A3/A5 threshold source time', a3a5ThresholdSourceTimeValue);
         pushMetric('A3/A5 threshold source PCI', a3a5ThresholdSourcePciValue);
         pushMetric('A3/A5 threshold context check', a3a5ThresholdContextCheckValue);
+        pushMetric('A3 exact mapping', a3ExactMappingResolvedValue, hasValue(a3ExactMappingResolvedValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact source time', a3ExactSourceTimeResolvedValue, hasValue(a3ExactSourceTimeResolvedValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact evaluation', a3ExactEvaluationStyledValue, hasValue(a3ExactEvalValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact best neighbor PCI', a3ExactBestPciValue, hasValue(a3ExactBestPciValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Mn', a3ExactMnValue, hasValue(a3ExactMnValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Ms', a3ExactMsValue, hasValue(a3ExactMsValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Ofn', a3ExactOfnValue, hasValue(a3ExactOfnValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Ofs', a3ExactOfsValue, hasValue(a3ExactOfsValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Ocn', a3ExactOcnValue, hasValue(a3ExactOcnValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Ocs', a3ExactOcsValue, hasValue(a3ExactOcsValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Hys', a3ExactHysValue, hasValue(a3ExactHysValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact Off', a3ExactOffValue, hasValue(a3ExactOffValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact LHSenter', a3ExactLhsEnterValue, hasValue(a3ExactLhsEnterValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact RHS', a3ExactRhsValue, hasValue(a3ExactRhsValue) ? { source: 'decoded' } : {});
+        pushMetric('A3 exact margin', a3ExactMarginValue, hasValue(a3ExactMarginValue) ? { source: 'decoded' } : {});
         pushMetric('RRC_REL_CAUSE', rrcRelCauseValue, metricMetaFromResolvedEntry(rrcRelCauseEntry));
         pushMetric('CS_REL_CAUSE', csRelCauseValue, metricMetaFromResolvedEntry(csRelCauseEntry));
         pushMetric('IUCS_STATUS', iucsStatusValue, metricMetaFromResolvedEntry(iucsStatusEntry));
@@ -17987,24 +19757,40 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             'HO Start/Complete': hoStartCompleteValue,
             'UL sync loss': ulSyncLossValue,
             'DL sync loss': dlSyncLossValue,
-            'SIB3 reselection thresholds': sib3ThresholdsValue,
-            'SIB5 reselection thresholds': sib5ThresholdsValue,
+            'SIB3 reselection thresholds (Idle-mode reselection)': sib3ThresholdsValue,
+            'SIB5 reselection thresholds (Idle-mode reselection)': sib5ThresholdsValue,
             'HO source PCI': hoSourcePciValue,
             'HO source EARFCN': hoSourceEarfcnValue,
             'HO target PCI': hoTargetPciValue,
             'HO target EARFCN': hoTargetEarfcnValue,
             'HO type': hoTypeValue,
-            'A3/A5 triggers': a3a5TriggersValue,
+            'A3/A5 triggers (Connected-mode HO)': a3a5TriggersValue,
             'A5 event': a5EventValue,
             'A3 offset': a3OffsetValue,
             'HO hysteresis': hoHysteresisValue,
             'HO TTT': hoTttValue,
             'A5 serving threshold': a5ServingThresholdValue,
             'A5 neighbor threshold': a5NeighborThresholdValue,
-            'A3/A5 event thresholds': a3a5ThresholdsValue,
+            'A3/A5 event thresholds (Connected-mode HO)': a3a5ThresholdsValue,
             'A3/A5 threshold source time': a3a5ThresholdSourceTimeValue,
             'A3/A5 threshold source PCI': a3a5ThresholdSourcePciValue,
             'A3/A5 threshold context check': a3a5ThresholdContextCheckValue,
+            'A3 exact mapping': a3ExactMappingResolvedValue,
+            'A3 exact source time': a3ExactSourceTimeResolvedValue,
+            'A3 exact evaluation': a3ExactEvalResolvedValue,
+            'A3 exact evaluation JSON': a3ExactEvalJsonValue,
+            'A3 exact best neighbor PCI': a3ExactBestPciValue,
+            'A3 exact Mn': a3ExactMnValue,
+            'A3 exact Ms': a3ExactMsValue,
+            'A3 exact Ofn': a3ExactOfnValue,
+            'A3 exact Ofs': a3ExactOfsValue,
+            'A3 exact Ocn': a3ExactOcnValue,
+            'A3 exact Ocs': a3ExactOcsValue,
+            'A3 exact Hys': a3ExactHysValue,
+            'A3 exact Off': a3ExactOffValue,
+            'A3 exact LHSenter': a3ExactLhsEnterValue,
+            'A3 exact RHS': a3ExactRhsValue,
+            'A3 exact margin': a3ExactMarginValue,
             'RRC_REL_CAUSE': rrcRelCauseValue,
             'CS_REL_CAUSE': csRelCauseValue,
             'IUCS_STATUS': iucsStatusValue,
@@ -18249,8 +20035,30 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             const color = isIdle ? '#fca5a5' : '#86efac';
             const border = isIdle ? 'rgba(239,68,68,0.55)' : 'rgba(34,197,94,0.55)';
             return '<div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px; color:#cbd5e1;">' +
-                '<span>Mobile state:</span>' +
+                '<span>Mobile status:</span>' +
                 '<span style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; font-weight:700; letter-spacing:0.02em;">' + escapeHtml(label) + '</span>' +
+                '</div>';
+        })();
+        const a3EnteringBadgeHtml = (() => {
+            if (a3ExactEnterSatisfied === null || !a3ExactEvalObj || !a3ExactBest) {
+                window.__pointDetailsA3Explanation = null;
+                return '';
+            }
+            const unit = String(a3ExactEvalObj && a3ExactEvalObj.triggerQuantity || 'RSRP').toUpperCase() === 'RSRQ' ? 'dB' : 'dBm';
+            window.__pointDetailsA3Explanation = {
+                evalObj: a3ExactEvalObj,
+                best: a3ExactBest,
+                enterSatisfied: a3ExactEnterSatisfied,
+                statusLabel: a3ExactEnterSatisfied ? 'Meet criteria' : "Doesn't meet criteria",
+                sourceTime: a3ExactSourceTimeResolvedValue || a3ExactEvalObj.sourceTimeLabel || p.time || '',
+                unit
+            };
+            const bg = a3ExactEnterSatisfied ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)';
+            const color = a3ExactEnterSatisfied ? '#86efac' : '#fca5a5';
+            const border = a3ExactEnterSatisfied ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)';
+            return '<div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px; color:#cbd5e1;">' +
+                '<span>A3 entering:</span>' +
+                '<button onclick="window.showA3EnteringExplanation()" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; font-weight:700; letter-spacing:0.02em; font-size:11px; line-height:1; cursor:pointer;">' + escapeHtml(a3ExactEnterSatisfied ? 'Meet criteria' : "Doesn't meet criteria") + '</button>' +
                 '</div>';
         })();
         const html = '<div class="log-view-container">' +
@@ -18261,6 +20069,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             enbIdDisplay +
             '<div style="color:#aaa; font-size:11px; margin-top:2px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
             mobileStateBadgeHtml +
+            a3EnteringBadgeHtml +
             '</div>' +
             '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">' +
             '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
@@ -18444,6 +20253,9 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     window.globalSync = (logId, index, source, skipPanel = false) => {
         const log = loadedLogs.find(l => String(l.id) === String(logId));
         if (!log || !log.points[index]) return;
+        if (source !== 'lte-ho') {
+            window.__pointDetailsA3Override = null;
+        }
 
         const point = log.points[index];
 
@@ -19166,8 +20978,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     configHistory: configHistory
                 };
                 loadedLogs.push(newLog);
-                if (/4g|lte/i.test(String(technology || '')) && typeof window.enrichLteSibEvents === 'function') {
-                    window.enrichLteSibEvents(newLog).catch((err) => console.warn('SIB decode enrichment failed:', err));
+                if (/4g|lte/i.test(String(technology || ''))) {
+                    if (typeof window.enrichLteSibEvents === 'function') {
+                        window.enrichLteSibEvents(newLog).catch((err) => console.warn('SIB decode enrichment failed:', err));
+                    }
+                    if (typeof window.enrichLteRrcMobilityEvents === 'function') {
+                        window.enrichLteRrcMobilityEvents(newLog).catch((err) => console.warn('LTE RRC mobility enrichment failed:', err));
+                    }
                 }
 
                 if (umtsCallAnalysis && umtsCallAnalysis.summary) {
@@ -25053,6 +26870,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
     window.loadedLogs = loadedLogs;
     window.updateLogsList = updateLogsList;
     window.openChartModal = openChartModal;
+    window.refreshChartModalTitle = refreshChartModalTitle;
     window.showSignalingModal = showSignalingModal;
     window.showCallSessionsModal = showCallSessionsModal;
     window.dockChart = dockChart;

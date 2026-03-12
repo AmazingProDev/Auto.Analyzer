@@ -99,3 +99,121 @@ You can configure/test converter from the app header:
   - `GET /api/nmfs/config`
   - `POST /api/nmfs/config`
   - `POST /api/nmfs/config/test`
+
+## LTE IntraFreq HO analysis
+
+The app now includes a dedicated **LTE IntraFreq HO Analysis** workflow.
+
+### Entry points
+
+- Header button: `🔁 LTE HO`
+- Backend run endpoint: `POST /api/ho-analysis/run`
+- Result endpoints:
+  - `GET /api/ho-analysis/{id}`
+  - `GET /api/ho-analysis/{id}/events?page=1&pageSize=100`
+  - `GET /api/ho-analysis/{id}/events/{eventId}`
+  - `GET /api/ho-analysis/{id}/kpis`
+  - `GET /api/ho-analysis/{id}/export`
+
+### Implementation structure
+
+- Shared telecom logic: [lte_ho_analysis.js](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/lte_ho_analysis.js)
+- Backend CLI bridge: [ho_analysis_cli.js](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/ho_analysis_cli.js)
+- Backend HTTP integration: [server.py](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/server.py)
+- Frontend modal/page logic: [app.js](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/app.js)
+
+### Detection logic
+
+The analyzer uses two layers:
+
+1. Signaling-driven correlation
+- measurement report
+- HO command / HOA / RRC reconfiguration
+- HO complete
+- fail / RLF / re-establishment / drop
+
+2. State-driven fallback
+- serving PCI / EARFCN transition when signaling is incomplete
+
+A handover is marked **intra-frequency** only when:
+
+```text
+source EARFCN == target EARFCN
+```
+
+If EARFCN cannot be reconstructed, the event is kept for debug but excluded from strict intrafreq confidence.
+
+### Radio reconstruction
+
+For each HO, the module reconstructs a configurable window around the event and derives:
+
+- serving RSRP / RSRQ trend
+- chosen target trend
+- best same-frequency neighbor trend
+- effective delta trend
+- `T_better`
+- `T_a3_like`
+- `T_report`
+- `T_command`
+- `T_access`
+- `T_complete`
+- `T_fail`
+
+### Effective delta
+
+Primary dominance metric:
+
+```text
+effective_delta =
+  (target_rsrp + target_cio_or_0)
+  - (serving_rsrp + serving_cio_or_0)
+```
+
+If CIO is missing, the analyzer uses `0` and records the assumption.
+
+### Classification rules
+
+Current rule engine returns one of:
+
+- `successful`
+- `too-late`
+- `too-early`
+- `ping-pong`
+- `wrong-target`
+- `execution-failure`
+- `missing-report/config-issue`
+
+Every event also carries:
+
+- `reasons[]`
+- `recommendedActions[]`
+- `assumptions[]`
+- `thresholdsUsed`
+- `confidence`
+- `debug`
+
+### Threshold tuning
+
+Defaults are centralized in `DEFAULT_CONFIG` inside [lte_ho_analysis.js](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/lte_ho_analysis.js).
+
+Current defaults:
+
+- `SIGNIFICANT_DELTA_DB = 4`
+- `MARGINAL_DELTA_DB = 1.5`
+- `SERVING_WEAK_RSRP_DBM = -102`
+- `SERVING_VERY_WEAK_RSRP_DBM = -108`
+- `POOR_RSRQ_DB = -12`
+- `CRITICAL_RSRQ_DB = -15`
+- `PING_PONG_TIME_MS = 30000`
+- `PING_PONG_DISTANCE_M = 500`
+- `REPORT_TO_COMMAND_WARN_MS = 1000`
+- `COMMAND_TO_COMPLETE_WARN_MS = 1500`
+- `SUSTAINED_STRONGER_MS = 1000`
+
+Tune these before changing classifier code.
+
+### Notes
+
+- The current implementation is production-oriented but still heuristic when logs lack explicit LTE signaling.
+- `A3/A5` decoding, CIO, and target selection quality improve when the raw log exposes those fields explicitly.
+- The current UI is a dedicated modal rather than a separate route; it is still backed by a standalone analysis module and API surface.

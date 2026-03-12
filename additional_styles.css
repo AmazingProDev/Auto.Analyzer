@@ -14,6 +14,52 @@
     backdrop-filter: blur(2px);
 }
 
+.lte-ho-analysis-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10005;
+    pointer-events: none;
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    display: block !important;
+}
+
+.lte-ho-analysis-overlay .analysis-modal {
+    pointer-events: auto;
+}
+
+.lte-ho-analysis-main-grid {
+    display: grid;
+    grid-template-columns: minmax(620px, 1.2fr) minmax(420px, 1fr);
+    gap: 14px;
+    align-items: start;
+    min-height: 0;
+}
+
+.lte-ho-analysis-table-pane,
+.lte-ho-analysis-detail-pane {
+    min-width: 0;
+}
+
+.lte-ho-analysis-table-pane {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.lte-ho-analysis-table-scroll {
+    max-height: 62vh;
+    overflow: auto;
+    min-width: 0;
+}
+
+@media (max-width: 1300px) {
+    .lte-ho-analysis-main-grid {
+        grid-template-columns: minmax(520px, 1.15fr) minmax(360px, 1fr);
+    }
+}
+
 .analysis-modal {
     background: #1a1a1a;
     width: 600px;

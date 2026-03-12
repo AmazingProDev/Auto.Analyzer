@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import io
 import contextlib
+import re
 from typing import Any, Dict, List, Optional
 
 try:
@@ -132,6 +133,239 @@ def _extract_utra_psc(value: Any) -> Optional[int]:
             if v is not None:
                 return v
     return None
+
+
+def _safe_float(v: Any) -> Optional[float]:
+    try:
+        if v is None or v == "":
+            return None
+        if isinstance(v, bool):
+            return float(int(v))
+        return float(v)
+    except Exception:
+        return None
+
+
+def _enum_db_to_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    txt = str(value).strip()
+    if not txt:
+        return None
+    m = re.match(r"^dB\s*([+-]?\d+(?:\.\d+)?)$", txt, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    m = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*dB$", txt, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return _safe_float(txt)
+
+
+def _enum_time_ms(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    txt = str(value).strip()
+    if not txt:
+        return None
+    m = re.match(r"^ms\s*(\d+)$", txt, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return _safe_int(txt)
+
+
+def _normalize_trigger_quantity(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    txt = str(value).strip().upper()
+    return txt or None
+
+
+def _parse_meas_object_row(row: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    meas_object_id = _safe_int(row.get("measObjectId"))
+    meas_object = row.get("measObject") if isinstance(row.get("measObject"), dict) else {}
+    if not isinstance(meas_object, dict) or meas_object_id is None:
+        return None
+
+    eutra = meas_object.get("measObjectEUTRA") if isinstance(meas_object.get("measObjectEUTRA"), dict) else None
+    utra = meas_object.get("measObjectUTRA") if isinstance(meas_object.get("measObjectUTRA"), dict) else None
+    geran = meas_object.get("measObjectGERAN") if isinstance(meas_object.get("measObjectGERAN"), dict) else None
+
+    if eutra is not None:
+        cells: List[Dict[str, Any]] = []
+        for cell in eutra.get("cellsToAddModList") or []:
+            if not isinstance(cell, dict):
+                continue
+            cells.append({
+                "cellIndex": _safe_int(cell.get("cellIndex")),
+                "physCellId": _safe_int(cell.get("physCellId")),
+                "cellIndividualOffsetDb": _enum_db_to_float(cell.get("cellIndividualOffset")),
+            })
+        return {
+            "measObjectId": meas_object_id,
+            "rat": "LTE",
+            "carrierFreq": _safe_int(eutra.get("carrierFreq")),
+            "offsetFreqDb": _enum_db_to_float(eutra.get("offsetFreq")),
+            "allowedMeasBandwidth": eutra.get("allowedMeasBandwidth"),
+            "presenceAntennaPort1": eutra.get("presenceAntennaPort1"),
+            "neighCellConfig": eutra.get("neighCellConfig"),
+            "cells": cells,
+        }
+    if utra is not None:
+        return {
+            "measObjectId": meas_object_id,
+            "rat": "UTRA",
+            "carrierFreq": _safe_int(utra.get("carrierFreq")),
+        }
+    if geran is not None:
+        return {
+            "measObjectId": meas_object_id,
+            "rat": "GERAN",
+            "carrierFreqs": geran.get("carrierFreqs"),
+        }
+    return {
+        "measObjectId": meas_object_id,
+        "rat": "UNKNOWN",
+    }
+
+
+def _parse_report_config_row(row: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(row, dict):
+        return None
+    report_config_id = _safe_int(row.get("reportConfigId"))
+    report_config = row.get("reportConfig") if isinstance(row.get("reportConfig"), dict) else {}
+    eutra = report_config.get("reportConfigEUTRA") if isinstance(report_config.get("reportConfigEUTRA"), dict) else None
+    if report_config_id is None or eutra is None:
+        return None
+
+    out: Dict[str, Any] = {
+        "reportConfigId": report_config_id,
+        "maxReportCells": _safe_int(eutra.get("maxReportCells")),
+        "reportAmount": eutra.get("reportAmount"),
+        "reportInterval": eutra.get("reportInterval"),
+        "reportQuantity": eutra.get("reportQuantity"),
+        "triggerQuantity": _normalize_trigger_quantity(eutra.get("triggerQuantity")),
+        "purpose": None,
+        "eventType": None,
+        "hysteresisDb": None,
+        "timeToTriggerMs": None,
+        "a3OffsetDb": None,
+        "a5Threshold1": None,
+        "a5Threshold2": None,
+        "reportOnLeave": None,
+    }
+    trigger_type = eutra.get("triggerType") if isinstance(eutra.get("triggerType"), dict) else {}
+    if isinstance(trigger_type.get("periodical"), dict):
+        out["purpose"] = "periodical"
+        out["periodicalPurpose"] = trigger_type["periodical"].get("purpose")
+        return out
+
+    event = trigger_type.get("event") if isinstance(trigger_type.get("event"), dict) else None
+    if not event:
+        return out
+
+    out["purpose"] = "event"
+    out["hysteresisDb"] = _safe_float(event.get("hysteresis"))
+    out["timeToTriggerMs"] = _enum_time_ms(event.get("timeToTrigger"))
+    event_id = event.get("eventId") if isinstance(event.get("eventId"), dict) else {}
+
+    if isinstance(event_id.get("eventA3"), dict):
+        cfg = event_id["eventA3"]
+        out["eventType"] = "EVENTA3"
+        out["a3OffsetDb"] = _safe_float(cfg.get("a3-Offset"))
+        out["reportOnLeave"] = cfg.get("reportOnLeave")
+    elif isinstance(event_id.get("eventA5"), dict):
+        cfg = event_id["eventA5"]
+        out["eventType"] = "EVENTA5"
+        out["a5Threshold1"] = cfg.get("a5-Threshold1")
+        out["a5Threshold2"] = cfg.get("a5-Threshold2")
+        out["reportOnLeave"] = cfg.get("reportOnLeave")
+    elif isinstance(event_id.get("eventA2"), dict):
+        out["eventType"] = "EVENTA2"
+    elif isinstance(event_id.get("eventA1"), dict):
+        out["eventType"] = "EVENTA1"
+    elif isinstance(event_id.get("eventA4"), dict):
+        out["eventType"] = "EVENTA4"
+    elif isinstance(event_id.get("eventA6"), dict):
+        out["eventType"] = "EVENTA6"
+    return out
+
+
+def _build_meas_config_resolver(meas_cfg: Any) -> Dict[str, Any]:
+    if not isinstance(meas_cfg, dict):
+        return {
+            "measObjects": [],
+            "reportConfigs": [],
+            "measIdLinks": [],
+            "a3Resolvers": [],
+            "a5Resolvers": [],
+        }
+
+    meas_objects: List[Dict[str, Any]] = []
+    meas_objects_by_id: Dict[int, Dict[str, Any]] = {}
+    for row in meas_cfg.get("measObjectToAddModList") or []:
+        parsed = _parse_meas_object_row(row)
+        if not parsed:
+            continue
+        meas_objects.append(parsed)
+        meas_objects_by_id[int(parsed["measObjectId"])] = parsed
+
+    report_configs: List[Dict[str, Any]] = []
+    report_configs_by_id: Dict[int, Dict[str, Any]] = {}
+    for row in meas_cfg.get("reportConfigToAddModList") or []:
+        parsed = _parse_report_config_row(row)
+        if not parsed:
+            continue
+        report_configs.append(parsed)
+        report_configs_by_id[int(parsed["reportConfigId"])] = parsed
+
+    meas_links: List[Dict[str, Any]] = []
+    a3_resolvers: List[Dict[str, Any]] = []
+    a5_resolvers: List[Dict[str, Any]] = []
+    for row in meas_cfg.get("measIdToAddModList") or []:
+        if not isinstance(row, dict):
+            continue
+        meas_id = _safe_int(row.get("measId"))
+        meas_object_id = _safe_int(row.get("measObjectId"))
+        report_config_id = _safe_int(row.get("reportConfigId"))
+        if meas_id is None or meas_object_id is None or report_config_id is None:
+            continue
+        link = {
+            "measId": meas_id,
+            "measObjectId": meas_object_id,
+            "reportConfigId": report_config_id,
+        }
+        meas_links.append(link)
+        meas_object = meas_objects_by_id.get(meas_object_id)
+        report_config = report_configs_by_id.get(report_config_id)
+        if not meas_object or not report_config:
+            continue
+        joined = {
+            "measId": meas_id,
+            "measObjectId": meas_object_id,
+            "reportConfigId": report_config_id,
+            "measObject": meas_object,
+            "reportConfig": report_config,
+        }
+        if report_config.get("eventType") == "EVENTA3":
+            a3_resolvers.append(joined)
+        elif report_config.get("eventType") == "EVENTA5":
+            a5_resolvers.append(joined)
+
+    return {
+        "measObjects": meas_objects,
+        "reportConfigs": report_configs,
+        "measIdLinks": meas_links,
+        "a3Resolvers": a3_resolvers,
+        "a5Resolvers": a5_resolvers,
+    }
 
 
 def _decode_with_candidates(
@@ -383,6 +617,8 @@ def decode_measurement_report_payload(payload: bytes) -> Dict[str, Any]:
     return {
         "ok": True,
         "decoder": "pycrate_rrclte",
+        "message_id": "measurement_report",
+        "param_prefix": "measurement_report",
         "decoder_type": result.get("decoder_type"),
         "decode_offset": result.get("decode_offset"),
         "decoded_json": decoded_json,
@@ -451,6 +687,7 @@ def decode_rrc_reconfiguration_payload(payload: bytes) -> Dict[str, Any]:
     meas_cfg = _find_first_key(decoded_json, "measConfig")
     if not isinstance(meas_cfg, dict):
         meas_cfg = {}
+    meas_resolver = _build_meas_config_resolver(meas_cfg)
     summary = {
         "has_measConfig": bool(meas_cfg),
         "has_mobilityControlInfo": bool(_find_first_key(decoded_json, "mobilityControlInfo")),
@@ -458,15 +695,20 @@ def decode_rrc_reconfiguration_payload(payload: bytes) -> Dict[str, Any]:
         "measIdToAddModCount": len(meas_cfg.get("measIdToAddModList") or []) if isinstance(meas_cfg, dict) else 0,
         "measObjectToAddModCount": len(meas_cfg.get("measObjectToAddModList") or []) if isinstance(meas_cfg, dict) else 0,
         "reportConfigToAddModCount": len(meas_cfg.get("reportConfigToAddModList") or []) if isinstance(meas_cfg, dict) else 0,
+        "a3ResolverCount": len(meas_resolver.get("a3Resolvers") or []),
+        "a5ResolverCount": len(meas_resolver.get("a5Resolvers") or []),
     }
 
     return {
         "ok": True,
         "decoder": "pycrate_rrclte",
+        "message_id": "rrc_reconfiguration",
+        "param_prefix": "rrc_recfg",
         "decoder_type": result.get("decoder_type"),
         "decode_offset": result.get("decode_offset"),
         "decoded_json": decoded_json,
         "meas_config": meas_cfg,
+        "meas_resolver": meas_resolver,
         "summary": summary,
     }
 
