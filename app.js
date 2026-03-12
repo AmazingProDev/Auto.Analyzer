@@ -2534,6 +2534,52 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const requestLteRrcPrecompute = async (log, candidateEvents, getPropCI) => {
+        const rows = (Array.isArray(candidateEvents) ? candidateEvents : []).map((ev, idx) => {
+            const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
+            const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
+            const payloadHex = String(getPropCI(props, 'RRC raw payload hex') || '').trim();
+            if (!eventName || !payloadHex) return null;
+            return {
+                rowId: idx,
+                eventName,
+                payloadHex,
+                time: ev && (ev.time ?? ev.timestamp ?? ev.ts ?? props.Time),
+                servingPci: getPropCI(props, 'Serving PCI'),
+                servingEarfcn: getPropCI(props, 'Serving EARFCN')
+            };
+        }).filter(Boolean);
+        if (!rows.length) return null;
+        const res = await fetch('/api/lte_rrc/precompute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                cacheKey: log && log.__lteRrcPrecomputeCacheKey ? log.__lteRrcPrecomputeCacheKey : undefined,
+                items: rows
+            })
+        });
+        const data = await res.json();
+        if (!res.ok || !data || data.status !== 'success') return null;
+        return data;
+    };
+
+    const applyLteRrcPrecomputePayload = (candidateEvents, payload) => {
+        const rows = Array.isArray(payload && payload.items) ? payload.items : [];
+        let applied = 0;
+        rows.forEach((row) => {
+            const idx = Number(row && row.rowId);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= candidateEvents.length) return;
+            const ev = candidateEvents[idx];
+            if (!ev || typeof ev !== 'object') return;
+            const props = (ev.properties && typeof ev.properties === 'object') ? ev.properties : (ev.properties = {});
+            const incoming = row && row.properties && typeof row.properties === 'object' ? row.properties : null;
+            if (!incoming) return;
+            Object.assign(props, incoming);
+            applied += 1;
+        });
+        return applied;
+    };
+
     window.enrichLteSibEvents = async (log) => {
         const allEvents = getUnifiedLogEvents(log, { includePointEventsFallback: false });
         if (!log || !allEvents.length || typeof fetch !== 'function') return;
@@ -2825,6 +2871,27 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             let successCount = 0;
             try {
+                let precomputed = null;
+                try {
+                    precomputed = await requestLteRrcPrecompute(log, candidateEvents, getPropCI);
+                } catch (err) {
+                    diagnostics.errors.push(`backend precompute: ${String(err && err.message || err || 'unknown error')}`);
+                }
+                if (precomputed && Array.isArray(precomputed.items)) {
+                    successCount = applyLteRrcPrecomputePayload(candidateEvents, precomputed);
+                    if (precomputed.cacheKey) log.__lteRrcPrecomputeCacheKey = precomputed.cacheKey;
+                    const serverDiag = precomputed.diagnostics && typeof precomputed.diagnostics === 'object' ? precomputed.diagnostics : null;
+                    const mergedDiag = serverDiag ? { ...serverDiag } : diagnostics;
+                    if (Array.isArray(serverDiag && serverDiag.errors) && diagnostics.errors.length) {
+                        mergedDiag.errors = [...serverDiag.errors, ...diagnostics.errors];
+                    } else if (diagnostics.errors.length) {
+                        mergedDiag.errors = diagnostics.errors.slice();
+                    }
+                    if (precomputed.cached) mergedDiag.cached = true;
+                    log.__lteRrcMobilityDiag = mergedDiag;
+                    log.__lteRrcMobilityEnrichmentDone = successCount > 0 || Number(mergedDiag.exactA3Reports || 0) > 0;
+                    return successCount;
+                }
                 await populateLteRrcDecodeCacheBatch(cache, pending, candidateEvents.map((ev) => {
                     const props = (ev && ev.properties && typeof ev.properties === 'object') ? ev.properties : {};
                     const eventName = String(ev && (ev.event_name || ev.event || ev.message || props.Event) || '').trim();
