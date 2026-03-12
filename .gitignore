@@ -17,3 +17,11 @@ __pycache__/
 # Runtime artifacts
 data/
 runs/
+uploads/
+node_modules/
+
+# Local environment
+.env
+
+# Local exports
+logs/Export Nemo/
