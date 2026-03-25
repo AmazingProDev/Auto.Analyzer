@@ -697,7 +697,7 @@ class Handler(SimpleHTTPRequestHandler):
                 _json(self, {"status": "success", "config": cfg, "configPath": NMFS_CONFIG_PATH})
                 return
 
-            if path.startswith("/api/ho-analysis/"):
+            if path.startswith("/api/ho-analysis/") or path.startswith("/api/interfreq-ho-analysis/"):
                 parts = path.strip("/").split("/")
                 if len(parts) < 3:
                     _json(self, {"status": "error", "message": "Bad request"}, 400)
@@ -1154,19 +1154,22 @@ class Handler(SimpleHTTPRequestHandler):
                 _json(self, {"status": "success", "cacheKey": provided_cache_key, "cached": False, **result_payload})
                 return
 
-            if path == "/api/ho-analysis/run":
+            if path == "/api/ho-analysis/run" or path == "/api/interfreq-ho-analysis/run":
                 payload = _parse_json_body(self)
                 dataset = payload.get("dataset")
                 if dataset is None:
                     _json(self, {"status": "error", "message": "dataset is required"}, 400)
                     return
+                mode = "interfreq" if path == "/api/interfreq-ho-analysis/run" else (payload.get("mode") or "intrafreq")
                 result = _run_ho_analysis({
                     "dataset": dataset,
                     "options": payload.get("options") or {},
+                    "mode": mode,
                 })
                 analysis_id = _store_ho_analysis(result, {
                     "label": payload.get("label"),
                     "source": payload.get("source"),
+                    "mode": mode,
                 })
                 _json(self, {
                     "status": "success",

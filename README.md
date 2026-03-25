@@ -218,6 +218,85 @@ Tune these before changing classifier code.
 - `A3/A5` decoding, CIO, and target selection quality improve when the raw log exposes those fields explicitly.
 - The current UI is a dedicated modal rather than a separate route; it is still backed by a standalone analysis module and API surface.
 
+## LTE InterFreq HO analysis
+
+The app now includes a dedicated **LTE InterFreq HO Analysis** workflow built on the same shared LTE mobility engine.
+
+### Entry points
+
+- Header button: `📶 LTE IFHO`
+- Backend run endpoint: `POST /api/interfreq-ho-analysis/run`
+- Result endpoints:
+  - `GET /api/interfreq-ho-analysis/{id}`
+  - `GET /api/interfreq-ho-analysis/{id}/events?page=1&pageSize=100`
+  - `GET /api/interfreq-ho-analysis/{id}/events/{eventId}`
+  - `GET /api/interfreq-ho-analysis/{id}/kpis`
+  - `GET /api/interfreq-ho-analysis/{id}/export`
+
+### Detection logic
+
+The analyzer reuses the LTE HO correlation stack and marks a handover as **inter-frequency** only when:
+
+```text
+source EARFCN != target EARFCN
+```
+
+It reconstructs both:
+
+- the serving-frequency degradation timeline
+- the target-frequency visibility timeline
+
+This is the key distinction versus intrafrequency analysis: the module explicitly checks whether the UE had enough opportunity to see and measure the target EARFCN before the HO decision.
+
+### Reconstructed metrics
+
+For each inter-frequency HO, the module computes:
+
+- `targetVisibleTs`
+- `targetChosenVisibleTs`
+- `targetBetterTs`
+- `triggerLikeTs`
+- `targetVisibilityLeadMs`
+- `targetVisibleToReportMs`
+- `targetVisibleToCommandMs`
+- `targetSamplingRatio`
+- `targetLongestGapMs`
+- `bestTargetFreqNeighborAtCommand`
+- `alternativeTargetCandidateAtCommand`
+
+### Classifications
+
+The inter-frequency rule engine currently returns one of:
+
+- `successful`
+- `too_late`
+- `too_early`
+- `ping_pong`
+- `wrong_target`
+- `execution_failure`
+- `measurement_limited`
+- `missing_report_or_config_issue`
+- `unknown`
+
+### Tuning guidance
+
+Inter-frequency analysis uses additional thresholds from `DEFAULT_CONFIG` in [lte_ho_analysis.js](/Users/abdelilah/Documents/Codex%20project/Optim_Analyzer/lte_ho_analysis.js):
+
+- `TARGET_VISIBLE_LATE_MS`
+- `TARGET_SAMPLING_RATIO_SPARSE`
+- `TARGET_LONGEST_GAP_MS_WARN`
+
+Tune these before changing classifier logic. In practice:
+
+- increase `TARGET_VISIBLE_LATE_MS` if target-layer measurements are known to arrive late in the log format
+- lower `TARGET_SAMPLING_RATIO_SPARSE` if the scanner/meas cadence is naturally sparse
+- increase `TARGET_LONGEST_GAP_MS_WARN` if neighbor sweeps are slow but expected
+
+### Notes
+
+- When A5/A2/A4 thresholds are absent, the analyzer falls back to trigger-like heuristics and records that assumption explicitly.
+- The inter-frequency UI intentionally reuses the LTE HO modal so chart/map/detail behavior stays aligned with the intra-frequency workflow.
+
 ## Self-hosted backend for Vercel
 
 If you want to keep LTE IntraFreq HO and exact A3 analysis inside this codebase without Railway, the practical setup is:

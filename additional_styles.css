@@ -31,7 +31,7 @@
 
 .lte-ho-analysis-main-grid {
     display: grid;
-    grid-template-columns: minmax(620px, 1.2fr) minmax(420px, 1fr);
+    grid-template-columns: minmax(420px, 620px) 10px minmax(640px, 1fr);
     gap: 14px;
     align-items: start;
     min-height: 0;
@@ -40,6 +40,35 @@
 .lte-ho-analysis-table-pane,
 .lte-ho-analysis-detail-pane {
     min-width: 0;
+}
+
+.lte-ho-analysis-splitter {
+    width: 10px;
+    min-height: 100%;
+    align-self: stretch;
+    cursor: col-resize;
+    position: relative;
+    user-select: none;
+}
+
+.lte-ho-analysis-splitter::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    transform: translateX(-50%);
+    background: rgba(148, 163, 184, 0.28);
+    border-radius: 999px;
+}
+
+.lte-ho-analysis-splitter:hover::before {
+    background: rgba(125, 211, 252, 0.6);
+}
+
+.lte-ho-analysis-detail-pane {
+    min-width: 640px;
 }
 
 .lte-ho-analysis-table-pane {
@@ -56,7 +85,7 @@
 
 @media (max-width: 1300px) {
     .lte-ho-analysis-main-grid {
-        grid-template-columns: minmax(520px, 1.15fr) minmax(360px, 1fr);
+        grid-template-columns: minmax(360px, 480px) 10px minmax(520px, 1fr);
     }
 }
 

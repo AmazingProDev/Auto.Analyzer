@@ -648,15 +648,34 @@ class MapRenderer {
             }
             return null;
         })();
-        const hasMeasuredRf = measuredPci !== null || measuredFreq !== null || measuredLac !== null;
+        const measuredBsic = (() => {
+            const direct = [
+                p.bsic,
+                p.parsed && p.parsed.serving ? p.parsed.serving.bsic : null
+            ];
+            for (const c of direct) {
+                const v = parseFiniteInt(c);
+                if (v !== null) return v;
+            }
+            if (props) {
+                const fromProps = getValCI(props, 'bsic') || getValCI(props, 'base station identity code');
+                const v = parseFiniteInt(fromProps);
+                if (v !== null) return v;
+            }
+            return null;
+        })();
+        const hasMeasuredRf = measuredPci !== null || measuredFreq !== null || measuredLac !== null || measuredBsic !== null;
         const isRfCompatible = (site) => {
             if (!site || typeof site !== 'object') return false;
             const sitePci = parseFiniteInt(site.pci !== undefined ? site.pci : site.sc);
             const siteFreq = parseFiniteNumber(site.currentFreq !== undefined ? site.currentFreq : site.freq);
             const siteLac = parseFiniteInt(site.lac);
+            const siteBsic = parseFiniteInt(site.bsic);
+
             if (measuredPci !== null && sitePci !== null && sitePci !== measuredPci) return false;
             if (measuredFreq !== null && siteFreq !== null && Math.abs(siteFreq - measuredFreq) >= 1) return false;
             if (measuredLac !== null && siteLac !== null && siteLac !== measuredLac) return false;
+            if (measuredBsic !== null && siteBsic !== null && siteBsic !== measuredBsic) return false;
             return true;
         };
         const pointLteEci = (() => {
@@ -830,66 +849,44 @@ class MapRenderer {
             if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
         }
 
-        // 1. Strict RF
-        if (pci !== null && lac !== null && freq !== null) {
-            const s = siteData.find(x => {
-                const pciMatch = (x.pci == pci || x.sc == pci);
-                const lacMatch = (x.lac == lac);
-                const freqMatch = (x.freq == freq || Math.abs(x.freq - freq) < 1);
-                return pciMatch && lacMatch && freqMatch;
-            });
-            if (s) return s;
-        }
-
-        // 2. CellID + LAC
-        if (cellId && lac) {
-            const s = siteData.find(x => x.cellId == cellId && x.lac == lac);
-            if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
-        }
-
-        // 3. Smart Fallback: RF + Proximity (If CellID is stale or missing)
-        if (pci !== null && freq !== null && p.lat && p.lng) {
-            const nearbyRadius = 0.02; // Roughly 2km in lat/lng degrees
-            const candidates = siteData.filter(x => {
-                const pciMatch = (x.pci == pci || x.sc == pci);
-                const freqMatch = (Math.abs(x.freq - freq) < 1);
+        // 1. GSM Matching: BSIC + ARFCN (Freq) + LAC + PROXIMITY
+        if (measuredBsic !== null && measuredFreq !== null && measuredLac !== null && p.lat && p.lng) {
+            const nearbyRadius = 0.02;
+            const match = siteData.find(x => {
+                const bsicMatch = (x.bsic == measuredBsic);
+                const freqMatch = (Math.abs((x.freq || x.currentFreq) - measuredFreq) < 1);
+                const lacMatch = (x.lac == measuredLac);
                 const distMatch = Math.abs(x.lat - p.lat) < nearbyRadius && Math.abs(x.lng - p.lng) < nearbyRadius;
-                return pciMatch && freqMatch && distMatch;
+                return bsicMatch && freqMatch && lacMatch && distMatch;
+            });
+            if (match) return match;
+        }
+
+        // 2. WCDMA/3G Falling: SC + Freq + PROXIMITY (When RNC/CID is missing)
+        if (measuredPci !== null && measuredFreq !== null && p.lat && p.lng) {
+            const nearbyRadius = 0.02; // Roughly 2km
+            const candidates = siteData.filter(x => {
+                // Ignore sites that have a tech specified as LTE or GSM if we're looking for 3G (SC matching)
+                const tech = String(x.tech || '').toUpperCase();
+                if (tech.includes('LTE') || tech.includes('GSM') || tech.includes('2G')) return false;
+
+                const scMatch = (x.sc == measuredPci || x.pci == measuredPci);
+                const freqMatch = (Math.abs((x.freq || x.currentFreq) - measuredFreq) < 1);
+                const distMatch = Math.abs(x.lat - p.lat) < nearbyRadius && Math.abs(x.lng - p.lng) < nearbyRadius;
+                return scMatch && freqMatch && distMatch;
             });
 
-            // 4. Loose Fallback: PCI + Proximity (Ignore Freq mismatch if strictly close)
-            if (candidates.length === 0) {
-                const looseCandidates = siteData.filter(x => {
-                    const pciMatch = (x.pci == pci || x.sc == pci);
-                    // Stricter distance for loose match (0.005 ~ 500m)
-                    const distMatch = Math.abs(x.lat - p.lat) < 0.005 && Math.abs(x.lng - p.lng) < 0.005;
-                    return pciMatch && distMatch;
-                });
-                if (looseCandidates.length > 0) {
-                    const hit = looseCandidates[0];
-                    if (!hasMeasuredRf || isRfCompatible(hit)) return hit; // Take first/closest
-                }
-            }
-
-            if (candidates.length === 1) {
-                const hit = candidates[0];
-                if (!hasMeasuredRf || isRfCompatible(hit)) return hit;
-            }
-            if (candidates.length > 1) {
-                // If multiple candidates, pick the closest one
-                const winner = candidates.sort((a, b) => {
+            if (candidates.length > 0) {
+                const winner = candidates.length === 1 ? candidates[0] : candidates.sort((a, b) => {
                     const distA = Math.pow(a.lat - p.lat, 2) + Math.pow(a.lng - p.lng, 2);
                     const distB = Math.pow(b.lat - p.lat, 2) + Math.pow(b.lng - p.lng, 2);
                     return distA - distB;
                 })[0];
-                if (!hasMeasuredRf || isRfCompatible(winner)) {
-                    p._cachedServing = winner;
-                    return winner;
-                }
+                return winner;
             }
         }
 
-        // 4. Last Resort: CellID Only
+        // 3. Last Resort: CellID Only (Strict for LTE, Legacy for others)
         if (cellId) {
             const norm = String(cellId).replace(/\s/g, '');
             if (this.siteIndex.byId.has(norm)) {
@@ -1059,8 +1056,13 @@ class MapRenderer {
                 if (isServingRscpMetric) {
                     const nVal = Number(val);
                     if (!Number.isFinite(nVal)) continue;
-                } else if (metric !== 'level' && metric !== 'quality') { // Only skip for specific metrics
-                    if (val === undefined || val === null || val === 'N/A' || val === '') continue;
+                } else if (metric !== 'level' && metric !== 'quality') { 
+                    // Skip 'N/A', empty string, null, undefined, and literal NaN values 
+                    // so different layers/technologies can overlay cleanly without drawing gray points over each other
+                    if (val === undefined || val === null || val === 'N/A' || val === '' || Number.isNaN(val)) continue;
+                    
+                    // Explicit numerical check for standard metrics: if it's parsed as NaN, skip it.
+                    if (typeof val === 'number' && !Number.isFinite(val)) continue;
                 }
 
                 const color = this.getColor(val, metric);

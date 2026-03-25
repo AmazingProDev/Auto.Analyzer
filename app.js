@@ -687,11 +687,24 @@ document.addEventListener('DOMContentLoaded', () => {
         btnLteHoAnalysis.onclick = async () => {
             try {
                 if (typeof window.openLteHoAnalysisForActiveLog === 'function') {
-                    await window.openLteHoAnalysisForActiveLog();
+                    await window.openLteHoAnalysisForActiveLog('intrafreq');
                 }
             } catch (err) {
                 console.error('LTE HO analysis open failed:', err);
                 alert('LTE HO analysis error: ' + (err && err.message ? err.message : err));
+            }
+        };
+    }
+    const btnLteInterFreqHoAnalysis = document.getElementById('btnLteInterFreqHoAnalysis');
+    if (btnLteInterFreqHoAnalysis) {
+        btnLteInterFreqHoAnalysis.onclick = async () => {
+            try {
+                if (typeof window.openLteHoAnalysisForActiveLog === 'function') {
+                    await window.openLteHoAnalysisForActiveLog('interfreq');
+                }
+            } catch (err) {
+                console.error('LTE InterFreq HO analysis open failed:', err);
+                alert('LTE InterFreq HO analysis error: ' + (err && err.message ? err.message : err));
             }
         };
     }
@@ -2339,8 +2352,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!log || !Array.isArray(log.callSessions) || !Array.isArray(log.points)) return [];
         const droppedSessions = log.callSessions.filter(s => {
             if (!s) return false;
-            const isUmtsCall = s?._source === 'umts' && s?.kind === 'UMTS_CALL';
-            if (!isUmtsCall) return false;
+            // Support both native UMTS sessions and Excel/Nemo-parsed sessions
             if (s.drop === true) return true;
             const et = String(s.endType || '').toUpperCase();
             return et === 'DROP' || et.includes('ABNORMAL') || et.includes('RLF') || et.includes('UNEXPECTED_IDLE');
@@ -3800,6 +3812,52 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.style.maxHeight = '';
     }
 
+    function applyLteHoSplitLayout(gridEl, leftWidthPx) {
+        if (!gridEl) return;
+        const gridRect = gridEl.getBoundingClientRect();
+        const maxLeft = Math.max(420, gridRect.width - 10 - 640);
+        const nextLeft = Math.max(420, Math.min(Number(leftWidthPx) || 620, maxLeft));
+        gridEl.style.gridTemplateColumns = `${nextLeft}px 10px minmax(640px, 1fr)`;
+    }
+
+    function attachLteHoSplitter(gridEl, splitterEl) {
+        if (!gridEl || !splitterEl) return;
+        if (Number.isFinite(Number(currentLteHoAnalysisState?.splitLeftPx))) {
+            applyLteHoSplitLayout(gridEl, Number(currentLteHoAnalysisState.splitLeftPx));
+        }
+        let dragState = null;
+        const onMove = (evt) => {
+            if (!dragState) return;
+            const nextLeftWidth = evt.clientX - dragState.gridLeft;
+            currentLteHoAnalysisState = Object.assign({}, currentLteHoAnalysisState || {}, {
+                splitLeftPx: nextLeftWidth
+            });
+            applyLteHoSplitLayout(gridEl, nextLeftWidth);
+        };
+        const onUp = () => {
+            if (!dragState) return;
+            dragState = null;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        };
+        splitterEl.onmousedown = (evt) => {
+            evt.preventDefault();
+            const rect = gridEl.getBoundingClientRect();
+            dragState = {
+                gridLeft: rect.left,
+                gridWidth: rect.width
+            };
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        splitterEl.__cleanup = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        };
+    }
+
     function getPreferredLteHoLog() {
         const logs = Array.isArray(window.loadedLogs) ? window.loadedLogs : loadedLogs;
         const activeLogId = window.mapRenderer && window.mapRenderer.activeLogId;
@@ -3818,10 +3876,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }) || null;
     }
 
-    async function runLteHoAnalysisForLog(log, force = false) {
+    async function runLteHoAnalysisForLog(log, force = false, mode = 'intrafreq') {
         if (!log || !Array.isArray(log.points) || !log.points.length) {
             throw new Error('No LTE log available for HO analysis.');
         }
+        const analysisMode = String(mode || 'intrafreq').toLowerCase() === 'interfreq' ? 'interfreq' : 'intrafreq';
+        const resultCacheKey = analysisMode === 'interfreq' ? '__lteInterFreqHoAnalysisResult' : '__lteHoAnalysisResult';
         if (/4g|lte/i.test(String(log?.technology || log?.tech || log?.radioTech || '')) || (Array.isArray(log.points) && log.points.some((p) => {
             const tech = String(p?.technology || p?.tech || p?.Tech || '').toUpperCase();
             return tech.includes('LTE') || tech.includes('4G');
@@ -3841,27 +3901,66 @@ document.addEventListener('DOMContentLoaded', () => {
         const resultHasExactA3 = (result) => Array.isArray(result?.events) && result.events.some((ev) => {
             return !!(ev?.debug?.exactA3?.evaluation || ev?.exactA3 || Number.isFinite(ev?.metrics?.exactA3MarginAtReportDb));
         });
-        if (!force && log.__lteHoAnalysisResult) {
-            if (!logHasExactA3 || resultHasExactA3(log.__lteHoAnalysisResult)) return log.__lteHoAnalysisResult;
-            log.__lteHoAnalysisResult = null;
+        const sanitizeHoAnalysisResult = (result) => {
+            if (!result || !Array.isArray(result.events)) return result;
+            const filteredEvents = result.events.filter((ev) => {
+                const sourcePci = Number(ev?.sourceCell?.pci);
+                const targetPci = Number(ev?.targetCell?.pci);
+                const sourceEci = String(ev?.sourceCell?.eci || '').trim();
+                const targetEci = String(ev?.targetCell?.eci || '').trim();
+                const sameDisplayedPciPair = Number.isFinite(sourcePci) && Number.isFinite(targetPci) && sourcePci === targetPci;
+                const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
+                return !sameDisplayedPciPair;
+            });
+            if (filteredEvents.length === result.events.length) return result;
+            const next = Object.assign({}, result, { events: filteredEvents });
+            if (window.LteHoAnalysis && typeof window.LteHoAnalysis.aggregateKpis === 'function') {
+                try {
+                    next.kpis = window.LteHoAnalysis.aggregateKpis(filteredEvents);
+                } catch (_e) { }
+            }
+            if (next.debugCounts && typeof next.debugCounts === 'object') {
+                next.debugCounts = Object.assign({}, next.debugCounts, {
+                    totalHoEvents: filteredEvents.length
+                });
+            }
+            if (Array.isArray(next.summaryCards)) {
+                next.summaryCards = next.summaryCards.filter((card) => {
+                    const sourcePci = Number(card?.sourceCell?.pci);
+                    const targetPci = Number(card?.targetCell?.pci);
+                    const sourceEci = String(card?.sourceCell?.eci || '').trim();
+                    const targetEci = String(card?.targetCell?.eci || '').trim();
+                    const sameDisplayedPciPair = Number.isFinite(sourcePci) && Number.isFinite(targetPci) && sourcePci === targetPci;
+                    const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
+                    return !sameDisplayedPciPair;
+                });
+            }
+            return next;
+        };
+        if (!force && log[resultCacheKey]) {
+            log[resultCacheKey] = sanitizeHoAnalysisResult(log[resultCacheKey]);
+            if (!logHasExactA3 || resultHasExactA3(log[resultCacheKey])) return log[resultCacheKey];
+            log[resultCacheKey] = null;
         }
         const dataset = { points: log.points || [], events: analysisEvents };
         let result = null;
         try {
-            const res = await fetch('/api/ho-analysis/run', {
+            const res = await fetch(analysisMode === 'interfreq' ? '/api/interfreq-ho-analysis/run' : '/api/ho-analysis/run', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     label: log.name || log.fileName || log.id,
                     source: { logId: log.id, name: log.name || log.fileName || '' },
                     dataset,
-                    options: {}
+                    options: {},
+                    mode: analysisMode
                 })
             });
             if (res.ok) {
                 const payload = await res.json();
                 if (payload && payload.analysisId) {
-                    const exportRes = await fetch('/api/ho-analysis/' + encodeURIComponent(payload.analysisId) + '/export');
+                    const exportBase = analysisMode === 'interfreq' ? '/api/interfreq-ho-analysis/' : '/api/ho-analysis/';
+                    const exportRes = await fetch(exportBase + encodeURIComponent(payload.analysisId) + '/export');
                     if (exportRes.ok) {
                         const exportPayload = await exportRes.json();
                         result = exportPayload && exportPayload.result ? exportPayload.result : null;
@@ -3872,15 +3971,17 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (_err) {
             result = null;
         }
-        if (logHasExactA3 && !resultHasExactA3(result) && window.LteHoAnalysis && typeof window.LteHoAnalysis.analyzeIntraFreqHo === 'function') {
-            result = window.LteHoAnalysis.analyzeIntraFreqHo(dataset, {});
+        if (logHasExactA3 && !resultHasExactA3(result) && window.LteHoAnalysis && typeof window.LteHoAnalysis[analysisMode === 'interfreq' ? 'analyzeInterFreqHo' : 'analyzeIntraFreqHo'] === 'function') {
+            result = window.LteHoAnalysis[analysisMode === 'interfreq' ? 'analyzeInterFreqHo' : 'analyzeIntraFreqHo'](dataset, {});
         }
         if (!result) {
-            if (!window.LteHoAnalysis || typeof window.LteHoAnalysis.analyzeIntraFreqHo !== 'function') {
+            const fnName = analysisMode === 'interfreq' ? 'analyzeInterFreqHo' : 'analyzeIntraFreqHo';
+            if (!window.LteHoAnalysis || typeof window.LteHoAnalysis[fnName] !== 'function') {
                 throw new Error('LTE HO analysis module is not loaded.');
             }
-            result = window.LteHoAnalysis.analyzeIntraFreqHo(dataset, {});
+            result = window.LteHoAnalysis[fnName](dataset, {});
         }
+        result = sanitizeHoAnalysisResult(result);
         const matchedExactA3Count = Array.isArray(result?.events)
             ? result.events.filter((ev) => !!(ev?.debug?.exactA3?.evaluation || ev?.exactA3 || Number.isFinite(ev?.metrics?.exactA3MarginAtReportDb))).length
             : 0;
@@ -3888,7 +3989,8 @@ document.addEventListener('DOMContentLoaded', () => {
             matchedExactA3Hos: matchedExactA3Count,
             totalHoEvents: Array.isArray(result?.events) ? result.events.length : 0
         });
-        log.__lteHoAnalysisResult = result;
+        result.analysisMode = analysisMode;
+        log[resultCacheKey] = result;
         return result;
     }
 
@@ -3978,6 +4080,53 @@ document.addEventListener('DOMContentLoaded', () => {
         return bestIndex;
     }
 
+    function findNearestLteHoEventForPoint(log, point, maxGapMs = 5000, maxDistanceM = 250) {
+        if (!log || !point) return null;
+        const result = (log.__lteHoAnalysisResult && Array.isArray(log.__lteHoAnalysisResult.events))
+            ? log.__lteHoAnalysisResult
+            : ((currentLteHoAnalysisState && String(currentLteHoAnalysisState.log?.id || '') === String(log.id || '') && Array.isArray(currentLteHoAnalysisState.result?.events))
+                ? currentLteHoAnalysisState.result
+                : null);
+        const events = Array.isArray(result?.events) ? result.events : [];
+        if (!events.length) return null;
+        const pointTs = parseLteHoPointTs(point.time ?? point.timestamp ?? point.ts ?? point?.properties?.Time);
+        const pointLat = Number(point?.lat);
+        const pointLon = Number(point?.lng);
+        let best = null;
+        let bestScore = Infinity;
+        for (const ev of events) {
+            if (!ev) continue;
+            const sourcePci = Number(ev?.sourceCell?.pci);
+            const targetPci = Number(ev?.targetCell?.pci);
+            const sourceEci = String(ev?.sourceCell?.eci || '').trim();
+            const targetEci = String(ev?.targetCell?.eci || '').trim();
+            const sameDisplayedPciPair = Number.isFinite(sourcePci) && Number.isFinite(targetPci) && sourcePci === targetPci;
+            const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
+            if (sameDisplayedPciPair) continue;
+            const anchorTs = Number.isFinite(Number(ev?.decisionSampleTs))
+                ? Number(ev.decisionSampleTs)
+                : (Number.isFinite(Number(ev?.commandTs))
+                    ? Number(ev.commandTs)
+                    : (Number.isFinite(Number(ev?.reportTs))
+                        ? Number(ev.reportTs)
+                        : (Number.isFinite(Number(ev?.startTs)) ? Number(ev.startTs) : NaN)));
+            const anchorPoint = ev?.map?.commandPoint || ev?.map?.reportPoint || ev?.map?.completePoint || null;
+            const anchorLat = Number(anchorPoint?.lat);
+            const anchorLon = Number(anchorPoint?.lon);
+            const timeGap = (Number.isFinite(pointTs) && Number.isFinite(anchorTs)) ? Math.abs(pointTs - anchorTs) : Infinity;
+            const geoGap = (Number.isFinite(pointLat) && Number.isFinite(pointLon) && Number.isFinite(anchorLat) && Number.isFinite(anchorLon) && typeof window.distanceMeters === 'function')
+                ? window.distanceMeters(pointLat, pointLon, anchorLat, anchorLon)
+                : Infinity;
+            if (timeGap > maxGapMs && geoGap > maxDistanceM) continue;
+            const score = (Number.isFinite(timeGap) ? timeGap : 1e9) + ((Number.isFinite(geoGap) ? geoGap : 0) * 8);
+            if (score < bestScore) {
+                bestScore = score;
+                best = ev;
+            }
+        }
+        return best;
+    }
+
     function getPreferredLteHoSyncMetric(log) {
         const currentChartMetric = String(window.currentChartParam || '').trim();
         if (currentChartMetric && String(window.currentChartLogId || '') === String(log?.id || '')) return currentChartMetric;
@@ -4018,6 +4167,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 logId: log.id,
                 pointIndex: idx,
                 pointTime: String(point?.time || '').trim(),
+                classification: String(eventObj?.classification || '').trim(),
+                sourcePci: eventObj?.sourceCell?.pci,
+                targetPci: eventObj?.targetCell?.pci,
                 evalObj: exactA3Eval,
                 best: exactA3Best,
                 mappingSummary: exactA3Debug?.mappingSummary || '',
@@ -4093,12 +4245,92 @@ document.addEventListener('DOMContentLoaded', () => {
         titleEl.innerHTML = getChartTitleHtml(log, param || window.currentChartParam || '');
     }
 
+    function getLteHoChartStateForEvent(eventObj) {
+        if (!currentLteHoAnalysisState) currentLteHoAnalysisState = {};
+        if (!currentLteHoAnalysisState.chartViewByEvent) currentLteHoAnalysisState.chartViewByEvent = {};
+        const key = String(eventObj?.id || eventObj?.startTs || eventObj?.commandTs || eventObj?.reportTs || 'default');
+        const existing = currentLteHoAnalysisState.chartViewByEvent[key];
+        if (existing && typeof existing === 'object') return { key, state: existing };
+        const initial = { zoomFactor: 1 };
+        currentLteHoAnalysisState.chartViewByEvent[key] = initial;
+        return { key, state: initial };
+    }
+
+    function getLteHoChartBounds(eventObj, zoomFactor = 1) {
+        const series = eventObj?.chart?.series || {};
+        const markers = Array.isArray(eventObj?.chart?.markers) ? eventObj.chart.markers : [];
+        const times = [];
+        Object.values(series).forEach((arr) => {
+            (Array.isArray(arr) ? arr : []).forEach((row) => {
+                const ts = Number(row && row.ts);
+                if (Number.isFinite(ts)) times.push(ts);
+            });
+        });
+        markers.forEach((m) => {
+            const ts = Number(m && m.ts);
+            if (Number.isFinite(ts)) times.push(ts);
+        });
+        if (!times.length) return { min: undefined, max: undefined };
+        const rawMin = Math.min(...times);
+        const rawMax = Math.max(...times);
+        if (!(Number.isFinite(rawMin) && Number.isFinite(rawMax)) || rawMax <= rawMin) {
+            return { min: rawMin, max: rawMax };
+        }
+        const focusTs = Number(eventObj?.decisionSampleTs ?? eventObj?.commandTs ?? eventObj?.reportTs ?? ((rawMin + rawMax) / 2));
+        const safeZoom = Math.max(1, Number(zoomFactor) || 1);
+        const span = rawMax - rawMin;
+        const visibleSpan = Math.max(1200, span / safeZoom);
+        const maxPan = Math.max(0, span - visibleSpan);
+        const requestedPanRatio = Number(eventObj?.__chartPanRatio);
+        const storedPanRatio = Number((getLteHoChartStateForEvent(eventObj).state || {}).panRatio);
+        const panRatio = Number.isFinite(requestedPanRatio)
+            ? Math.max(0, Math.min(1, requestedPanRatio))
+            : (Number.isFinite(storedPanRatio) ? Math.max(0, Math.min(1, storedPanRatio)) : 0.5);
+        let min = rawMin + (maxPan * panRatio);
+        let max = min + visibleSpan;
+        if (min < rawMin) {
+            min = rawMin;
+            max = Math.min(rawMax, rawMin + visibleSpan);
+        }
+        if (max > rawMax) {
+            max = rawMax;
+            min = Math.max(rawMin, rawMax - visibleSpan);
+        }
+        return { min, max };
+    }
+
+    function clampLteHoChartPanRatio(eventObj, ratio) {
+        const series = eventObj?.chart?.series || {};
+        const markers = Array.isArray(eventObj?.chart?.markers) ? eventObj.chart.markers : [];
+        const times = [];
+        Object.values(series).forEach((arr) => {
+            (Array.isArray(arr) ? arr : []).forEach((row) => {
+                const ts = Number(row && row.ts);
+                if (Number.isFinite(ts)) times.push(ts);
+            });
+        });
+        markers.forEach((m) => {
+            const ts = Number(m && m.ts);
+            if (Number.isFinite(ts)) times.push(ts);
+        });
+        if (!times.length) return 0.5;
+        const rawMin = Math.min(...times);
+        const rawMax = Math.max(...times);
+        const span = rawMax - rawMin;
+        const zoomFactor = Math.max(1, Number(getLteHoChartStateForEvent(eventObj).state.zoomFactor) || 1);
+        const visibleSpan = Math.max(1200, span / zoomFactor);
+        if (span <= visibleSpan) return 0.5;
+        return Math.max(0, Math.min(1, Number(ratio) || 0));
+    }
+
     function buildLteHoChart(canvas, eventObj) {
         if (!canvas || !window.Chart || !eventObj || !eventObj.chart) return;
         if (window.__lteHoDetailChart) {
             try { window.__lteHoDetailChart.destroy(); } catch (_e) {}
             window.__lteHoDetailChart = null;
         }
+        const chartView = getLteHoChartStateForEvent(eventObj);
+        const bounds = getLteHoChartBounds(eventObj, chartView.state.zoomFactor);
         const markerPalette = {
             decision: { line: '#f8fafc', label: '#f8fafc' },
             target_better: { line: '#f59e0b', label: '#fcd34d' },
@@ -4162,6 +4394,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 scales: {
                     x: {
                         type: 'linear',
+                        min: bounds.min,
+                        max: bounds.max,
                         ticks: {
                             color: '#cbd5e1',
                             callback: (value) => formatHoTs(value)
@@ -4179,6 +4413,44 @@ document.addEventListener('DOMContentLoaded', () => {
             },
             plugins: [markerPlugin]
         });
+        canvas.onwheel = (evt) => {
+            evt.preventDefault();
+            const next = evt.deltaY < 0
+                ? Math.min(8, (chartView.state.zoomFactor || 1) * 1.35)
+                : Math.max(1, (chartView.state.zoomFactor || 1) / 1.35);
+            chartView.state.zoomFactor = next;
+            chartView.state.panRatio = clampLteHoChartPanRatio(eventObj, chartView.state.panRatio ?? 0.5);
+            renderLteHoDetail(eventObj);
+        };
+        let dragState = null;
+        canvas.onmousedown = (evt) => {
+            if ((chartView.state.zoomFactor || 1) <= 1) return;
+            evt.preventDefault();
+            const xScale = window.__lteHoDetailChart && window.__lteHoDetailChart.scales ? window.__lteHoDetailChart.scales.x : null;
+            if (!xScale) return;
+            dragState = {
+                startX: evt.clientX,
+                startPanRatio: Number.isFinite(Number(chartView.state.panRatio)) ? Number(chartView.state.panRatio) : 0.5,
+                plotWidth: Math.max(1, xScale.right - xScale.left)
+            };
+            canvas.style.cursor = 'grabbing';
+        };
+        canvas.onmousemove = (evt) => {
+            if (!dragState) return;
+            evt.preventDefault();
+            const dx = evt.clientX - dragState.startX;
+            const currentZoom = Math.max(1, Number(chartView.state.zoomFactor) || 1);
+            const shiftRatio = dx / Math.max(1, dragState.plotWidth * currentZoom);
+            chartView.state.panRatio = clampLteHoChartPanRatio(eventObj, dragState.startPanRatio - shiftRatio);
+            renderLteHoDetail(eventObj);
+        };
+        const stopDrag = () => {
+            dragState = null;
+            canvas.style.cursor = (Number(chartView.state.zoomFactor) || 1) > 1 ? 'grab' : 'default';
+        };
+        canvas.onmouseup = stopDrag;
+        canvas.onmouseleave = stopDrag;
+        canvas.style.cursor = (Number(chartView.state.zoomFactor) || 1) > 1 ? 'grab' : 'default';
     }
 
     function getLteHoMarkerPalette() {
@@ -4228,6 +4500,36 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    function getLteHoClassificationBadgeMeta(classification) {
+        const cls = String(classification || '').toLowerCase().trim();
+        if (cls === 'successful') {
+            return {
+                label: 'Successful',
+                bg: 'rgba(34,197,94,0.18)',
+                color: '#86efac',
+                border: 'rgba(34,197,94,0.55)'
+            };
+        }
+        if (
+            cls === 'too-late'
+            || cls === 'too-early'
+            || cls === 'ping-pong'
+            || cls === 'wrong-target'
+            || cls === 'execution-failure'
+            || cls === 'missing-report/config-issue'
+        ) {
+            return {
+                label: cls === 'missing-report/config-issue'
+                    ? 'Missing report/config issue'
+                    : cls.split('-').map((part) => part ? (part.charAt(0).toUpperCase() + part.slice(1)) : '').join(' '),
+                bg: 'rgba(239,68,68,0.18)',
+                color: '#fca5a5',
+                border: 'rgba(239,68,68,0.55)'
+            };
+        }
+        return null;
+    }
+
     function buildLteHoInterpretationHtml(eventObj) {
         if (!eventObj) return '<div style="font-size:12px;color:#94a3b8;">No interpretation available.</div>';
         const decisionTime = formatHoTs(eventObj.decisionSampleTs);
@@ -4257,6 +4559,32 @@ document.addEventListener('DOMContentLoaded', () => {
             lines.push(`Delta gap = best alternative delta - chosen target delta = ${escapeHtmlLocal(hoFmt(deltaGap, 1, ' dB'))}. Positive gap means another same-frequency candidate looked stronger than the target at the decision sample.`);
         }
         return lines.map((line) => `<div style="margin-bottom:6px;">${line}</div>`).join('');
+    }
+
+    function adjustLteHoChartZoom(eventObj, op) {
+        if (!eventObj) return;
+        const chartView = getLteHoChartStateForEvent(eventObj);
+        const current = Math.max(1, Number(chartView.state.zoomFactor) || 1);
+        let next = current;
+        if (op === 'in') next = Math.min(8, current * 1.35);
+        else if (op === 'out') next = Math.max(1, current / 1.35);
+        else if (op === 'reset') {
+            next = 1;
+            chartView.state.panRatio = 0.5;
+        }
+        chartView.state.zoomFactor = next;
+        chartView.state.panRatio = clampLteHoChartPanRatio(eventObj, chartView.state.panRatio ?? 0.5);
+        renderLteHoDetail(eventObj);
+    }
+
+    function adjustLteHoChartPan(eventObj, direction) {
+        if (!eventObj) return;
+        const chartView = getLteHoChartStateForEvent(eventObj);
+        const current = Number.isFinite(Number(chartView.state.panRatio)) ? Number(chartView.state.panRatio) : 0.5;
+        const step = 0.12;
+        const next = direction === 'left' ? current - step : current + step;
+        chartView.state.panRatio = clampLteHoChartPanRatio(eventObj, next);
+        renderLteHoDetail(eventObj);
     }
 
     function renderLteHoDetail(eventObj) {
@@ -4357,37 +4685,51 @@ document.addEventListener('DOMContentLoaded', () => {
             `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Report→Command</div><div>${hoFmt(eventObj?.metrics?.reportToCommandMs,0,' ms')}</div></div>` +
             `  <div style="background:#111827; border:1px solid #334155; padding:8px; border-radius:8px;"><div style="font-size:11px;color:#94a3b8;">Command→Complete</div><div>${hoFmt(eventObj?.metrics?.commandToCompleteMs,0,' ms')}</div></div>` +
             `</div>` +
-            `<div style="display:grid; grid-template-columns:1.1fr 1fr; gap:14px;">` +
-            `  <div>` +
-            `    <div style="font-weight:700; margin-bottom:6px;">Reasons</div><ul style="margin:0 0 12px 16px; color:#dbeafe;">${reasons || '<li>N/A</li>'}</ul>` +
-            `    <div style="font-weight:700; margin-bottom:6px;">Recommended Actions</div><ul style="margin:0 0 12px 16px; color:#d1fae5;">${actions || '<li>N/A</li>'}</ul>` +
-            `    <div style="font-weight:700; margin-bottom:6px;">Assumptions</div><ul style="margin:0 0 12px 16px; color:#fde68a;">${assumptions || '<li>None</li>'}</ul>` +
-            `    <div style="font-weight:700; margin-bottom:6px;">Timeline</div>` +
-            `    <div style="font-size:12px; color:#cbd5e1; line-height:1.6;">` +
-            `      T_better: ${escapeHtmlLocal(formatHoTs(eventObj.T_better))}<br>` +
-            `      T_a3_like: ${escapeHtmlLocal(formatHoTs(eventObj.T_a3_like))}<br>` +
-            `      Decision sample time used: ${escapeHtmlLocal(formatHoTs(eventObj.decisionSampleTs))}<br>` +
-            `      Decision sample source: ${escapeHtmlLocal(eventObj.decisionSampleSource || 'N/A')}<br>` +
-            `      Report: ${escapeHtmlLocal(formatHoTs(eventObj.reportTs))}<br>` +
-            `      Command: ${escapeHtmlLocal(formatHoTs(eventObj.commandTs))}<br>` +
-            `      Complete: ${escapeHtmlLocal(formatHoTs(eventObj.completeTs))}<br>` +
-            `      Fail: ${escapeHtmlLocal(formatHoTs(eventObj.failTs))}` +
-            `    </div>` +
-            `  </div>` +
+            `<div style="display:flex; flex-direction:column; gap:14px;">` +
             `  <div>` +
             `    <div style="font-weight:700; margin-bottom:6px;">Interpretation</div>` +
             `    <div style="margin-bottom:12px; font-size:12px; color:${interpretationTheme.text}; line-height:1.6; background:${interpretationTheme.background}; border:1px solid ${interpretationTheme.border}; border-radius:10px; padding:10px; box-shadow:inset 0 0 0 1px rgba(15,23,42,0.18);"><div style="font-size:11px; color:${interpretationTheme.accent}; font-weight:700; margin-bottom:8px; text-transform:uppercase;">${escapeHtmlLocal(eventObj.classification || 'analysis')}</div>${buildLteHoInterpretationHtml(eventObj)}</div>` +
-            `    <div style="font-weight:700; margin-bottom:6px;">Chart</div>` +
+            `    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;">` +
+            `      <div style="font-weight:700;">Chart</div>` +
+            `      <div style="display:flex; gap:6px; align-items:center;">` +
+            `        <button id="btnLteHoChartPanLeft" class="btn header-btn" style="padding:4px 10px;">←</button>` +
+            `        <button id="btnLteHoChartZoomOut" class="btn header-btn" style="padding:4px 10px;">-</button>` +
+            `        <button id="btnLteHoChartZoomReset" class="btn header-btn" style="padding:4px 10px;">100%</button>` +
+            `        <button id="btnLteHoChartZoomIn" class="btn header-btn" style="padding:4px 10px;">+</button>` +
+            `        <button id="btnLteHoChartPanRight" class="btn header-btn" style="padding:4px 10px;">→</button>` +
+            `      </div>` +
+            `    </div>` +
+            `    <div style="font-size:11px; color:#94a3b8; margin-bottom:6px;">Use +/- or mouse wheel to zoom, and ←/→ or drag inside the chart to pan.</div>` +
             `    <div style="height:260px; background:#0b1220; border:1px solid #334155; border-radius:10px; padding:8px;"><canvas id="lteHoDetailChartCanvas"></canvas></div>` +
             `    <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">${markerLegendHtml}</div>` +
             `    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">` +
             `      <button id="btnShowLteHoOnMap" class="btn header-btn" style="padding:6px 10px;">Show on Map</button>` +
             `      <button id="btnHideLteHoMap" class="btn header-btn" style="padding:6px 10px;">Clear Map</button>` +
             `    </div>` +
+            `  </div>` +
+            `  <div style="display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); gap:14px;">` +
+            `    <div>` +
+            `      <div style="font-weight:700; margin-bottom:6px;">Reasons</div><ul style="margin:0 0 12px 16px; color:#dbeafe;">${reasons || '<li>N/A</li>'}</ul>` +
+            `      <div style="font-weight:700; margin-bottom:6px;">Recommended Actions</div><ul style="margin:0 0 12px 16px; color:#d1fae5;">${actions || '<li>N/A</li>'}</ul>` +
+            `      <div style="font-weight:700; margin-bottom:6px;">Assumptions</div><ul style="margin:0 0 12px 16px; color:#fde68a;">${assumptions || '<li>None</li>'}</ul>` +
+            `    </div>` +
+            `    <div>` +
+            `      <div style="font-weight:700; margin-bottom:6px;">Timeline</div>` +
+            `      <div style="font-size:12px; color:#cbd5e1; line-height:1.6;">` +
+            `        T_better: ${escapeHtmlLocal(formatHoTs(eventObj.T_better))}<br>` +
+            `        T_a3_like: ${escapeHtmlLocal(formatHoTs(eventObj.T_a3_like))}<br>` +
+            `        Decision sample time used: ${escapeHtmlLocal(formatHoTs(eventObj.decisionSampleTs))}<br>` +
+            `        Decision sample source: ${escapeHtmlLocal(eventObj.decisionSampleSource || 'N/A')}<br>` +
+            `        Report: ${escapeHtmlLocal(formatHoTs(eventObj.reportTs))}<br>` +
+            `        Command: ${escapeHtmlLocal(formatHoTs(eventObj.commandTs))}<br>` +
+            `        Complete: ${escapeHtmlLocal(formatHoTs(eventObj.completeTs))}<br>` +
+            `        Fail: ${escapeHtmlLocal(formatHoTs(eventObj.failTs))}` +
+            `      </div>` +
+            `    </div>` +
+            `  </div>` +
             exactA3Html +
             `    <div style="margin-top:10px; font-weight:700;">Debug</div>` +
             `    <pre style="margin:6px 0 0; max-height:180px; overflow:auto; background:#020617; border:1px solid #334155; padding:10px; border-radius:10px; color:#93c5fd; font-size:11px;">${debugJson}</pre>` +
-            `  </div>` +
             `</div>`;
         const canvas = document.getElementById('lteHoDetailChartCanvas');
         buildLteHoChart(canvas, eventObj);
@@ -4405,8 +4747,18 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const showBtn = document.getElementById('btnShowLteHoOnMap');
         const hideBtn = document.getElementById('btnHideLteHoMap');
+        const panLeftBtn = document.getElementById('btnLteHoChartPanLeft');
+        const panRightBtn = document.getElementById('btnLteHoChartPanRight');
+        const zoomInBtn = document.getElementById('btnLteHoChartZoomIn');
+        const zoomOutBtn = document.getElementById('btnLteHoChartZoomOut');
+        const zoomResetBtn = document.getElementById('btnLteHoChartZoomReset');
         if (showBtn) showBtn.onclick = () => showLteHoEventOnMap(eventObj, true);
         if (hideBtn) hideBtn.onclick = () => removeLteHoOverlay();
+        if (panLeftBtn) panLeftBtn.onclick = () => adjustLteHoChartPan(eventObj, 'left');
+        if (panRightBtn) panRightBtn.onclick = () => adjustLteHoChartPan(eventObj, 'right');
+        if (zoomInBtn) zoomInBtn.onclick = () => adjustLteHoChartZoom(eventObj, 'in');
+        if (zoomOutBtn) zoomOutBtn.onclick = () => adjustLteHoChartZoom(eventObj, 'out');
+        if (zoomResetBtn) zoomResetBtn.onclick = () => adjustLteHoChartZoom(eventObj, 'reset');
     }
 
     function refreshLteHoTable() {
@@ -4606,7 +4958,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderLteHoDetail(selected);
     }
 
-    function renderLteHoAnalysisModal(result, log) {
+    function renderLteHoAnalysisModal(result, log, mode = 'intrafreq') {
         const existing = document.getElementById('lteHoAnalysisModal');
         if (existing) {
             if (typeof existing.__persistLayout === 'function') existing.__persistLayout();
@@ -4617,10 +4969,12 @@ document.addEventListener('DOMContentLoaded', () => {
         currentLteHoAnalysisState = {
             result,
             log,
+            mode: String(mode || result?.analysisMode || 'intrafreq').toLowerCase(),
             filteredEvents: [],
             selectedEventId: null,
             markerVisibility: Object.assign({}, LTE_HO_MARKER_DEFAULT_VISIBILITY)
         };
+        const analysisMode = currentLteHoAnalysisState.mode === 'interfreq' ? 'interfreq' : 'intrafreq';
         const summary = result?.kpis?.summary || {};
         const overlay = document.createElement('div');
         overlay.id = 'lteHoAnalysisModal';
@@ -4633,7 +4987,7 @@ document.addEventListener('DOMContentLoaded', () => {
         overlay.innerHTML = '' +
             `<div class="analysis-modal" style="width:1280px; max-width:98vw; height:min(84vh, 900px); background:#06111f; border:1px solid #334155; color:#e5e7eb; position:fixed; top:70px; left:calc(50% - 640px); resize:both; overflow:hidden; min-width:900px; min-height:480px; pointer-events:auto; box-shadow:0 28px 60px rgba(2,6,23,0.62);">` +
             `  <div class="analysis-header" style="background:#0f172a; display:flex; justify-content:space-between; align-items:center;">` +
-            `    <h3>LTE IntraFreq HO Analysis - ${escapeHtmlLocal(log?.name || log?.fileName || log?.id || 'log')}</h3>` +
+            `    <h3>${analysisMode === 'interfreq' ? 'LTE InterFreq HO Analysis' : 'LTE IntraFreq HO Analysis'} - ${escapeHtmlLocal(log?.name || log?.fileName || log?.id || 'log')}</h3>` +
             `    <div style="display:flex; gap:8px; align-items:center;">` +
               `      <button id="btnRefreshLteHoAnalysis" class="btn header-btn" style="padding:6px 10px;">Refresh</button>` +
               `      <button id="btnResetLteHoWindow" class="btn header-btn" style="padding:6px 10px;">Reset window</button>` +
@@ -4643,16 +4997,16 @@ document.addEventListener('DOMContentLoaded', () => {
             `  <div class="analysis-content" style="padding:14px; height:calc(100% - 56px); overflow:auto;">` +
             `    <div style="display:grid; grid-template-columns:repeat(8, minmax(0,1fr)); gap:10px; margin-bottom:14px;">` +
             `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Total LTE HOs</div><div style="font-size:20px;font-weight:700;">${summary.totalLteHos ?? 0}</div></div>` +
-            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">IntraFreq</div><div style="font-size:20px;font-weight:700;">${summary.totalIntraFreqHos ?? 0}</div></div>` +
-            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Success Rate</div><div style="font-size:20px;font-weight:700;">${hoPct(summary.intrafreqHoSuccessRate)}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">${analysisMode === 'interfreq' ? 'InterFreq' : 'IntraFreq'}</div><div style="font-size:20px;font-weight:700;">${analysisMode === 'interfreq' ? (summary.totalInterFreqHos ?? 0) : (summary.totalIntraFreqHos ?? 0)}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Success Rate</div><div style="font-size:20px;font-weight:700;">${hoPct(analysisMode === 'interfreq' ? summary.interfreqHoSuccessRate : summary.intrafreqHoSuccessRate)}</div></div>` +
             `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Exec Failure</div><div style="font-size:20px;font-weight:700;">${summary.executionFailureCount ?? 0}</div></div>` +
             `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Too Late</div><div style="font-size:20px;font-weight:700;">${summary.tooLateCount ?? 0}</div></div>` +
             `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Too Early</div><div style="font-size:20px;font-weight:700;">${summary.tooEarlyCount ?? 0}</div></div>` +
             `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Ping-Pong</div><div style="font-size:20px;font-weight:700;">${summary.pingPongCount ?? 0}</div></div>` +
-            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">Wrong Target</div><div style="font-size:20px;font-weight:700;">${summary.wrongTargetCount ?? 0}</div></div>` +
+            `      <div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px;"><div style="font-size:11px;color:#93c5fd;">${analysisMode === 'interfreq' ? 'Measurement Limited' : 'Wrong Target'}</div><div style="font-size:20px;font-weight:700;">${analysisMode === 'interfreq' ? (summary.measurementLimitedCount ?? 0) : (summary.wrongTargetCount ?? 0)}</div></div>` +
             `    </div>` +
             `    <div style="display:flex; gap:10px; align-items:end; margin-bottom:12px; flex-wrap:wrap;">` +
-            `      <div><div style="font-size:11px;color:#94a3b8;">Classification</div><select id="lteHoFilterClass" class="setting-input" style="min-width:180px;"><option value=\"\">All</option><option value=\"successful\">successful</option><option value=\"too-late\">too-late</option><option value=\"too-early\">too-early</option><option value=\"ping-pong\">ping-pong</option><option value=\"wrong-target\">wrong-target</option><option value=\"execution-failure\">execution-failure</option><option value=\"missing-report/config-issue\">missing-report/config-issue</option></select></div>` +
+            `      <div><div style="font-size:11px;color:#94a3b8;">Classification</div><select id="lteHoFilterClass" class="setting-input" style="min-width:180px;"><option value=\"\">All</option><option value=\"successful\">successful</option><option value=\"too-late\">too-late</option><option value=\"too-early\">too-early</option><option value=\"ping-pong\">ping-pong</option><option value=\"wrong-target\">wrong-target</option><option value=\"execution-failure\">execution-failure</option><option value=\"missing-report/config-issue\">missing-report/config-issue</option><option value=\"measurement_limited\">measurement_limited</option><option value=\"missing_report_or_config_issue\">missing_report_or_config_issue</option></select></div>` +
             `      <div><div style="font-size:11px;color:#94a3b8;">Source -> Target</div><select id="lteHoFilterPair" class="setting-input" style="min-width:180px;"><option value=\"\">All</option>${Array.from(new Set((result.events || []).map((ev) => `${ev?.sourceCell?.pci ?? '?'}->${ev?.targetCell?.pci ?? '?'}`))).map((pair) => `<option value=\"${escapeHtmlLocal(pair)}\">${escapeHtmlLocal(pair)}</option>`).join('')}</select></div>` +
             `      <div><div style="font-size:11px;color:#94a3b8;">Min Confidence</div><input id="lteHoFilterConfidence" type="number" min="0" max="1" step="0.05" value="0" class="setting-input" style="width:120px;"></div>` +
             `      <div><div style="font-size:11px;color:#94a3b8;">Exact A3</div><select id="lteHoFilterA3Status" class="setting-input" style="min-width:170px;"><option value=\"\">All</option><option value=\"satisfied\">A3 satisfied</option><option value=\"not_satisfied\">A3 not satisfied</option><option value=\"unavailable\">A3 unavailable</option></select></div>` +
@@ -4676,6 +5030,7 @@ document.addEventListener('DOMContentLoaded', () => {
             `          </table>` +
             `        </div>` +
             `      </div>` +
+            `      <div id="lteHoMainSplitter" class="lte-ho-analysis-splitter" aria-hidden="true"></div>` +
             `      <div id="lteHoDetailHost" class="lte-ho-analysis-detail-pane" style="border:1px solid #334155; border-radius:10px; padding:12px; min-height:420px; background:#071326; overflow:auto;"></div>` +
             `    </div>` +
             `  </div>` +
@@ -4685,6 +5040,8 @@ document.addEventListener('DOMContentLoaded', () => {
             window.attachAnalysisDrag(overlay);
         }
         const modal = overlay.querySelector('.analysis-modal');
+        const mainGrid = overlay.querySelector('.lte-ho-analysis-main-grid');
+        const splitter = document.getElementById('lteHoMainSplitter');
         if (modal) {
             applySavedLteHoAnalysisLayout(modal);
             const persistLayout = () => persistLteHoAnalysisLayout(modal);
@@ -4698,13 +5055,15 @@ document.addEventListener('DOMContentLoaded', () => {
             overlay.__cleanup = () => {
                 modal.removeEventListener('codex:dragend', persistLayout);
                 if (resizeObserver) resizeObserver.disconnect();
+                if (splitter && typeof splitter.__cleanup === 'function') splitter.__cleanup();
             };
         }
+        if (mainGrid && splitter) attachLteHoSplitter(mainGrid, splitter);
         const refreshBtn = document.getElementById('btnRefreshLteHoAnalysis');
         if (refreshBtn) {
             refreshBtn.onclick = async () => {
-                const fresh = await runLteHoAnalysisForLog(log, true);
-                renderLteHoAnalysisModal(fresh, log);
+                const fresh = await runLteHoAnalysisForLog(log, true, analysisMode);
+                renderLteHoAnalysisModal(fresh, log, analysisMode);
             };
         }
         const resetBtn = document.getElementById('btnResetLteHoWindow');
@@ -4733,17 +5092,18 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshLteHoTable();
     }
 
-    window.openLteHoAnalysisForActiveLog = async function () {
+    window.openLteHoAnalysisForActiveLog = async function (mode = 'intrafreq') {
         const log = getPreferredLteHoLog();
         if (!log) {
             alert('No LTE log is loaded.');
             return;
         }
         const status = document.getElementById('fileStatus');
-        if (status) status.textContent = 'Running LTE IntraFreq HO analysis...';
-        const result = await runLteHoAnalysisForLog(log, false);
-        renderLteHoAnalysisModal(result, log);
-        if (status) status.textContent = `LTE HO analysis ready: ${result?.events?.length || 0} events`;
+        const analysisMode = String(mode || 'intrafreq').toLowerCase() === 'interfreq' ? 'interfreq' : 'intrafreq';
+        if (status) status.textContent = `Running LTE ${analysisMode === 'interfreq' ? 'InterFreq' : 'IntraFreq'} HO analysis...`;
+        const result = await runLteHoAnalysisForLog(log, false, analysisMode);
+        renderLteHoAnalysisModal(result, log, analysisMode);
+        if (status) status.textContent = `LTE ${analysisMode === 'interfreq' ? 'InterFreq' : 'IntraFreq'} HO analysis ready: ${result?.events?.length || 0} events`;
     };
 
 
@@ -7207,6 +7567,20 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         // makeElementDraggable expects (headerEl, containerEl) and handles absolute positioning.
         // floatPanel is fixed, but logic usually sets top/left style which works for fixed too.
         makeElementDraggable(floatHeader, floatPanel);
+        applySavedPointDetailsLayout(floatPanel);
+        floatPanel.addEventListener('codex:dragend', () => {
+            floatPanel.dataset.userAnchored = 'true';
+            persistPointDetailsLayout(floatPanel);
+        });
+        if (typeof ResizeObserver !== 'undefined') {
+            const pointDetailsResizeObserver = new ResizeObserver(() => {
+                if (floatPanel.style.display === 'none') return;
+                if (floatPanel.dataset.userResized === 'true' || floatPanel.dataset.userAnchored === 'true') {
+                    persistPointDetailsLayout(floatPanel);
+                }
+            });
+            pointDetailsResizeObserver.observe(floatPanel);
+        }
     }
 
     // Attach Listeners to Docked Grid (Enable Drop when Docked)
@@ -13326,6 +13700,124 @@ if (isDiscreteLegend && (!ids || ids.length === 0)) {
         };
     }
 
+    const POINT_DETAILS_LAYOUT_KEY = 'optimAnalyzer.pointDetails.layout';
+
+    function readPointDetailsLayout() {
+        try {
+            const raw = localStorage.getItem(POINT_DETAILS_LAYOUT_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch (_e) {
+            return null;
+        }
+    }
+
+    function persistPointDetailsLayout(panel) {
+        if (!panel) return;
+        const rect = panel.getBoundingClientRect();
+        const layout = {
+            width: Math.round(rect.width || 0),
+            height: Math.round(rect.height || 0),
+            left: Math.round(rect.left || 0),
+            top: Math.round(rect.top || 0),
+            anchored: panel.dataset.userAnchored === 'true',
+            resized: panel.dataset.userResized === 'true'
+        };
+        try {
+            localStorage.setItem(POINT_DETAILS_LAYOUT_KEY, JSON.stringify(layout));
+        } catch (_e) { }
+    }
+
+    function applySavedPointDetailsLayout(panel) {
+        if (!panel) return false;
+        const layout = readPointDetailsLayout();
+        if (!layout) return false;
+        if (Number.isFinite(Number(layout.width)) && Number(layout.width) >= 360) {
+            panel.style.width = `${Math.min(window.innerWidth - 32, Number(layout.width))}px`;
+        }
+        if (Number.isFinite(Number(layout.height)) && Number(layout.height) >= 320) {
+            panel.style.height = `${Math.min(window.innerHeight - 96, Number(layout.height))}px`;
+        }
+        if (layout.anchored && Number.isFinite(Number(layout.left)) && Number.isFinite(Number(layout.top))) {
+            const rect = panel.getBoundingClientRect();
+            const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+            const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+            panel.style.left = `${Math.min(maxLeft, Math.max(8, Number(layout.left)))}px`;
+            panel.style.top = `${Math.min(maxTop, Math.max(8, Number(layout.top)))}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            panel.dataset.userAnchored = 'true';
+        }
+        if (layout.resized) panel.dataset.userResized = 'true';
+        return true;
+    }
+
+    function anchorFloatingInfoPanelToMap(panel) {
+        if (!panel) return;
+        const mapEl = document.getElementById('map');
+        if (!mapEl) return;
+        const rect = mapEl.getBoundingClientRect();
+        const margin = 12;
+        const maxLeft = Math.max(8, window.innerWidth - panel.offsetWidth - 8);
+        const maxTop = Math.max(8, window.innerHeight - panel.offsetHeight - 8);
+        const nextLeft = Math.min(maxLeft, Math.max(8, Math.round(rect.left + margin)));
+        const nextTop = Math.min(maxTop, Math.max(8, Math.round(rect.top + margin)));
+        panel.style.left = `${nextLeft}px`;
+        panel.style.top = `${nextTop}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        panel.style.margin = '0';
+        panel.dataset.userAnchored = 'false';
+    }
+
+    function resizePointDetailsPanel(mode) {
+        const panel = document.getElementById('floatingInfoPanel');
+        if (!panel) return;
+        const currentWidth = Math.max(360, Math.round(panel.getBoundingClientRect().width || 560));
+        const currentHeight = Math.max(320, Math.round(panel.getBoundingClientRect().height || 620));
+        if (mode === 'wider') {
+            panel.style.width = `${Math.min(window.innerWidth - 32, currentWidth + 120)}px`;
+        } else if (mode === 'taller') {
+            panel.style.height = `${Math.min(window.innerHeight - 96, currentHeight + 120)}px`;
+        } else if (mode === 'reset') {
+            panel.style.width = '560px';
+            panel.style.height = 'min(72vh, 820px)';
+            panel.dataset.userAnchored = 'false';
+            panel.dataset.userResized = 'false';
+            anchorFloatingInfoPanelToMap(panel);
+            persistPointDetailsLayout(panel);
+            return;
+        }
+        panel.dataset.userResized = 'true';
+        panel.dataset.userAnchored = 'true';
+        persistPointDetailsLayout(panel);
+    }
+
+    function upsertPointDetailsSizeControls(headerDom) {
+        if (!headerDom) return;
+        let wrap = document.getElementById('pointDetailsSizeControls');
+        const closeBtn = headerDom.querySelector('.info-panel-close');
+        if (!wrap) {
+            wrap = document.createElement('div');
+            wrap.id = 'pointDetailsSizeControls';
+            wrap.className = 'point-details-size-controls';
+            wrap.innerHTML = ''
+                + '<span class="point-details-size-btn" data-size-mode="wider" title="Make point details wider">+ Wider</span>'
+                + '<span class="point-details-size-btn" data-size-mode="taller" title="Make point details taller">+ Taller</span>'
+                + '<span class="point-details-size-btn" data-size-mode="reset" title="Reset point details size">Reset</span>';
+            wrap.onclick = (e) => {
+                e.stopPropagation();
+                const target = e.target && e.target.closest ? e.target.closest('[data-size-mode]') : null;
+                if (!target) return;
+                resizePointDetailsPanel(target.getAttribute('data-size-mode'));
+            };
+            if (closeBtn) headerDom.insertBefore(wrap, closeBtn);
+            else headerDom.appendChild(wrap);
+        }
+        return wrap;
+    }
+
     const doc = (s) => String(s || '').trim();
     const POINT_DETAILS_METRIC_INFO = {
         'UE category': doc(`1) Capability / feature context
@@ -14214,7 +14706,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 window.__activePointLog = getOwningLogForPoint(p, window.__activePointLog);
             }
 
-            if (panel.style.display !== 'block') panel.style.display = 'block';
+            if (panel.style.display !== 'flex') panel.style.display = 'flex';
+            if (panel.dataset.userAnchored !== 'true') {
+                const hadSavedLayout = applySavedPointDetailsLayout(panel);
+                if (!hadSavedLayout || panel.dataset.userAnchored !== 'true') {
+                    anchorFloatingInfoPanelToMap(panel);
+                }
+            }
 
             // 1. Set Stash for Toggle Re-render compatibility (Treat single as one-item array)
             // This ensures window.togglePointDetailsMode() works because it calls updateFloatingInfoPanelMulti(lastMultiHits)
@@ -14246,6 +14744,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 });
             });
             upsertPointDetailsAnalysisButton(headerDom);
+            upsertPointDetailsSizeControls(headerDom);
 
             // 3. Select Generator based on Mode
             const mode = window.pointDetailsMode || 'log'; // Default to log if undefined
@@ -15739,6 +16238,46 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
 
         const connectionTargets = [];
 
+        // --- Nemo Multi-RAT serving promotion ---
+        // If the Nemo Excel parser populated serving_3g / serving_lte / serving_2g sub-objects,
+        // promote the most data-rich one into parsed.serving so all downstream Point Details logic
+        // (which reads p.parsed.serving) gets correct values.
+        if (p.parsed && (p.parsed.serving_3g || p.parsed.serving_lte || p.parsed.serving_2g)) {
+            const scoreServing = (s) => {
+                if (!s) return 0;
+                return (Number.isFinite(parseFloat(s.rscp)) || Number.isFinite(parseFloat(s.rsrp)) ? 2 : 0) +
+                       (Number.isFinite(parseFloat(s.ecno)) || Number.isFinite(parseFloat(s.rsrq)) ? 2 : 0) +
+                       (Number.isFinite(parseFloat(s.freq)) || Number.isFinite(parseFloat(s.earfcn)) ? 1 : 0) +
+                       ((s.sc !== null && s.sc !== undefined) || (s.pci !== null && s.pci !== undefined) ? 1 : 0);
+            };
+            const candidates = [
+                { key: 'serving_lte', s: p.parsed.serving_lte, isLteHint: true },
+                { key: 'serving_3g',  s: p.parsed.serving_3g,  isLteHint: false },
+                { key: 'serving_2g',  s: p.parsed.serving_2g,  isLteHint: false }
+            ];
+            const best = candidates.reduce((a, b) => scoreServing(b.s) > scoreServing(a.s) ? b : a);
+            if (scoreServing(best.s) > 0) {
+                const bst = best.s;
+                if (!p.parsed.serving) p.parsed.serving = {};
+                // Merge: only overwrite values that are missing in the generic serving
+                const sv = p.parsed.serving;
+                if (!Number.isFinite(parseFloat(sv.rscp)) && !Number.isFinite(parseFloat(sv.rsrp))) {
+                    const levelVal = bst.rscp ?? bst.rsrp ?? null;
+                    if (levelVal !== null) sv.rscp = levelVal;
+                    if (best.isLteHint) sv.rsrp = levelVal;
+                }
+                if (!Number.isFinite(parseFloat(sv.ecno)) && !Number.isFinite(parseFloat(sv.rsrq))) {
+                    const qualVal = bst.ecno ?? bst.rsrq ?? null;
+                    if (qualVal !== null) { sv.ecno = qualVal; sv.rsrq = qualVal; }
+                }
+                if (!Number.isFinite(parseFloat(sv.freq))) {
+                    sv.freq = bst.freq ?? bst.earfcn ?? sv.freq;
+                }
+                if (sv.sc === undefined || sv.sc === null) sv.sc = bst.sc ?? bst.pci ?? sv.sc;
+                if (best.isLteHint) sv.rsrp = sv.rsrp ?? sv.rscp; // expose as LTE
+            }
+        }
+
         if (p.parsed && p.parsed.serving) {
             const s = p.parsed.serving;
             if (sName === 'Unknown') sName = s.cellName || s.name || p.cellName || sName;
@@ -15752,7 +16291,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             sRnc = s.rnc || p.rnc;
             sCid = s.cid || p.cid;
             sLac = s.lac || p.lac;
-            isLTE = s.rsrp !== undefined;
+            isLTE = s.rsrp !== undefined || Boolean(p.parsed?.serving_lte?.rsrp !== undefined || p.parsed?.serving_lte?.rsrq !== undefined);
         } else {
             // Flat fallback
             if (sName === 'Unknown') sName = p.cellName || p.siteName || sName;
@@ -16250,8 +16789,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 const sc = n.pci !== undefined ? n.pci : (n.sc !== undefined ? n.sc : undefined);
                 const freq = n.freq !== undefined ? n.freq : undefined;
 
-                // FILTER: Skip if this neighbor matches the serving cell
-                if (sc == sSC && freq == sFreq) return;
+                // FILTER: Skip only if we have concrete matching SC AND freq evidence for serving cell
+                const scDefined = sc !== undefined && sc !== null && sc !== '-';
+                const freqDefined = freq !== undefined && freq !== null && freq !== '-';
+                if (scDefined && freqDefined && sc == sSC && freq == sFreq) return;
 
                 rawNeighbors.push({
                     sc: sc !== undefined ? sc : (n.psc !== undefined ? n.psc : (normalizeBsicValue(n.bsic, true) || '-')),
@@ -16398,10 +16939,10 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     ? (Number.isFinite(Number(n && n.rxqual)) ? n.rxqual : '-')
                     : n && n.ecno);
             const freqDisplay = rat === 'UTRA'
-                ? (Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : (n && n.freq !== undefined ? n.freq : '-'))
+                ? (n && n.freq !== undefined ? n.freq : (Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : '-'))
                 : (rat === 'GERAN'
-                    ? (Number.isFinite(Number(n && n.freq)) ? n.freq : (Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : '-'))
-                    : (n && n.freq !== undefined ? n.freq : (Number.isFinite(Number(n && n.uarfcn)) ? n.uarfcn : (Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : '-'))));
+                    ? (n && n.freq !== undefined ? n.freq : (Number.isFinite(Number(n && n.arfcn)) ? n.arfcn : '-'))
+                    : (n && n.freq !== undefined ? n.freq : (Number.isFinite(Number(n && n.earfcn)) ? n.earfcn : '-')));
             return {
                 type: typeBase,
                 typeDisplay,
@@ -18148,6 +18689,22 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const a3ExactBest = a3Override?.best || ((a3ExactEvalObj && typeof a3ExactEvalObj === 'object' && a3ExactEvalObj.bestNeighbor && typeof a3ExactEvalObj.bestNeighbor === 'object')
             ? a3ExactEvalObj.bestNeighbor
             : null);
+        const nearestHoEventForPoint = (() => {
+            if (!isLTE || !activeLog) return null;
+            if (a3Override && (a3Override.classification || Number.isFinite(toInt(a3Override?.sourcePci)) || Number.isFinite(toInt(a3Override?.targetPci)))) {
+                return {
+                    classification: a3Override.classification,
+                    decisionSampleTs: a3Override?.sourceTime || '',
+                    sourceCell: { pci: a3Override.sourcePci },
+                    targetCell: { pci: a3Override.targetPci }
+                };
+            }
+            return findNearestLteHoEventForPoint(activeLog, p);
+        })();
+        const a3HoClassification = String(nearestHoEventForPoint?.classification || '').trim().toLowerCase();
+        const a3HoSourcePci = toInt(nearestHoEventForPoint?.sourceCell?.pci);
+        const a3HoTargetPci = toInt(nearestHoEventForPoint?.targetCell?.pci);
+        const a3HoTimeLabel = formatHoTs(nearestHoEventForPoint?.decisionSampleTs || nearestHoEventForPoint?.commandTs || nearestHoEventForPoint?.reportTs || nearestHoEventForPoint?.startTs);
         const a3ExactEnterSatisfied = Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter)) && Number.isFinite(toNumIfFinite(a3ExactBest && a3ExactBest.rhs))
             ? toNumIfFinite(a3ExactBest && a3ExactBest.lhsEnter) > toNumIfFinite(a3ExactBest && a3ExactBest.rhs)
             : null;
@@ -20128,6 +20685,15 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 '<button onclick="window.showA3EnteringExplanation()" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid ' + border + '; background:' + bg + '; color:' + color + '; font-weight:700; letter-spacing:0.02em; font-size:11px; line-height:1; cursor:pointer;">' + escapeHtml(a3ExactEnterSatisfied ? 'Meet criteria' : "Doesn't meet criteria") + '</button>' +
                 '</div>';
         })();
+        const lteHoBadgeHtml = (() => {
+            const classificationBadgeMeta = getLteHoClassificationBadgeMeta(a3HoClassification);
+            if (!classificationBadgeMeta || !Number.isFinite(a3HoSourcePci) || !Number.isFinite(a3HoTargetPci)) return '';
+            return '<div style="display:flex; align-items:center; gap:6px; margin-top:4px; font-size:11px; color:#cbd5e1; flex-wrap:wrap;">' +
+                '<span>LTE Intrafreq HO:</span>' +
+                '<span style="color:#94a3b8;">Pair (' + escapeHtml(String(a3HoSourcePci)) + ' -&gt; ' + escapeHtml(String(a3HoTargetPci)) + ')' + (a3HoTimeLabel !== 'N/A' ? ' | ' + escapeHtml(a3HoTimeLabel) : '') + '</span>' +
+                '<button onclick="window.showA3EnteringExplanation()" style="display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; border:1px solid ' + classificationBadgeMeta.border + '; background:' + classificationBadgeMeta.bg + '; color:' + classificationBadgeMeta.color + '; font-weight:700; letter-spacing:0.02em; font-size:11px; line-height:1; cursor:pointer;">' + escapeHtml(classificationBadgeMeta.label) + '</button>' +
+                '</div>';
+        })();
         const html = '<div class="log-view-container">' +
             '<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:5px;">' +
             '<div>' +
@@ -20137,6 +20703,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             '<div style="color:#aaa; font-size:11px; margin-top:2px;">Lat: ' + p.lat.toFixed(6) + '  Lng: ' + p.lng.toFixed(6) + '</div>' +
             mobileStateBadgeHtml +
             a3EnteringBadgeHtml +
+            lteHoBadgeHtml +
             '</div>' +
             '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">' +
             '<div style="color:#aaa; font-size:11px;">' + (p.time || '') + '</div>' +
@@ -20243,7 +20810,13 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
             if (!panel || !content) return;
             bindPointDetailsMetricInfoBadges(content);
 
-            if (panel.style.display !== 'block') panel.style.display = 'block';
+            if (panel.style.display !== 'flex') panel.style.display = 'flex';
+            if (panel.dataset.userAnchored !== 'true') {
+                const hadSavedLayout = applySavedPointDetailsLayout(panel);
+                if (!hadSavedLayout || panel.dataset.userAnchored !== 'true') {
+                    anchorFloatingInfoPanelToMap(panel);
+                }
+            }
             content.innerHTML = ''; // Clear
 
             // Inject Toggle Button into Header if not present
@@ -20269,6 +20842,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                 window.openDtLteEpisodeSettings();
             });
             upsertPointDetailsAnalysisButton(headerDom);
+            upsertPointDetailsSizeControls(headerDom);
 
             let allConnectionTargets = [];
             let aggregatedData = [];
@@ -24126,7 +24700,8 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
         const parseT = parseSessionTimeToMs;
         const markerCandidate = session?.markerTime || session?.markerTsIso ||
             (Number.isFinite(session?.umts?.snapshot?.windowEndTs) ? new Date(session.umts.snapshot.windowEndTs).toISOString() : null);
-        const targetTime = markerCandidate || (session.endTime || session.startTime);
+        // Nemo Excel sessions use endTs/startTs; native UMTS sessions use endTime/startTime
+        const targetTime = markerCandidate || session.endTime || session.endTs || session.startTime || session.startTs;
         const targetMs = parseT(targetTime);
         const dayMs = 24 * 3600 * 1000;
         const parseTodMsAny = (timeValue) => {
@@ -25686,8 +26261,29 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     'RRC & CS RELEASE CAUSE': []
                 };
                 const normMetricName = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                
+                const isNeighborPrefix = (n) => /^(?:lte|3g|2g)?[amdn]\d+/.test(n);
+                
+                const isNeighbor3GMetric = (metric) => {
+                    const m = String(metric || '');
+                    const n = normMetricName(m);
+                    return m.startsWith('3G ') && isNeighborPrefix(n);
+                };
+                const isNeighbor2GMetric = (metric) => {
+                    const m = String(metric || '');
+                    const n = normMetricName(m);
+                    return m.startsWith('2G ') && isNeighborPrefix(n);
+                };
+                const isNeighborLTEMetric = (metric) => {
+                    const m = String(metric || '');
+                    const n = normMetricName(m);
+                    return m.startsWith('LTE ') && isNeighborPrefix(n);
+                };
+
                 const isServing3GMetric = (metric) => {
-                    const n = normMetricName(metric);
+                    if (isNeighbor3GMetric(metric)) return false;
+                    const m = String(metric || '');
+                    const n = normMetricName(m);
                     return n === 'level' ||
                         n === 'rscp' ||
                         n === 'servingrscp' ||
@@ -25706,20 +26302,31 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         n === 'rnc' ||
                         n === 'servingrnc' ||
                         n === 'band' ||
-                        n === 'servingband';
+                        n === 'servingband' ||
+                        m.startsWith('3G ') || m.startsWith('3g ');
                 };
                 const isServing2GMetric = (metric) => {
-                    const n = normMetricName(metric);
+                    if (isNeighbor2GMetric(metric)) return false;
+                    const m = String(metric || '');
+                    const n = normMetricName(m);
                     return n.includes('rxlev') ||
                         n.includes('rxqual') ||
                         n.includes('bcch') ||
                         n.includes('bsic') ||
                         n === 'lac' ||
+                        n === 'arfcn' ||
+                        n === 'servingarfcn' ||
                         n === 'servinglac' ||
                         n === 'band' ||
                         n === 'servingband' ||
                         n === 'freq' ||
-                        n === 'servingfreq';
+                        n === 'servingfreq' ||
+                        m.startsWith('2G ') || m.startsWith('2g ');
+                };
+                const isServingLTEMetric = (metric) => {
+                    if (isNeighborLTEMetric(metric)) return false;
+                    const m = String(metric || '');
+                    return m.startsWith('LTE ') || m.startsWith('lte ');
                 };
                 const formatServingLabel3G = (metric) => {
                     const n = normMetricName(metric);
@@ -25834,7 +26441,7 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                         if (/^a\d+_/.test(low)) groups['Active Set'].push(m);
                         else if (/^m\d+_/.test(low)) groups['Monitored Set'].push(m);
                         else if (/^d\d+_/.test(low)) groups['Detected Set'].push(m);
-                        else if (isServing3GMetric(m) || isServing2GMetric(m)) groups['Serving set'].push(m);
+                        else if (isServingLTEMetric(m) || isServing3GMetric(m) || isServing2GMetric(m)) groups['Serving set'].push(m);
                         else if (m === 'UE Tx Power' || m === 'NodeB Tx Power' || m === 'TPC') groups['POWER CONTROL'].push(m);
                         else if (m === 'RRC State' || m === 'bler_dl' || m === 'bler_ul' || m === 'Throughput' || m === 'RSSI') groups['DT Analysis'].push(m);
                         else if (m === 'Active Set Size' || m === 'AS Event' || m === 'HO Command' || m === 'HO Completion') groups['HANDOVER & ACTIVE SET ANALYSIS'].push(m);
@@ -25878,9 +26485,34 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                     };
 
                     if (!log.trpRunId && !isLteNmfLog && groupName === 'Serving set') {
+                        const servingLTE = list.filter((metric) => isServingLTEMetric(metric));
                         const serving3G = list.filter((metric) => isServing3GMetric(metric));
                         const serving2G = list.filter((metric) => isServing2GMetric(metric));
-                        const renderServingSubset = (title, subset, formatter) => {
+                        
+                        const neighborLTE = list.filter((metric) => isNeighborLTEMetric(metric));
+                        const neighbor3G = list.filter((metric) => isNeighbor3GMetric(metric));
+                        const neighbor2G = list.filter((metric) => isNeighbor2GMetric(metric));
+
+                        const buildMetricList = (container, subset, formatter) => {
+                            if (!subset || !subset.length) {
+                                const empty = document.createElement('div');
+                                empty.textContent = 'N/A';
+                                empty.style.cssText = 'font-size:10px; color:#6b7280; margin:0 0 6px 2px;';
+                                container.appendChild(empty);
+                            } else {
+                                const seenLabels = new Set();
+                                subset.forEach((metric) => {
+                                    if (String(metric).toLowerCase() === 'analyze point') return;
+                                    const label = formatter(metric);
+                                    const key = String(label).toLowerCase();
+                                    if (seenLabels.has(key)) return;
+                                    seenLabels.add(key);
+                                    container.appendChild(addAction(label, metric));
+                                });
+                            }
+                        };
+
+                        const renderServingSubset = (title, subset, neighborSubset, neighborTitle, formatter) => {
                             const subWrap = document.createElement('div');
                             subWrap.style.marginBottom = '2px';
                             const subHead = document.createElement('div');
@@ -25896,28 +26528,42 @@ Meaning: categorized RLF cause distribution for KPI reporting and targeted optim
                                 subBody.style.display = hidden ? 'flex' : 'none';
                                 subHead.innerHTML = (hidden ? '▼ ' : '▶ ') + title;
                             };
-                            if (!subset.length) {
-                                const empty = document.createElement('div');
-                                empty.textContent = 'N/A';
-                                empty.style.cssText = 'font-size:10px; color:#6b7280; margin:0 0 6px 2px;';
-                                subBody.appendChild(empty);
-                            } else {
-                                const seenLabels = new Set();
-                                subset.forEach((metric) => {
-                                    if (String(metric).toLowerCase() === 'analyze point') return;
-                                    const label = formatter(metric);
-                                    const key = String(label).toLowerCase();
-                                    if (seenLabels.has(key)) return;
-                                    seenLabels.add(key);
-                                    subBody.appendChild(addAction(label, metric));
-                                });
+                            
+                            // Render pure serving metrics
+                            buildMetricList(subBody, subset, formatter);
+
+                            // Render nested neighbor folder if neighbors exist
+                            if (neighborSubset && neighborSubset.length > 0) {
+                                const nWrap = document.createElement('div');
+                                nWrap.style.marginBottom = '2px';
+                                nWrap.style.marginTop = '4px';
+                                const nHead = document.createElement('div');
+                                nHead.innerHTML = '▶ ' + neighborTitle;
+                                nHead.style.cssText = 'font-size:10px; color:#a78bfa; margin:2px 0 4px 0; font-weight:700; letter-spacing:0.4px; cursor:pointer; user-select:none;';
+                                const nBody = document.createElement('div');
+                                nBody.style.display = 'none';
+                                nBody.style.flexDirection = 'column';
+                                nBody.style.gap = '4px';
+                                nBody.style.paddingLeft = '6px';
+                                nBody.style.borderLeft = '1px dashed #4b5563';
+                                nHead.onclick = () => {
+                                    const hidden = nBody.style.display === 'none';
+                                    nBody.style.display = hidden ? 'flex' : 'none';
+                                    nHead.innerHTML = (hidden ? '▼ ' : '▶ ') + neighborTitle;
+                                };
+                                buildMetricList(nBody, neighborSubset, (m) => String(m).replace(/^(LTE|3G|2G)\s+/i, ''));
+                                nWrap.appendChild(nHead);
+                                nWrap.appendChild(nBody);
+                                subBody.appendChild(nWrap);
                             }
+
                             subWrap.appendChild(subHead);
                             subWrap.appendChild(subBody);
                             body.appendChild(subWrap);
                         };
-                        renderServingSubset('3G Serving set', serving3G, formatServingLabel3G);
-                        renderServingSubset('2G Serving set', serving2G, formatServingLabel2G);
+                        renderServingSubset('LTE Serving set', servingLTE, neighborLTE, 'LTE Neighbors set', (m) => String(m));
+                        renderServingSubset('3G Serving set', serving3G, neighbor3G, '3G Neighbors set', formatServingLabel3G);
+                        renderServingSubset('2G Serving set', serving2G, neighbor2G, '2G Neighbors set', formatServingLabel2G);
                     } else {
                         const seenLabels = new Set();
                         list.forEach(metric => {

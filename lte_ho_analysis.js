@@ -14,6 +14,9 @@
         SERVING_VERY_WEAK_RSRP_DBM: -108,
         POOR_RSRQ_DB: -12,
         CRITICAL_RSRQ_DB: -15,
+        TARGET_VISIBLE_LATE_MS: 1500,
+        TARGET_SAMPLING_RATIO_SPARSE: 0.15,
+        TARGET_LONGEST_GAP_MS_WARN: 1000,
         PING_PONG_TIME_MS: 30000,
         PING_PONG_DISTANCE_M: 500,
         REPORT_TO_COMMAND_WARN_MS: 1000,
@@ -27,6 +30,8 @@
         RECONSTRUCTION_WINDOW_AFTER_MS: 5000,
         MAX_SAMPLE_GAP_MS: 1500,
         DEFAULT_A3_OFFSET_DB: 3,
+        DEFAULT_A5_SERVING_THRESHOLD_DBM: -105,
+        DEFAULT_A5_NEIGHBOR_THRESHOLD_DBM: -100,
         STABLE_DWELL_MS: 3000,
         WRONG_TARGET_ALT_MARGIN_DB: 2,
         MISSING_REPORT_LOOKBACK_MS: 4000,
@@ -45,12 +50,20 @@
         servingRsrp: ['serving_rsrp', 'rsrp', 'Serving RSRP', 'RSRP'],
         servingRsrq: ['serving_rsrq', 'rsrq', 'Serving RSRQ', 'RSRQ'],
         servingSinr: ['serving_sinr', 'sinr', 'Serving SINR', 'SINR'],
+        servingBand: ['serving_band', 'band', 'Serving Band', 'Band'],
         a3Offset: ['a3_offset', 'A3 offset', 'A3 Offset', 'rrc_recfg_a3_offset_db'],
+        a2Threshold: ['a2_threshold', 'A2 threshold', 'A2 Threshold', 'rrc_recfg_a2_threshold_dbm'],
+        a4Threshold: ['a4_threshold', 'A4 threshold', 'A4 Threshold', 'rrc_recfg_a4_threshold_dbm'],
+        a5Threshold1: ['a5_threshold1', 'A5 serving threshold', 'A5 Threshold1', 'rrc_recfg_a5_serving_threshold_est_dbm'],
+        a5Threshold2: ['a5_threshold2', 'A5 neighbor threshold', 'A5 Threshold2', 'rrc_recfg_a5_neighbor_threshold_est_dbm'],
         tttMs: ['ttt_ms', 'HO TTT', 'Time-to-Trigger', 'Time To Trigger', 'rrc_recfg_ttt_ms'],
         hysteresisDb: ['hysteresis', 'HO hysteresis', 'Hysteresis', 'rrc_recfg_hysteresis_db'],
         servingCio: ['source_cio', 'serving_cio', 'Serving CIO', 'CIO serving'],
         targetCio: ['target_cio', 'Target CIO', 'CIO target'],
+        measurementGapConfigured: ['measurement_gap_configured', 'Measurement Gap Configured', 'measurement_gap'],
         l3FilterCoeff: ['l3_filter_coefficient', 'L3 Filter Coefficient', 'L3 filter coefficient'],
+        sessionActive: ['session_active', 'Session Active', 'Data Session Active'],
+        volteCallActive: ['volte_call_active', 'VoLTE Call Active', 'IMS Call Active'],
         eventType: ['event_type', 'event', 'Event', 'message_type', 'message', 'Message', 'type', 'Type'],
         eventSubtype: ['subtype', 'Subtype', 'kind', 'Kind']
     };
@@ -239,6 +252,9 @@
             eci: hasValue(valueFromObject(rawPoint, mapping.servingEci) ?? valueFromObject(props, mapping.servingEci))
                 ? String(valueFromObject(rawPoint, mapping.servingEci) ?? valueFromObject(props, mapping.servingEci))
                 : undefined,
+            band: hasValue(valueFromObject(rawPoint, mapping.servingBand) ?? valueFromObject(props, mapping.servingBand))
+                ? String(valueFromObject(rawPoint, mapping.servingBand) ?? valueFromObject(props, mapping.servingBand))
+                : undefined,
             name: hasValue(
                 valueFromObject(rawPoint, mapping.servingCellName)
                 ?? valueFromObject(props, mapping.servingCellName)
@@ -261,12 +277,21 @@
             events.push(normalizeEvent(rawPoint, mapping));
         }
         const config = {
+            a2Threshold: toFiniteNumber(valueFromObject(rawPoint, mapping.a2Threshold) ?? valueFromObject(props, mapping.a2Threshold)),
             a3Offset: toFiniteNumber(valueFromObject(rawPoint, mapping.a3Offset) ?? valueFromObject(props, mapping.a3Offset)),
+            a4Threshold: toFiniteNumber(valueFromObject(rawPoint, mapping.a4Threshold) ?? valueFromObject(props, mapping.a4Threshold)),
+            a5Threshold1: toFiniteNumber(valueFromObject(rawPoint, mapping.a5Threshold1) ?? valueFromObject(props, mapping.a5Threshold1)),
+            a5Threshold2: toFiniteNumber(valueFromObject(rawPoint, mapping.a5Threshold2) ?? valueFromObject(props, mapping.a5Threshold2)),
             tttMs: toFiniteNumber(valueFromObject(rawPoint, mapping.tttMs) ?? valueFromObject(props, mapping.tttMs)),
             hysteresisDb: toFiniteNumber(valueFromObject(rawPoint, mapping.hysteresisDb) ?? valueFromObject(props, mapping.hysteresisDb)),
             servingCio: toFiniteNumber(valueFromObject(rawPoint, mapping.servingCio) ?? valueFromObject(props, mapping.servingCio)),
             targetCio: toFiniteNumber(valueFromObject(rawPoint, mapping.targetCio) ?? valueFromObject(props, mapping.targetCio)),
+            measurementGapConfigured: !!(valueFromObject(rawPoint, mapping.measurementGapConfigured) ?? valueFromObject(props, mapping.measurementGapConfigured)),
             l3FilterCoeff: toFiniteNumber(valueFromObject(rawPoint, mapping.l3FilterCoeff) ?? valueFromObject(props, mapping.l3FilterCoeff))
+        };
+        const service = {
+            sessionActive: !!(valueFromObject(rawPoint, mapping.sessionActive) ?? valueFromObject(props, mapping.sessionActive)),
+            volteCallActive: !!(valueFromObject(rawPoint, mapping.volteCallActive) ?? valueFromObject(props, mapping.volteCallActive))
         };
         return {
             ts,
@@ -277,6 +302,7 @@
             neighbors,
             events,
             config,
+            service,
             raw: rawPoint
         };
     }
@@ -440,6 +466,11 @@
         return Number(sourceEarfcn) === Number(targetEarfcn);
     }
 
+    function isInterFreq(sourceEarfcn, targetEarfcn) {
+        if (!Number.isFinite(sourceEarfcn) || !Number.isFinite(targetEarfcn)) return null;
+        return Number(sourceEarfcn) !== Number(targetEarfcn);
+    }
+
     function interpolateNearestSample(points, ts, maxGapMs) {
         let best = null;
         for (let i = 0; i < points.length; i++) {
@@ -505,6 +536,90 @@
             return Number.isFinite(n.rsrp);
         }).sort((a, b) => Number(b.rsrp) - Number(a.rsrp));
         return filtered[0] ? Object.assign({ ts: sample.ts }, filtered[0]) : null;
+    }
+
+    function getBestNeighborOnFrequencyAt(points, ts, earfcn, excludePci, maxGapMs) {
+        return getBestSameFreqNeighborAt(points, ts, earfcn, excludePci, maxGapMs);
+    }
+
+    function getNeighborsAt(points, ts, maxGapMs) {
+        const sample = interpolateNearestSample(points, ts, maxGapMs);
+        return sample && Array.isArray(sample.neighbors) ? sample.neighbors : [];
+    }
+
+    function getTargetFrequencyVisibility(windowPoints, targetEarfcn, chosenTarget) {
+        let firstVisibleTs = null;
+        let firstChosenVisibleTs = null;
+        let firstBetterTs = null;
+        let significantBetterTs = null;
+        let visibleCount = 0;
+        let chosenCount = 0;
+        let longestGapMs = null;
+        let prevVisibleTs = null;
+        const visibilitySeries = [];
+        windowPoints.forEach((p) => {
+            const neighbors = Array.isArray(p.neighbors) ? p.neighbors : [];
+            const targetNeighbors = neighbors.filter((n) => Number.isFinite(targetEarfcn) ? Number(n.earfcn) === Number(targetEarfcn) : Number.isFinite(n.earfcn));
+            if (targetNeighbors.length) {
+                visibleCount += 1;
+                if (!Number.isFinite(firstVisibleTs)) firstVisibleTs = p.ts;
+                if (Number.isFinite(prevVisibleTs)) {
+                    const gap = p.ts - prevVisibleTs;
+                    if (Number.isFinite(gap)) longestGapMs = !Number.isFinite(longestGapMs) ? gap : Math.max(longestGapMs, gap);
+                }
+                prevVisibleTs = p.ts;
+            }
+            const chosen = targetNeighbors.find((n) => {
+                if (Number.isFinite(chosenTarget?.pci) && Number(n.pci) !== Number(chosenTarget.pci)) return false;
+                if (hasValue(chosenTarget?.eci) && hasValue(n?.eci) && String(n.eci) !== String(chosenTarget.eci)) return false;
+                return true;
+            });
+            const bestTarget = targetNeighbors
+                .filter((n) => Number.isFinite(n.rsrp))
+                .sort((a, b) => Number(b.rsrp) - Number(a.rsrp))[0] || null;
+            if (chosen && Number.isFinite(chosen.rsrp)) {
+                chosenCount += 1;
+                if (!Number.isFinite(firstChosenVisibleTs)) firstChosenVisibleTs = p.ts;
+                const servingRsrp = toFiniteNumber(p.servingCell?.rsrp);
+                const delta = Number.isFinite(servingRsrp) ? chosen.rsrp - servingRsrp : null;
+                if (!Number.isFinite(firstBetterTs) && Number.isFinite(delta) && delta > 0) firstBetterTs = p.ts;
+            }
+            if (!Number.isFinite(significantBetterTs) && bestTarget && Number.isFinite(bestTarget.rsrp) && Number.isFinite(toFiniteNumber(p.servingCell?.rsrp))) {
+                const delta = bestTarget.rsrp - toFiniteNumber(p.servingCell?.rsrp);
+                if (delta >= 4) significantBetterTs = p.ts;
+            }
+            visibilitySeries.push({
+                ts: p.ts,
+                visible: targetNeighbors.length > 0,
+                chosenVisible: !!chosen,
+                bestTargetRsrp: toFiniteNumber(bestTarget?.rsrp)
+            });
+        });
+        return {
+            firstVisibleTs,
+            firstChosenVisibleTs,
+            firstBetterTs,
+            significantBetterTs,
+            visibleCount,
+            chosenCount,
+            longestGapMs,
+            visibilityRatio: windowPoints.length ? (visibleCount / windowPoints.length) : null,
+            chosenVisibilityRatio: windowPoints.length ? (chosenCount / windowPoints.length) : null,
+            series: visibilitySeries
+        };
+    }
+
+    function computeMeasurementSparsity(windowPoints, targetEarfcn, chosenTarget, cfg) {
+        const visibility = getTargetFrequencyVisibility(windowPoints, targetEarfcn, chosenTarget);
+        return {
+            targetFrequencySampleCount: visibility.visibleCount,
+            chosenTargetSampleCount: visibility.chosenCount,
+            targetVisibilityRatio: visibility.visibilityRatio,
+            chosenTargetVisibilityRatio: visibility.chosenVisibilityRatio,
+            targetLongestGapMs: visibility.longestGapMs,
+            sparse: Number.isFinite(visibility.visibilityRatio) ? visibility.visibilityRatio < (cfg?.TARGET_SAMPLING_RATIO_SPARSE ?? DEFAULT_CONFIG.TARGET_SAMPLING_RATIO_SPARSE) : null,
+            visibility
+        };
     }
 
     function computeEffectiveDelta(servingRsrp, targetRsrp, servingCio, targetCio) {
@@ -671,7 +786,7 @@
         const targetEci = hasValue(event?.targetCell?.eci) ? String(event.targetCell.eci).trim() : '';
         const sameDisplayedPciPair = Number.isFinite(sourcePci) && Number.isFinite(targetPci) && sourcePci === targetPci;
         const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
-        const allowWrongTargetClassification = !sameDisplayedPciPair || distinctCellIdentityProof;
+        const allowWrongTargetClassification = !sameDisplayedPciPair;
         let classification = 'successful';
         let confidence = 0.55;
         const exactA3Best = context.exactA3 && context.exactA3.bestNeighbor ? context.exactA3.bestNeighbor : null;
@@ -732,6 +847,143 @@
         };
     }
 
+    function buildInterFreqRecommendedActions(classification, event, cfg) {
+        const actions = [];
+        if (classification === 'too_late') {
+            actions.push('Review inter-frequency trigger timing and reduce conservatism.');
+            actions.push('Check A5/A3/A2 thresholds and shorten TTT if appropriate.');
+            actions.push('Review source-cell overshooting coverage.');
+        } else if (classification === 'too_early') {
+            actions.push('Increase inter-frequency margin or TTT to reduce premature layer changes.');
+            actions.push('Review CIO bias toward the target layer.');
+        } else if (classification === 'ping_pong') {
+            actions.push('Increase margin or TTT to reduce layer bouncing.');
+            actions.push('Review overlap and boundary tuning between source and target layers.');
+        } else if (classification === 'wrong_target') {
+            actions.push('Review target-layer ranking, CIO, and neighbor definitions.');
+            actions.push('Inspect alternative target-frequency candidates around HO command time.');
+        } else if (classification === 'execution_failure') {
+            actions.push('Investigate target accessibility and execution signaling.');
+            actions.push('Inspect target coverage and random-access behavior during HO execution.');
+        } else if (classification === 'measurement_limited') {
+            actions.push('Verify measurement-gap configuration and inter-frequency measurement opportunity.');
+            actions.push('Review whether the target layer becomes visible too late geographically.');
+        } else if (classification === 'missing_report_or_config_issue') {
+            actions.push('Check inter-frequency measurement/report configuration.');
+            actions.push('Review A2/A4/A5 triggers and measurement-gap provisioning.');
+        }
+        if (!Number.isFinite(event.config?.servingCio) || !Number.isFinite(event.config?.targetCio)) {
+            actions.push('CIO values were unavailable; validate source/target CIO settings.');
+        }
+        if (event.config?.measurementGapConfigured === false) {
+            actions.push('Measurement gap appears unavailable; confirm inter-frequency gap configuration.');
+        }
+        return Array.from(new Set(actions));
+    }
+
+    function classifyInterFreqHandover(event, context, cfg) {
+        const reasons = [];
+        const assumptions = [];
+        const thresholdsUsed = {
+            SIGNIFICANT_DELTA_DB: cfg.SIGNIFICANT_DELTA_DB,
+            MARGINAL_DELTA_DB: cfg.MARGINAL_DELTA_DB,
+            SERVING_WEAK_RSRP_DBM: cfg.SERVING_WEAK_RSRP_DBM,
+            SERVING_VERY_WEAK_RSRP_DBM: cfg.SERVING_VERY_WEAK_RSRP_DBM,
+            TARGET_VISIBLE_LATE_MS: cfg.TARGET_VISIBLE_LATE_MS,
+            TARGET_SAMPLING_RATIO_SPARSE: cfg.TARGET_SAMPLING_RATIO_SPARSE,
+            TARGET_LONGEST_GAP_MS_WARN: cfg.TARGET_LONGEST_GAP_MS_WARN
+        };
+        if (!Number.isFinite(event.config?.servingCio) || !Number.isFinite(event.config?.targetCio)) assumptions.push('CIO not available; assumed zero.');
+        if (!Number.isFinite(event.config?.a5Threshold1) || !Number.isFinite(event.config?.a5Threshold2)) assumptions.push('Exact A5 thresholds not available; heuristic trigger approximation used.');
+        if (event.config?.measurementGapConfigured === false) assumptions.push('Measurement gap not explicitly configured in the source data.');
+
+        const m = event.metrics || {};
+        const visibility = event.targetFrequencyVisibility || {};
+        const sparsity = event.measurementSparsity || {};
+        let label = 'unknown';
+        let confidence = 0.5;
+
+        if (context.pingPongPartner) {
+            label = 'ping_pong';
+            confidence = 0.92;
+            reasons.push(`Return toward the original layer/cell happened within ${context.pingPongPartner.deltaMs} ms.`);
+        } else if (event.commandTs && !event.completeTs && event.failTs) {
+            label = 'execution_failure';
+            confidence = 0.9;
+            reasons.push('HO command exists but completion is missing while a failure marker appears in the execution window.');
+        } else if (
+            Number.isFinite(m.targetVisibleToCommandMs) &&
+            m.targetVisibleToCommandMs <= cfg.TARGET_VISIBLE_LATE_MS &&
+            (sparsity.targetVisibilityRatio === null || sparsity.targetVisibilityRatio < cfg.TARGET_SAMPLING_RATIO_SPARSE) &&
+            Number.isFinite(m.servingRsrpAtCommandDbm) &&
+            m.servingRsrpAtCommandDbm <= cfg.SERVING_WEAK_RSRP_DBM
+        ) {
+            label = 'measurement_limited';
+            confidence = 0.9;
+            reasons.push(`Target frequency first became visible only ${m.targetVisibleToCommandMs} ms before the HO command.`);
+            if (Number.isFinite(sparsity.targetVisibilityRatio)) reasons.push(`Target-frequency visibility ratio in the pre-HO window was ${(sparsity.targetVisibilityRatio * 100).toFixed(0)}%.`);
+            reasons.push(`Serving RSRP at command time had already degraded to ${m.servingRsrpAtCommandDbm.toFixed(1)} dBm.`);
+        } else if (
+            !event.reportTs && !event.commandTs &&
+            Number.isFinite(m.targetVisibleToFailMs) &&
+            Number.isFinite(m.servingRsrpAtFailureDbm) &&
+            m.servingRsrpAtFailureDbm <= cfg.SERVING_WEAK_RSRP_DBM
+        ) {
+            label = 'missing_report_or_config_issue';
+            confidence = 0.82;
+            reasons.push('Target frequency became visible before collapse but no measurement report or HO command was found.');
+            reasons.push(`Serving RSRP had already degraded to ${m.servingRsrpAtFailureDbm.toFixed(1)} dBm by failure time.`);
+        } else if (
+            Number.isFinite(m.effectiveDeltaAtCommandDb) &&
+            m.effectiveDeltaAtCommandDb >= cfg.SIGNIFICANT_DELTA_DB &&
+            Number.isFinite(m.servingRsrpAtCommandDbm) &&
+            m.servingRsrpAtCommandDbm <= cfg.SERVING_WEAK_RSRP_DBM
+        ) {
+            label = 'too_late';
+            confidence = 0.86;
+            reasons.push(`Target frequency had a ${m.effectiveDeltaAtCommandDb.toFixed(1)} dB advantage by HO command time.`);
+            reasons.push(`Serving RSRP at command time was already ${m.servingRsrpAtCommandDbm.toFixed(1)} dBm.`);
+            if (Number.isFinite(m.commandToFailMs)) reasons.push(`Failure followed ${m.commandToFailMs} ms after the HO command.`);
+        } else if (
+            event.completeTs &&
+            Number.isFinite(m.effectiveDeltaAtCommandDb) &&
+            m.effectiveDeltaAtCommandDb <= cfg.MARGINAL_DELTA_DB &&
+            Number.isFinite(m.servingRsrpAtCommandDbm) &&
+            m.servingRsrpAtCommandDbm > cfg.SERVING_WEAK_RSRP_DBM
+        ) {
+            label = 'too_early';
+            confidence = 0.78;
+            reasons.push(`Target advantage at command time was only ${m.effectiveDeltaAtCommandDb.toFixed(1)} dB while serving remained acceptable at ${m.servingRsrpAtCommandDbm.toFixed(1)} dBm.`);
+        } else if (
+            event.completeTs &&
+            context.bestAlternative &&
+            Number.isFinite(context.bestAlternative.bestDeltaDb) &&
+            Number.isFinite(m.effectiveDeltaAtCommandDb) &&
+            context.bestAlternative.bestDeltaDb - m.effectiveDeltaAtCommandDb >= cfg.WRONG_TARGET_ALT_MARGIN_DB
+        ) {
+            label = 'wrong_target';
+            confidence = 0.82;
+            reasons.push(`Another target-frequency candidate exceeded the chosen target by ${(context.bestAlternative.bestDeltaDb - m.effectiveDeltaAtCommandDb).toFixed(1)} dB at the command decision.`);
+        } else if (event.completeTs && !event.failTs) {
+            label = 'successful';
+            confidence = 0.74;
+            reasons.push('Inter-frequency HO command and completion were both found with no failure marker in the execution window.');
+        }
+
+        if (Number.isFinite(sparsity.targetLongestGapMs) && sparsity.targetLongestGapMs >= cfg.TARGET_LONGEST_GAP_MS_WARN) {
+            reasons.push(`Target-frequency measurement gaps reached ${Math.round(sparsity.targetLongestGapMs)} ms in the reconstruction window.`);
+        }
+        if (!reasons.length) reasons.push('Inter-frequency classification fell back to best-effort heuristic due to incomplete radio/signaling evidence.');
+        return {
+            label,
+            confidence,
+            reasons,
+            thresholdsUsed,
+            assumptions,
+            recommendedActions: buildInterFreqRecommendedActions(label, event, cfg)
+        };
+    }
+
     function correlateMobilityEvents(normalized, transitions, cfg) {
         const points = normalized.points;
         const events = normalized.events;
@@ -767,6 +1019,13 @@
                 eci: targetCell.eci,
                 name: targetCell.name
             };
+            const sameDisplayedPciPair = Number.isFinite(toInt(effectiveSource.pci)) && Number.isFinite(toInt(effectiveTarget.pci)) && toInt(effectiveSource.pci) === toInt(effectiveTarget.pci);
+            const sourceEci = hasValue(effectiveSource.eci) ? String(effectiveSource.eci).trim() : '';
+            const targetEci = hasValue(effectiveTarget.eci) ? String(effectiveTarget.eci).trim() : '';
+            const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
+            if (sameDisplayedPciPair) {
+                return;
+            }
             const isIntra = isIntraFreq(effectiveSource.earfcn, effectiveTarget.earfcn);
             const eventConfig = {
                 a3Offset: Number.isFinite(commandCtx.a3Offset) ? commandCtx.a3Offset : (Number.isFinite(transition.sourcePoint?.config?.a3Offset) ? transition.sourcePoint.config.a3Offset : null),
@@ -940,16 +1199,215 @@
         return events;
     }
 
+    function enrichInterFreqHandoverEvents(events, normalized, cfg) {
+        const points = normalized.points;
+        events.forEach((event) => {
+            const anchorTs = Number.isFinite(event.commandTs) ? event.commandTs : (Number.isFinite(event.startTs) ? event.startTs : event.reportTs);
+            const windowStart = anchorTs - Math.max(cfg.RECONSTRUCTION_WINDOW_BEFORE_MS, 8000);
+            const windowEnd = anchorTs + cfg.RECONSTRUCTION_WINDOW_AFTER_MS;
+            const windowPoints = points.filter((p) => p.ts >= windowStart && p.ts <= windowEnd);
+            const sourcePointTs = Number(event.rawRefs?.transition?.sourcePoint?.ts);
+            const decisionTs = Number.isFinite(sourcePointTs) ? sourcePointTs : (event.reportTs || event.commandTs || event.startTs);
+            const decisionSampleSource = Number.isFinite(sourcePointTs)
+                ? 'pre-HO source sample'
+                : (Number.isFinite(event.reportTs) ? 'report sample' : (Number.isFinite(event.commandTs) ? 'command sample' : 'fallback transition sample'));
+            const servingAtCommand = interpolateNearestSampleAtOrBefore(points, decisionTs, cfg.MAX_SAMPLE_GAP_MS) || getServingSampleAt(points, decisionTs, cfg.MAX_SAMPLE_GAP_MS);
+            const targetAtCommand = getTargetSampleAt(points, decisionTs, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+            const reportServing = getServingSampleAt(points, event.reportTs || decisionTs, cfg.MAX_SAMPLE_GAP_MS);
+            const reportTarget = getTargetSampleAt(points, event.reportTs || decisionTs, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+            const bestTargetFreqNeighborAtCommand = getBestNeighborOnFrequencyAt(points, decisionTs, event.targetEarfcn, event.targetCell?.pci, cfg.MAX_SAMPLE_GAP_MS);
+            const visibility = getTargetFrequencyVisibility(windowPoints, event.targetEarfcn, event.targetCell);
+            const sparsity = computeMeasurementSparsity(windowPoints, event.targetEarfcn, event.targetCell, cfg);
+            const servingWeakTs = estimateFirstTs(
+                windowPoints.map((p) => ({ ts: p.ts, rsrp: toFiniteNumber(p.servingCell?.rsrp) })).filter((x) => Number.isFinite(x.rsrp)),
+                (x) => x.rsrp <= cfg.SERVING_WEAK_RSRP_DBM,
+                0
+            );
+            const servingCriticalTs = estimateFirstTs(
+                windowPoints.map((p) => ({ ts: p.ts, rsrp: toFiniteNumber(p.servingCell?.rsrp) })).filter((x) => Number.isFinite(x.rsrp)),
+                (x) => x.rsrp <= cfg.SERVING_VERY_WEAK_RSRP_DBM,
+                0
+            );
+            const bestAlternative = findBestAlternativeNeighbor(
+                { points: windowPoints },
+                event.targetEarfcn,
+                event.targetCell,
+                null,
+                event.config,
+                decisionTs,
+                cfg
+            );
+            const postHoServing = getServingSampleAt(points, (event.completeTs || event.commandTs || event.startTs) + Math.min(cfg.STABLE_DWELL_MS, cfg.RECONSTRUCTION_WINDOW_AFTER_MS), cfg.MAX_SAMPLE_GAP_MS);
+            const postHoGain = Number.isFinite(postHoServing?.servingCell?.rsrp) && Number.isFinite(servingAtCommand?.servingCell?.rsrp)
+                ? postHoServing.servingCell.rsrp - servingAtCommand.servingCell.rsrp
+                : null;
+
+            event.isInterFreq = isInterFreq(event.sourceEarfcn, event.targetEarfcn);
+            event.targetVisibleTs = visibility.firstVisibleTs;
+            event.targetChosenVisibleTs = visibility.firstChosenVisibleTs;
+            event.targetBetterTs = visibility.firstBetterTs;
+            event.triggerLikeTs = estimateFirstTs(
+                windowPoints.map((p) => {
+                    const target = getTargetSampleAt([p], p.ts, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+                    return {
+                        ts: p.ts,
+                        effectiveDeltaDb: computeEffectiveDelta(p.servingCell?.rsrp, target?.rsrp, event.config?.servingCio, event.config?.targetCio)
+                    };
+                }).filter((x) => Number.isFinite(x.effectiveDeltaDb)),
+                (x) => x.effectiveDeltaDb >= cfg.SIGNIFICANT_DELTA_DB,
+                cfg.SUSTAINED_STRONGER_MS
+            );
+            event.decisionSampleTs = Number.isFinite(decisionTs) ? decisionTs : null;
+            event.decisionSampleSource = decisionSampleSource;
+            event.servingMetricsAtCommand = servingAtCommand ? {
+                rsrp: toFiniteNumber(servingAtCommand.servingCell?.rsrp),
+                rsrq: toFiniteNumber(servingAtCommand.servingCell?.rsrq),
+                sinr: toFiniteNumber(servingAtCommand.servingCell?.sinr)
+            } : null;
+            event.targetMetricsAtCommand = targetAtCommand ? {
+                rsrp: toFiniteNumber(targetAtCommand.rsrp),
+                rsrq: toFiniteNumber(targetAtCommand.rsrq),
+                sinr: toFiniteNumber(targetAtCommand.sinr)
+            } : null;
+            event.bestTargetFreqNeighborAtCommand = bestTargetFreqNeighborAtCommand ? shallowClone(bestTargetFreqNeighborAtCommand) : null;
+            event.alternativeTargetCandidateAtCommand = bestAlternative ? shallowClone(bestAlternative) : null;
+            event.targetFrequencyVisibility = visibility;
+            event.measurementSparsity = sparsity;
+            event.effectiveDeltaAtCommand = computeEffectiveDelta(event.servingMetricsAtCommand?.rsrp, event.targetMetricsAtCommand?.rsrp, event.config.servingCio, event.config.targetCio);
+            event.effectiveDeltaAtReport = computeEffectiveDelta(reportServing?.servingCell?.rsrp, reportTarget?.rsrp, event.config.servingCio, event.config.targetCio);
+            event.metrics = {
+                sourceEarfcn: event.sourceEarfcn,
+                targetEarfcn: event.targetEarfcn,
+                servingRsrpAtCommandDbm: toFiniteNumber(event.servingMetricsAtCommand?.rsrp),
+                servingRsrqAtCommandDb: toFiniteNumber(event.servingMetricsAtCommand?.rsrq),
+                targetRsrpAtCommandDbm: toFiniteNumber(event.targetMetricsAtCommand?.rsrp),
+                targetRsrqAtCommandDb: toFiniteNumber(event.targetMetricsAtCommand?.rsrq),
+                bestTargetFreqDeltaAtCommandDb: computeEffectiveDelta(event.servingMetricsAtCommand?.rsrp, bestTargetFreqNeighborAtCommand?.rsrp, event.config.servingCio, 0),
+                effectiveDeltaAtCommandDb: event.effectiveDeltaAtCommand,
+                effectiveDeltaAtReportDb: event.effectiveDeltaAtReport,
+                targetVisibilityLeadMs: Number.isFinite(event.commandTs) && Number.isFinite(event.targetVisibleTs) ? event.commandTs - event.targetVisibleTs : null,
+                targetBetterLeadMs: Number.isFinite(event.commandTs) && Number.isFinite(event.targetBetterTs) ? event.commandTs - event.targetBetterTs : null,
+                targetVisibleToReportMs: Number.isFinite(event.reportTs) && Number.isFinite(event.targetVisibleTs) ? event.reportTs - event.targetVisibleTs : null,
+                targetVisibleToCommandMs: Number.isFinite(event.commandTs) && Number.isFinite(event.targetVisibleTs) ? event.commandTs - event.targetVisibleTs : null,
+                targetBetterToReportMs: Number.isFinite(event.reportTs) && Number.isFinite(event.targetBetterTs) ? event.reportTs - event.targetBetterTs : null,
+                triggerLikeToReportMs: Number.isFinite(event.reportTs) && Number.isFinite(event.triggerLikeTs) ? event.reportTs - event.triggerLikeTs : null,
+                reportToCommandMs: Number.isFinite(event.reportTs) && Number.isFinite(event.commandTs) ? event.commandTs - event.reportTs : null,
+                commandToCompleteMs: Number.isFinite(event.commandTs) && Number.isFinite(event.completeTs) ? event.completeTs - event.commandTs : null,
+                commandToFailMs: Number.isFinite(event.commandTs) && Number.isFinite(event.failTs) ? event.failTs - event.commandTs : null,
+                servingWeakToTargetVisibleMs: Number.isFinite(servingWeakTs) && Number.isFinite(event.targetVisibleTs) ? event.targetVisibleTs - servingWeakTs : null,
+                servingRsrpAtFailureDbm: Number.isFinite(event.failTs) ? toFiniteNumber(getServingSampleAt(points, event.failTs, cfg.MAX_SAMPLE_GAP_MS)?.servingCell?.rsrp) : null,
+                targetSamplingRatio: sparsity.targetVisibilityRatio,
+                targetLongestGapMs: sparsity.targetLongestGapMs,
+                postHoGainDb: postHoGain
+            };
+            event.T_servingWeak = servingWeakTs;
+            event.T_servingCritical = servingCriticalTs;
+            event.chart = {
+                startTs: windowStart,
+                endTs: windowEnd,
+                series: {
+                    servingRsrp: windowPoints.map((p) => ({ ts: p.ts, value: toFiniteNumber(p.servingCell?.rsrp) })).filter((x) => Number.isFinite(x.value)),
+                    servingRsrq: windowPoints.map((p) => ({ ts: p.ts, value: toFiniteNumber(p.servingCell?.rsrq) })).filter((x) => Number.isFinite(x.value)),
+                    targetRsrp: windowPoints.map((p) => {
+                        const t = getTargetSampleAt([p], p.ts, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+                        return { ts: p.ts, value: toFiniteNumber(t?.rsrp) };
+                    }).filter((x) => Number.isFinite(x.value)),
+                    targetRsrq: windowPoints.map((p) => {
+                        const t = getTargetSampleAt([p], p.ts, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+                        return { ts: p.ts, value: toFiniteNumber(t?.rsrq) };
+                    }).filter((x) => Number.isFinite(x.value)),
+                    bestTargetFreqNeighborRsrp: windowPoints.map((p) => {
+                        const n = getBestNeighborOnFrequencyAt([p], p.ts, event.targetEarfcn, event.targetCell?.pci, cfg.MAX_SAMPLE_GAP_MS);
+                        return { ts: p.ts, value: toFiniteNumber(n?.rsrp), pci: toInt(n?.pci) };
+                    }).filter((x) => Number.isFinite(x.value)),
+                    effectiveDelta: windowPoints.map((p) => {
+                        const t = getTargetSampleAt([p], p.ts, event.targetCell, cfg.MAX_SAMPLE_GAP_MS);
+                        return { ts: p.ts, value: computeEffectiveDelta(p.servingCell?.rsrp, t?.rsrp, event.config?.servingCio, event.config?.targetCio) };
+                    }).filter((x) => Number.isFinite(x.value))
+                },
+                markers: [
+                    { key: 'serving_weak', ts: servingWeakTs },
+                    { key: 'target_visible', ts: event.targetVisibleTs },
+                    { key: 'target_better', ts: event.targetBetterTs },
+                    { key: 'trigger_like', ts: event.triggerLikeTs },
+                    { key: 'report', ts: event.reportTs },
+                    { key: 'command', ts: event.commandTs },
+                    { key: 'access', ts: event.accessTs },
+                    { key: 'complete', ts: event.completeTs },
+                    { key: 'fail', ts: event.failTs }
+                ].filter((m) => Number.isFinite(m.ts))
+            };
+            event.map = {
+                targetVisiblePoint: buildMarkerPoint(windowPoints.find((p) => p.ts === event.targetVisibleTs)),
+                reportPoint: buildMarkerPoint(event.rawRefs?.reportEvent),
+                commandPoint: buildMarkerPoint(event.rawRefs?.commandEvent),
+                completePoint: buildMarkerPoint(event.rawRefs?.completeEvent || event.rawRefs?.transition?.targetPoint),
+                failPoint: buildMarkerPoint(event.rawRefs?.failEvent),
+                polyline: windowPoints.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)).map((p) => ({ lat: p.lat, lon: p.lon, ts: p.ts }))
+            };
+            const classification = classifyInterFreqHandover(event, {
+                pingPongPartner: null,
+                bestAlternative,
+                exactA3: null
+            }, cfg);
+            event.classification = classification.label;
+            event.confidence = classification.confidence;
+            event.reasons = classification.reasons;
+            event.assumptions = classification.assumptions;
+            event.thresholdsUsed = classification.thresholdsUsed;
+            event.recommendedActions = classification.recommendedActions;
+            event.kpiFlags = buildKpiFlags(event);
+            event.debug = {
+                matchedRawEvents: {
+                    report: event.rawRefs?.reportEvent || null,
+                    command: event.rawRefs?.commandEvent || null,
+                    complete: event.rawRefs?.completeEvent || null,
+                    fail: event.rawRefs?.failEvent || null
+                },
+                assumptionsUsed: event.assumptions || [],
+                alternativeTargetCandidate: bestAlternative || null,
+                measurementSparsity: sparsity,
+                targetVisibility: visibility
+            };
+        });
+        const pingPongs = detectPingPong(events, cfg);
+        const byId = new Map(events.map((ev) => [ev.id, ev]));
+        pingPongs.forEach((pp) => {
+            const first = byId.get(pp.firstId);
+            const second = byId.get(pp.secondId);
+            if (first) first._pingPongPartner = pp;
+            if (second) second._pingPongPartner = pp;
+        });
+        events.forEach((event) => {
+            if (!event._pingPongPartner) return;
+            const classification = classifyInterFreqHandover(event, {
+                pingPongPartner: event._pingPongPartner,
+                bestAlternative: event.alternativeTargetCandidateAtCommand || null,
+                exactA3: null
+            }, cfg);
+            event.classification = classification.label;
+            event.confidence = classification.confidence;
+            event.reasons = classification.reasons;
+            event.assumptions = classification.assumptions;
+            event.thresholdsUsed = classification.thresholdsUsed;
+            event.recommendedActions = classification.recommendedActions;
+            event.kpiFlags = buildKpiFlags(event);
+        });
+        return events;
+    }
+
     function buildKpiFlags(event) {
         const flags = [];
         if (event.isIntraFreq === true) flags.push('intrafreq');
+        if (event.isInterFreq === true) flags.push('interfreq');
         if (event.classification === 'successful') flags.push('success');
-        if (event.classification === 'execution-failure') flags.push('execution_failure');
-        if (event.classification === 'too-late') flags.push('too_late');
-        if (event.classification === 'too-early') flags.push('too_early');
-        if (event.classification === 'ping-pong') flags.push('ping_pong');
-        if (event.classification === 'wrong-target') flags.push('wrong_target');
-        if (event.classification === 'missing-report/config-issue') flags.push('missing_report_config');
+        if (event.classification === 'execution-failure' || event.classification === 'execution_failure') flags.push('execution_failure');
+        if (event.classification === 'too-late' || event.classification === 'too_late') flags.push('too_late');
+        if (event.classification === 'too-early' || event.classification === 'too_early') flags.push('too_early');
+        if (event.classification === 'ping-pong' || event.classification === 'ping_pong') flags.push('ping_pong');
+        if (event.classification === 'wrong-target' || event.classification === 'wrong_target') flags.push('wrong_target');
+        if (event.classification === 'measurement_limited') flags.push('measurement_limited');
+        if (event.classification === 'missing-report/config-issue' || event.classification === 'missing_report_or_config_issue') flags.push('missing_report_config');
         return flags;
     }
 
@@ -1036,54 +1494,70 @@
         };
     }
 
-    function aggregateKpis(events) {
+    function aggregateKpis(events, mode) {
         const totals = {
             totalLteHos: events.length,
             totalIntraFreqHos: events.filter((e) => e.isIntraFreq === true).length,
+            totalInterFreqHos: events.filter((e) => e.isInterFreq === true).length,
             intrafreqHoSuccessRate: null,
             intrafreqHoExecutionFailureRate: null,
+            interfreqHoSuccessRate: null,
+            interfreqHoExecutionFailureRate: null,
             tooLateCount: 0,
             tooEarlyCount: 0,
             pingPongCount: 0,
             wrongTargetCount: 0,
+            measurementLimitedCount: 0,
             missingReportConfigIssueCount: 0,
             averageReportToCommandMs: null,
             averageCommandToCompleteMs: null,
             averageEffectiveDeltaAtCommand: null,
             averageServingRsrpAtCommand: null,
-            averageTargetRsrpAtCommand: null
+            averageTargetRsrpAtCommand: null,
+            averageTargetVisibleToReportMs: null,
+            averageTargetVisibilityLeadMs: null,
+            sparseTargetSamplingRate: null
         };
-        const intra = events.filter((e) => e.isIntraFreq === true);
-        const countByClass = (label) => intra.filter((e) => e.classification === label).length;
-        totals.tooLateCount = countByClass('too-late');
-        totals.tooEarlyCount = countByClass('too-early');
-        totals.pingPongCount = countByClass('ping-pong');
-        totals.wrongTargetCount = countByClass('wrong-target');
-        totals.missingReportConfigIssueCount = countByClass('missing-report/config-issue');
-        totals.executionFailureCount = countByClass('execution-failure');
+        const scopedEvents = mode === 'interfreq'
+            ? events.filter((e) => e.isInterFreq === true)
+            : events.filter((e) => e.isIntraFreq === true);
+        const countByClass = (labels) => scopedEvents.filter((e) => (Array.isArray(labels) ? labels : [labels]).includes(e.classification)).length;
+        totals.tooLateCount = countByClass(['too-late', 'too_late']);
+        totals.tooEarlyCount = countByClass(['too-early', 'too_early']);
+        totals.pingPongCount = countByClass(['ping-pong', 'ping_pong']);
+        totals.wrongTargetCount = countByClass(['wrong-target', 'wrong_target']);
+        totals.measurementLimitedCount = countByClass('measurement_limited');
+        totals.missingReportConfigIssueCount = countByClass(['missing-report/config-issue', 'missing_report_or_config_issue']);
+        totals.executionFailureCount = countByClass(['execution-failure', 'execution_failure']);
         totals.successCount = countByClass('successful');
-        totals.intrafreqHoSuccessRate = intra.length ? totals.successCount / intra.length : null;
-        totals.intrafreqHoExecutionFailureRate = intra.length ? totals.executionFailureCount / intra.length : null;
+        totals.intrafreqHoSuccessRate = totals.totalIntraFreqHos ? totals.successCount / totals.totalIntraFreqHos : null;
+        totals.intrafreqHoExecutionFailureRate = totals.totalIntraFreqHos ? totals.executionFailureCount / totals.totalIntraFreqHos : null;
+        totals.interfreqHoSuccessRate = totals.totalInterFreqHos ? totals.successCount / totals.totalInterFreqHos : null;
+        totals.interfreqHoExecutionFailureRate = totals.totalInterFreqHos ? totals.executionFailureCount / totals.totalInterFreqHos : null;
         const avg = (vals) => vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-        totals.averageReportToCommandMs = avg(intra.map((e) => e.metrics?.reportToCommandMs).filter(Number.isFinite));
-        totals.averageCommandToCompleteMs = avg(intra.map((e) => e.metrics?.commandToCompleteMs).filter(Number.isFinite));
-        totals.averageEffectiveDeltaAtCommand = avg(intra.map((e) => e.metrics?.effectiveDeltaAtCommandDb).filter(Number.isFinite));
-        totals.averageServingRsrpAtCommand = avg(intra.map((e) => e.metrics?.servingRsrpAtCommandDbm).filter(Number.isFinite));
-        totals.averageTargetRsrpAtCommand = avg(intra.map((e) => e.metrics?.targetRsrpAtCommandDbm).filter(Number.isFinite));
+        totals.averageReportToCommandMs = avg(scopedEvents.map((e) => e.metrics?.reportToCommandMs).filter(Number.isFinite));
+        totals.averageCommandToCompleteMs = avg(scopedEvents.map((e) => e.metrics?.commandToCompleteMs).filter(Number.isFinite));
+        totals.averageEffectiveDeltaAtCommand = avg(scopedEvents.map((e) => e.metrics?.effectiveDeltaAtCommandDb).filter(Number.isFinite));
+        totals.averageServingRsrpAtCommand = avg(scopedEvents.map((e) => e.metrics?.servingRsrpAtCommandDbm).filter(Number.isFinite));
+        totals.averageTargetRsrpAtCommand = avg(scopedEvents.map((e) => e.metrics?.targetRsrpAtCommandDbm).filter(Number.isFinite));
+        totals.averageTargetVisibleToReportMs = avg(scopedEvents.map((e) => e.metrics?.targetVisibleToReportMs).filter(Number.isFinite));
+        totals.averageTargetVisibilityLeadMs = avg(scopedEvents.map((e) => e.metrics?.targetVisibilityLeadMs).filter(Number.isFinite));
+        totals.sparseTargetSamplingRate = scopedEvents.length ? scopedEvents.filter((e) => e.measurementSparsity?.sparse === true).length / scopedEvents.length : null;
 
         const groupBy = (keyFn) => {
             const map = new Map();
-            intra.forEach((ev) => {
+            scopedEvents.forEach((ev) => {
                 const key = keyFn(ev);
-                const bucket = map.get(key) || { total: 0, successful: 0, executionFailure: 0, tooLate: 0, tooEarly: 0, pingPong: 0, wrongTarget: 0, missingReportConfigIssue: 0 };
+                const bucket = map.get(key) || { total: 0, successful: 0, executionFailure: 0, tooLate: 0, tooEarly: 0, pingPong: 0, wrongTarget: 0, measurementLimited: 0, missingReportConfigIssue: 0 };
                 bucket.total += 1;
                 if (ev.classification === 'successful') bucket.successful += 1;
-                if (ev.classification === 'execution-failure') bucket.executionFailure += 1;
-                if (ev.classification === 'too-late') bucket.tooLate += 1;
-                if (ev.classification === 'too-early') bucket.tooEarly += 1;
-                if (ev.classification === 'ping-pong') bucket.pingPong += 1;
-                if (ev.classification === 'wrong-target') bucket.wrongTarget += 1;
-                if (ev.classification === 'missing-report/config-issue') bucket.missingReportConfigIssue += 1;
+                if (ev.classification === 'execution-failure' || ev.classification === 'execution_failure') bucket.executionFailure += 1;
+                if (ev.classification === 'too-late' || ev.classification === 'too_late') bucket.tooLate += 1;
+                if (ev.classification === 'too-early' || ev.classification === 'too_early') bucket.tooEarly += 1;
+                if (ev.classification === 'ping-pong' || ev.classification === 'ping_pong') bucket.pingPong += 1;
+                if (ev.classification === 'wrong-target' || ev.classification === 'wrong_target') bucket.wrongTarget += 1;
+                if (ev.classification === 'measurement_limited') bucket.measurementLimited += 1;
+                if (ev.classification === 'missing-report/config-issue' || ev.classification === 'missing_report_or_config_issue') bucket.missingReportConfigIssue += 1;
                 map.set(key, bucket);
             });
             return Object.fromEntries(map.entries());
@@ -1105,6 +1579,8 @@
             sourceCell: event.sourceCell,
             targetCell: event.targetCell,
             earfcn: event.sourceEarfcn,
+            sourceEarfcn: event.sourceEarfcn,
+            targetEarfcn: event.targetEarfcn,
             intraInterLabel: event.isIntraFreq === true ? 'IntraFreq' : (event.isIntraFreq === false ? 'InterFreq' : 'Unknown'),
             resultLabel: event.classification,
             confidence: event.confidence,
@@ -1118,8 +1594,46 @@
         const indexes = buildIndexes(normalized.points, normalized.events);
         const transitions = detectServingCellTransitions(indexes.ltePoints);
         const candidates = correlateMobilityEvents(normalized, transitions, cfg);
-        const enriched = enrichHandoverEvents(candidates, normalized, cfg);
+        const enriched = enrichHandoverEvents(candidates, normalized, cfg).filter((event) => {
+            const sourcePci = toInt(event?.sourceCell?.pci);
+            const targetPci = toInt(event?.targetCell?.pci);
+            const sourceEci = hasValue(event?.sourceCell?.eci) ? String(event.sourceCell.eci).trim() : '';
+            const targetEci = hasValue(event?.targetCell?.eci) ? String(event.targetCell.eci).trim() : '';
+            const sameDisplayedPciPair = Number.isFinite(sourcePci) && Number.isFinite(targetPci) && sourcePci === targetPci;
+            const distinctCellIdentityProof = !!(sourceEci && targetEci && sourceEci !== targetEci);
+            return !sameDisplayedPciPair;
+        });
         const kpis = aggregateKpis(enriched);
+        return {
+            generatedAt: new Date().toISOString(),
+            config: cfg,
+            schema: normalized.schema,
+            mapping: normalized.mapping,
+            normalization: {
+                missingFields: normalized.missingFields,
+                pointCount: normalized.meta.pointCount,
+                eventCount: normalized.meta.eventCount,
+                hasNeighborMeasurements: normalized.meta.hasNeighborMeasurements
+            },
+            summaryCards: enriched.map(createEventSummaryCard),
+            events: enriched,
+            kpis,
+            debug: {
+                transitionsDetected: transitions.length,
+                normalizedEventCount: normalized.events.length,
+                normalizedPointCount: normalized.points.length
+            }
+        };
+    }
+
+    function analyzeInterFreqHo(input, options) {
+        const cfg = createConfig(options && options.config);
+        const normalized = normalizeLogDataset(input, options && options.mapping);
+        const indexes = buildIndexes(normalized.points, normalized.events);
+        const transitions = detectServingCellTransitions(indexes.ltePoints);
+        const candidates = correlateMobilityEvents(normalized, transitions, cfg).filter((event) => event.isIntraFreq === false || isInterFreq(event.sourceEarfcn, event.targetEarfcn) === true);
+        const enriched = enrichInterFreqHandoverEvents(candidates, normalized, cfg).filter((event) => event.isInterFreq === true);
+        const kpis = aggregateKpis(enriched, 'interfreq');
         return {
             generatedAt: new Date().toISOString(),
             config: cfg,
@@ -1152,16 +1666,22 @@
         detectServingCellTransitions,
         correlateMobilityEvents,
         isIntraFreq,
+        isInterFreq,
         getServingSampleAt,
         getTargetSampleAt,
         getBestSameFreqNeighborAt,
+        getBestNeighborOnFrequencyAt,
         interpolateNearestSample,
         computeEffectiveDelta,
+        getTargetFrequencyVisibility,
+        computeMeasurementSparsity,
         detectPingPong,
         findBestAlternativeNeighbor,
         classifyHandover,
+        classifyInterFreqHandover,
         aggregateKpis,
         analyzeIntraFreqHo,
+        analyzeInterFreqHo,
         distanceMeters
     };
 });

@@ -4333,6 +4333,23 @@ const ExcelParser = {
         // Prioritize "NodeB ID-Cell ID" or "EnodeB ID-Cell ID" for strict sector matching
         const cellIdCol = detectBestColumn(['enodeb id-cell id', 'enodebid-cellid', 'nodeb id-cell id', 'cellid', 'ci', 'cid', 'cell_id', 'identity'], ['active', 'set', 'neighbor', 'target']);
 
+        // Explicit Multi-RAT Serving Columns
+        const lteServingRsrpCol = detectBestColumn(['lteservingrsrp']);
+        const lteServingRsrqCol = detectBestColumn(['lteservingrsrq']);
+        const lteServingSinrCol = detectBestColumn(['lteservingsinr']);
+        const lteServingPciCol = detectBestColumn(['lteservingpci/sc', 'lteservingpci']);
+        const lteServingEarfcnCol = detectBestColumn(['lteservingearfcn']);
+        
+        const umtsServingRscpCol = detectBestColumn(['3gservingrscp']);
+        const umtsServingEcnoCol = detectBestColumn(['3gservingecno']);
+        const umtsServingScCol = detectBestColumn(['3gservingsc', '3gservingpci/sc']);
+        const umtsServingFreqCol = detectBestColumn(['3gservingfreq']);
+        
+        const gsmServingRxlevCol = detectBestColumn(['2grxlevsub', '2gservingrxlev']);
+        const gsmServingRxqualCol = detectBestColumn(['2grxqualsub', '2gservingrxqual']);
+        const gsmServingArfcnCol = detectBestColumn(['2garfcn']);
+        const gsmServingBsicCol = detectBestColumn(['2gbsic']);
+
         // Throughput Detection
         const dlThputCol = detectBestColumn(['averagedlthroughput', 'dlthroughput', 'downlinkthroughput'], []);
         const ulThputCol = detectBestColumn(['averageulthroughput', 'ulthroughput', 'uplinkthroughput'], []);
@@ -4410,11 +4427,13 @@ const ExcelParser = {
 
         for (let i = 0; i < len; i++) {
             const row = json[i];
-            const lat = parseNumber(row[latKey]);
-            const lng = parseNumber(row[lngKey]);
-                const time = normalizeTimeValue(row[timeKey]);
+            const rawLat = latKey ? parseNumber(row[latKey]) : NaN;
+            const rawLng = lngKey ? parseNumber(row[lngKey]) : NaN;
+            const lat = !isNaN(rawLat) ? rawLat : null;
+            const lng = !isNaN(rawLng) ? rawLng : null;
+            const time = normalizeTimeValue(row[timeKey]);
 
-            if (!isNaN(lat) && !isNaN(lng)) {
+            if ((lat !== null && lng !== null) || time !== 'N/A') {
                 // Create Base Point from Best Columns
                 const point = {
                     lat: lat,
@@ -4484,14 +4503,22 @@ const ExcelParser = {
                     }
 
                     const normM = normalize(m);
-                    const setNeighborField = (bucketKey, typeLabel, field, rawValue) => {
+                    // Detect RAT prefix from ORIGINAL column name (e.g. '3G M1 SC', '2G M1 Rxlev', 'LTE N1 RSRP')
+                    let colRat = null;
+                    if (/^\s*(lte|4g)\s+/i.test(m)) colRat = 'E-UTRA';
+                    else if (/^\s*(3g|umts|wcdma)\s+/i.test(m)) colRat = 'UTRA';
+                    else if (/^\s*(2g|gsm|gprs)\s+/i.test(m)) colRat = 'GSM';
+
+                    const setNeighborField = (bucketKey, typeLabel, field, rawValue, ratOverride) => {
                         if (!point._neighborsHelper) point._neighborsHelper = {};
                         if (!point._neighborsHelper[bucketKey]) {
                             point._neighborsHelper[bucketKey] = {
                                 type: typeLabel,
                                 source_kind: 'measured',
-                                rat: 'UTRA'
+                                rat: ratOverride || 'UTRA'
                             };
+                        } else if (ratOverride) {
+                            point._neighborsHelper[bucketKey].rat = ratOverride;
                         }
                         point._neighborsHelper[bucketKey][field] = rawValue;
                     };
@@ -4500,42 +4527,47 @@ const ExcelParser = {
                     // ACTIVE SET & NEIGHBORS (Enhanced parsing)
                     // ----------------------------------------------------------------
 
-                    // Direct A/M/D parsing for Excel exports like "A2 SC", "A3 PSC", "M1 RSCP", "D1 EcNo"
-                    const amdMatch = normM.match(/^([amd])(\d+)(sc|psc|pci|identity|rscp|rsrp|ecno|rsrq|freq|uarfcn|earfcn)$/i);
+                    // Direct A/M/D/N parsing for Excel exports like "A2 SC", "M1 RSCP", "D1 EcNo"
+                    // Also handles RAT-prefixed columns like "3G M1 SC", "LTE N1 RSRP", "2G M1 RxLev"
+                    const normStripped = normM.replace(/^(lte|4g|3g|umts|wcdma|2g|gsm|gprs)/, '');
+                    const amdMatch = normStripped.match(/^([amnd])(\d+)(sc|psc|pci|identity|rscp|rsrp|ecno|rsrq|freq|uarfcn|earfcn|rxlev|rxqual)$/i);
                     if (amdMatch) {
                         const prefix = amdMatch[1].toLowerCase();
                         const idx = parseInt(amdMatch[2], 10);
                         const metric = amdMatch[3].toLowerCase();
                         if (idx >= 1 && idx <= 32) {
                             const numVal = parseNumber(val);
-                            const bucketKey = prefix === 'a' ? idx : (prefix === 'm' ? 100 + idx : 200 + idx);
+                            const bucketKey = prefix === 'a' ? idx : (prefix === 'm' ? 100 + idx : (prefix === 'n' ? 300 + idx : 200 + idx));
                             const typeLabel = `${prefix.toUpperCase()}${idx}`;
+                            const ratForNeighbor = colRat || (metric === 'rxlev' || metric === 'rxqual' ? 'GSM' : (metric === 'earfcn' ? 'E-UTRA' : 'UTRA'));
 
                             if (metric === 'sc' || metric === 'psc' || metric === 'pci' || metric === 'identity') {
                                 const parsedId = Number.isFinite(numVal) ? parseInt(numVal, 10) : parseInt(String(val).trim(), 10);
                                 if (!isNaN(parsedId)) {
                                     point[`${prefix}${idx}_sc`] = parsedId;
                                     point[`${prefix}${idx}_psc`] = parsedId;
-                                    setNeighborField(bucketKey, typeLabel, 'sc', parsedId);
-                                    setNeighborField(bucketKey, typeLabel, 'pci', parsedId);
-                                    setNeighborField(bucketKey, typeLabel, 'psc', parsedId);
+                                    setNeighborField(bucketKey, typeLabel, 'sc', parsedId, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'pci', parsedId, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'psc', parsedId, ratForNeighbor);
                                 }
-                            } else if (metric === 'rscp' || metric === 'rsrp') {
+                            } else if (metric === 'rscp' || metric === 'rsrp' || metric === 'rxlev') {
                                 if (Number.isFinite(numVal)) {
                                     point[`${prefix}${idx}_rscp`] = numVal;
-                                    setNeighborField(bucketKey, typeLabel, 'rscp', numVal);
+                                    setNeighborField(bucketKey, typeLabel, 'rscp', numVal, ratForNeighbor);
+                                    if (metric === 'rxlev') setNeighborField(bucketKey, typeLabel, 'rxlev', numVal, ratForNeighbor);
                                 }
-                            } else if (metric === 'ecno' || metric === 'rsrq') {
+                            } else if (metric === 'ecno' || metric === 'rsrq' || metric === 'rxqual') {
                                 if (Number.isFinite(numVal)) {
                                     point[`${prefix}${idx}_ecno`] = numVal;
-                                    setNeighborField(bucketKey, typeLabel, 'ecno', numVal);
+                                    setNeighborField(bucketKey, typeLabel, 'ecno', numVal, ratForNeighbor);
+                                    if (metric === 'rxqual') setNeighborField(bucketKey, typeLabel, 'rxqual', numVal, ratForNeighbor);
                                 }
                             } else if (metric === 'freq' || metric === 'uarfcn' || metric === 'earfcn') {
                                 if (Number.isFinite(numVal)) {
                                     point[`${prefix}${idx}_freq`] = numVal;
                                     point[`${prefix}${idx}_uarfcn`] = numVal;
-                                    setNeighborField(bucketKey, typeLabel, 'freq', numVal);
-                                    setNeighborField(bucketKey, typeLabel, 'uarfcn', numVal);
+                                    setNeighborField(bucketKey, typeLabel, 'freq', numVal, ratForNeighbor);
+                                    setNeighborField(bucketKey, typeLabel, 'uarfcn', numVal, ratForNeighbor);
                                 }
                             }
                             continue;
@@ -4548,29 +4580,35 @@ const ExcelParser = {
                         return matcha ? parseInt(matcha[1]) : null;
                     };
 
-                    // Neighbors N1..N8 (Extizing to N32 support)
-                    // Matches: "neighborcelldlearfcnn1", "neighborcellidentityn1", "n1_sc" etc.
-                    if (normM.includes('n') && (normM.includes('sc') || normM.includes('pci') || normM.includes('identity') || normM.includes('rscp') || normM.includes('rsrp') || normM.includes('ecno') || normM.includes('rsrq') || normM.includes('freq') || normM.includes('earfcn'))) {
-                        // Exclude if it looks like primary SC (though mapped above, safe to skip)
+                    // Neighbors N1..N32, A1..A8, M1..M8
+                    const isA = normM.includes('a') && /[a](\d+)/.test(normM);
+                    const isM = normM.includes('m') && /[m](\d+)/.test(normM);
+                    const isN = normM.includes('n') && /[n](\d+)/.test(normM);
+
+                    if ((isA || isM || isN) && (normM.includes('sc') || normM.includes('pci') || normM.includes('identity') || normM.includes('rscp') || normM.includes('rsrp') || normM.includes('ecno') || normM.includes('rsrq') || normM.includes('freq') || normM.includes('earfcn') || normM.includes('rxlev') || normM.includes('rxqual'))) {
                         if (m === scCol) continue;
 
-                        // Flexible Digit Extractor: Matches "n1", "neighbor...n1", "n_1"
-                        // Specifically targets the user's "Nx" format at the end of string
-                        const digitMatch = normM.match(/n(\d+)/);
-
+                        const digitMatch = normM.match(/[amn](\d+)/);
                         if (digitMatch) {
                             const idx = parseInt(digitMatch[1]);
+                            const typeChr = digitMatch[0].charAt(0);
+                            const keyIdx = (typeChr === 'a') ? 1000 + idx : (typeChr === 'm' ? 2000 + idx : idx);
+                            const ratForNeighbor = colRat || (normM.includes('rxlev') || normM.includes('rxqual') ? 'GSM' : (normM.includes('earfcn') ? 'E-UTRA' : 'UTRA'));
+                            
                             if (idx >= 1 && idx <= 32) {
                                 if (!point._neighborsHelper) point._neighborsHelper = {};
-                                if (!point._neighborsHelper[idx]) point._neighborsHelper[idx] = {};
+                                if (!point._neighborsHelper[keyIdx]) point._neighborsHelper[keyIdx] = { 
+                                    type: (typeChr === 'a') ? 'active' : (typeChr === 'm' ? 'monitored' : 'neighbor'),
+                                    rat: ratForNeighbor
+                                };
+                                else if (ratForNeighbor) point._neighborsHelper[keyIdx].rat = ratForNeighbor;
 
-                                // Use parseNumber to handle strings/commas
                                 const numVal = parseNumber(val);
 
-                                if (normM.includes('sc') || normM.includes('pci') || normM.includes('identity')) point._neighborsHelper[idx].pci = parseInt(numVal);
-                                if (normM.includes('rscp') || normM.includes('rsrp')) point._neighborsHelper[idx].rscp = numVal;
-                                if (normM.includes('ecno') || normM.includes('rsrq')) point._neighborsHelper[idx].ecno = numVal;
-                                if (normM.includes('freq') || normM.includes('earfcn')) point._neighborsHelper[idx].freq = numVal;
+                                if (normM.includes('sc') || normM.includes('pci') || normM.includes('identity')) point._neighborsHelper[keyIdx].pci = parseInt(numVal);
+                                if (normM.includes('rscp') || normM.includes('rsrp') || normM.includes('rxlev')) point._neighborsHelper[keyIdx].rscp = numVal;
+                                if (normM.includes('ecno') || normM.includes('rsrq') || normM.includes('rxqual')) point._neighborsHelper[keyIdx].ecno = numVal;
+                                if (normM.includes('freq') || normM.includes('earfcn')) point._neighborsHelper[keyIdx].freq = numVal;
                             }
                         }
                     }
@@ -4603,6 +4641,36 @@ const ExcelParser = {
                     });
                     delete point._neighborsHelper; // Parsing cleanup
                 }
+                
+                // Construct specific serving matrices
+                let servingLte = null;
+                if (lteServingRsrpCol || lteServingPciCol || scCol) {
+                    servingLte = {
+                        rsrp: lteServingRsrpCol ? parseNumber(row[lteServingRsrpCol]) : null,
+                        rsrq: lteServingRsrqCol ? parseNumber(row[lteServingRsrqCol]) : null,
+                        sinr: lteServingSinrCol ? parseNumber(row[lteServingSinrCol]) : null,
+                        pci: lteServingPciCol ? parseInt(parseNumber(row[lteServingPciCol])) : (scCol ? parseInt(parseNumber(row[scCol])) : null),
+                        earfcn: lteServingEarfcnCol ? parseNumber(row[lteServingEarfcnCol]) : null
+                    };
+                }
+                let serving3g = null;
+                if (umtsServingRscpCol || umtsServingScCol || scCol) {
+                    serving3g = {
+                        rscp: umtsServingRscpCol ? parseNumber(row[umtsServingRscpCol]) : null,
+                        ecno: umtsServingEcnoCol ? parseNumber(row[umtsServingEcnoCol]) : null,
+                        sc: umtsServingScCol ? parseInt(parseNumber(row[umtsServingScCol])) : (scCol ? parseInt(parseNumber(row[scCol])) : null),
+                        freq: umtsServingFreqCol ? parseNumber(row[umtsServingFreqCol]) : null
+                    };
+                }
+                let serving2g = null;
+                if (gsmServingRxlevCol || gsmServingBsicCol) {
+                    serving2g = {
+                        rxlev: gsmServingRxlevCol ? parseNumber(row[gsmServingRxlevCol]) : null,
+                        rxqual: gsmServingRxqualCol ? parseNumber(row[gsmServingRxqualCol]) : null,
+                        arfcn: gsmServingArfcnCol ? parseNumber(row[gsmServingArfcnCol]) : null,
+                        bsic: gsmServingBsicCol ? parseNumber(row[gsmServingBsicCol]) : null
+                    };
+                }
 
                 // Add parsed object for safety if app expects it
                 point.parsed = {
@@ -4614,6 +4682,9 @@ const ExcelParser = {
                         band: point.band,
                         lac: point.lac || 0 // Default LAC
                     },
+                    serving_lte: servingLte,
+                    serving_3g: serving3g,
+                    serving_2g: serving2g,
                     neighbors: neighbors
                 };
 
@@ -4631,22 +4702,193 @@ const ExcelParser = {
             const freqs = points.slice(0, 100).map(p => p.freq).filter(f => !isNaN(f) && f > 0);
             if (freqs.length > 0) {
                 const is3G = freqs.some(f => (f >= 10500 && f <= 10900) || (f >= 2900 && f <= 3100) || (f >= 4300 && f <= 4500));
-                if (is3G) detectedTech = '3G (UMTS)';
-                else if (freqs.some(f => f < 1000)) detectedTech = '2G (GSM)';
+                if (is3G) detectedTech = '3G (Excel)';
+                else if (freqs.some(f => f < 1000)) detectedTech = '2G (Excel)';
                 else if (freqs.some(f => f > 120000)) detectedTech = '5G (NR)';
-                else detectedTech = '4G (LTE)';
+                else detectedTech = '4G (Excel)';
             } else if (levelCol) {
                 const lowCol = normalize(levelCol);
-                if (lowCol.includes('rsrp')) detectedTech = '4G (LTE)';
-                else if (lowCol.includes('rscp')) detectedTech = '3G (UMTS)';
+                if (lowCol.includes('rsrp')) detectedTech = '4G (Excel)';
+                else if (lowCol.includes('rscp')) detectedTech = '3G (Excel)';
             }
         }
+
+        // Synthesize Events and CallSessions from specialized Excel columns
+        const events = [];
+        const callSessions = [];
+        let callSessionId = 1;
+        let activeCall = null;
+        
+        const evtTypeKey = keys.find(k => /event type/i.test(k));
+        const dropCallKey = keys.find(k => /drop call/i.test(k));
+        const callFailKey = keys.find(k => /call failure/i.test(k));
+        const rrcCauseKey = keys.find(k => /event rrc cause/i.test(k) || /network cause/i.test(k));
+        const callSetupTimeKey = keys.find(k => /call setup time/i.test(k));
+        const callDurationKey = keys.find(k => /call duration/i.test(k));
+        
+        points.forEach(p => {
+            let isEvent = false;
+            let eventName = 'Unknown Event';
+            let eventDetails = '';
+            
+            if (evtTypeKey && p[evtTypeKey]) {
+                isEvent = true;
+                eventName = String(p[evtTypeKey]).trim();
+            } else if (dropCallKey && p[dropCallKey] == 1) { // == 1 usually marks 'True' in binary columns
+                isEvent = true;
+                eventName = 'DROP_CALL';
+            } else if (callFailKey && p[callFailKey] == 1) {
+                isEvent = true;
+                eventName = 'CALL_SETUP_FAILURE';
+            }
+            
+            if (isEvent) {
+                if (rrcCauseKey && p[rrcCauseKey]) {
+                    eventDetails = 'Cause: ' + p[rrcCauseKey];
+                }
+                
+                const evt = {
+                    ...p, 
+                    type: 'EVENT',
+                    event: eventName,
+                    message: eventDetails || eventName,
+                    properties: { ...p.properties, 'Event': eventName }
+                };
+                if (eventDetails) evt.properties['Details'] = eventDetails;
+                if (callSetupTimeKey && p[callSetupTimeKey]) evt.properties['Call Setup Time (s)'] = p[callSetupTimeKey];
+                if (callDurationKey && p[callDurationKey]) evt.properties['Call Duration (s)'] = p[callDurationKey];
+                
+                if (activeCall) {
+                    evt.sessionId = activeCall.id;
+                    evt.properties['Session ID'] = activeCall.id;
+                } else if (eventName === 'DROP_CALL') {
+                    // Orphaned drop mapping for strict UI filtering
+                    evt.sessionId = `orphaned_drop_${Date.now()}`; 
+                    evt.properties['Session ID'] = evt.sessionId;
+                }
+
+                events.push(evt);
+                
+                const upperName = eventName.toUpperCase();
+                
+                // Active Call Tracker Logic
+                if (upperName.includes('ATTEMPT') || upperName.includes('SETUP')) {
+                    // Start a new call
+                    if (activeCall) callSessions.push(activeCall); // Push previous if unclosed
+                    activeCall = {
+                        id: `xlscall_${callSessionId++}`,
+                        type: 'unknown',
+                        technology: detectedTech,
+                        startTs: evt.time || null,
+                        endTs: null,
+                        startGps: { lat: evt.lat, lng: evt.lng },
+                        endGps: null,
+                        startCell: { sc: evt.sc, cellId: evt.cellId },
+                        endCell: null,
+                        events: [ evt ],
+                        durationSec: null,
+                        cause: '',
+                        messages: [],
+                        drop: false,
+                        outcome: 'INCOMPLETE',
+                        endType: 'UNKNOWN'
+                    };
+                } else if (activeCall) {
+                    // Connect event
+                    if (upperName.includes('CONNECT')) {
+                        activeCall.events.push(evt);
+                        activeCall.properties = activeCall.properties || {};
+                        if (callSetupTimeKey && p[callSetupTimeKey]) {
+                            activeCall.properties['Setup Time'] = p[callSetupTimeKey] + ' s';
+                        }
+                    }
+                    // End events
+                    else if (upperName.includes('DROP')) {
+                        activeCall.type = 'drop';
+                        activeCall.drop = true;
+                        activeCall.outcome = 'DROP_CALL';
+                        activeCall.endType = 'DROP';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        activeCall.cause = (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName;
+                        if (callDurationKey && p[callDurationKey]) activeCall.durationSec = parseFloat(p[callDurationKey]);
+                        
+                        activeCall.finalRscp = evt.rscp !== undefined ? evt.rscp : evt.rsrp;
+                        activeCall.finalEcno = evt.ecno !== undefined ? evt.ecno : evt.rsrq;
+                        activeCall.events.push(evt);
+                        
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else if (upperName.includes('FAIL') || upperName.includes('BLOCK')) {
+                        activeCall.type = 'setup_fail';
+                        activeCall.drop = false;
+                        activeCall.outcome = 'CALL_SETUP_FAILURE';
+                        activeCall.endType = 'SETUP_FAILURE';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        activeCall.cause = (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName;
+                        activeCall.events.push(evt);
+                        
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else if (upperName.includes('SESSION') || upperName.includes('END')) { // Normal end
+                        activeCall.type = 'normal';
+                        activeCall.drop = false;
+                        activeCall.outcome = 'SUCCESS';
+                        activeCall.endType = 'NORMAL_RELEASE';
+                        activeCall.endTs = evt.time;
+                        activeCall.endGps = { lat: evt.lat, lng: evt.lng };
+                        activeCall.endCell = { sc: evt.sc, cellId: evt.cellId };
+                        if (callDurationKey && p[callDurationKey]) activeCall.durationSec = parseFloat(p[callDurationKey]);
+                        
+                        activeCall.events.push(evt);
+                        callSessions.push(activeCall);
+                        activeCall = null;
+                    } else {
+                        // Other events (HO, Restablishment, etc.)
+                        activeCall.events.push(evt);
+                    }
+                } else {
+                    // Event outside of known call (maybe orphaned Drop or session end)
+                    const isDrop = upperName.includes('DROP');
+                    const isBlock = upperName.includes('FAIL') || upperName.includes('BLOCK');
+                    const isSession = upperName.includes('SESSION');
+                    
+                    if (isDrop || isBlock || isSession) {
+                        callSessions.push({
+                            id: `xlscall_${callSessionId++}`,
+                            type: isDrop ? 'drop' : (isBlock ? 'setup_fail' : 'normal'),
+                            technology: detectedTech,
+                            startTs: null,
+                            endTs: evt.time || null,
+                            startGps: null,
+                            endGps: { lat: evt.lat, lng: evt.lng },
+                            startCell: null,
+                            endCell: { sc: evt.sc, cellId: evt.cellId },
+                            events: [ evt ],
+                            durationSec: (callDurationKey && p[callDurationKey]) ? parseFloat(p[callDurationKey]) : null,
+                            finalRscp: evt.rscp !== undefined ? evt.rscp : evt.rsrp,
+                            finalEcno: evt.ecno !== undefined ? evt.ecno : evt.rsrq,
+                            cause: (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName,
+                            messages: []
+                        });
+                    }
+                }
+            }
+        });
+        
+        // Push unclosed
+        if (activeCall) callSessions.push(activeCall);
 
         return {
             points: points,
             tech: detectedTech,
             customMetrics: customMetrics.concat(['rrc_rel_cause', 'cs_rel_cause', 'iucs_status']),
             signaling: [], // No signaling in simple excel for now
+            events: events,
+            callSessions: callSessions,
             debugInfo: {
                 scCol: scCol,
                 cellIdCol: cellIdCol,
