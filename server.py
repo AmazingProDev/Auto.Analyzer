@@ -2350,10 +2350,19 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         "DAD":   "Session end (DAD)",
     }
 
-    # Collect unique events (deduplicate same event at same ms across cell rows)
+    # Collect unique events (deduplicate same event at same ms across cell rows).
+    # Also collect the serving/packet-technology change-event timeline so 5G dwell can be
+    # measured time-based (forward-filled), consistent with the "Radio presence (download)"
+    # panel — EN-DC means the device is on 5G AND LTE simultaneously, so a band-row ratio
+    # wrongly understates it (LTE-anchor band rows are not "non-5G").
     seen: set = set()
     events: list[dict] = []
+    tech_timeline: list = []
     for row in (rows or []):
+        _rdt = row.get("_dt")
+        _tech = row.get("servingTechnology") or row.get("packetTechnology")
+        if _rdt is not None and _tech:
+            tech_timeline.append((_rdt, _tech))
         eid = str(row.get("eventId") or "").strip().upper()
         if eid not in _EVENT_IDS:
             continue
@@ -2806,12 +2815,20 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         rf_sample_count = max(len(rf_rsrp), len(rf_sinr))
         steady_or_avg = steady_state_mbps or avg_rate
         steady_or_avg_raw = steady_state_raw or avg_rate_raw
-        # 5G dwell = NR-banded rows / all banded rows in the transfer window (≤100%).
-        nr_dwell_pct = (
-            round((win_nr_rows / float(win_banded_rows)) * 100.0, 1)
-            if win_banded_rows
-            else None
+        # 5G dwell = time-based forward-filled serving/packet-technology presence over the
+        # transfer window (EN-DC/5G/NR seconds ÷ attributable seconds) — matches the
+        # authoritative "Radio presence (download)" panel and correctly reports EN-DC as
+        # ~100%. Falls back to the NR-banded-row ratio only when no tech change-events exist.
+        nr_dwell_pct = None
+        _tp = (
+            _nemo_tech_presence_from_timeline(tech_timeline, [{"start": rf_lo, "end": rf_hi}])
+            if (rf_lo and rf_hi)
+            else {}
         )
+        if _tp:
+            nr_dwell_pct = _tp.get("5G", 0.0)
+        elif win_banded_rows:
+            nr_dwell_pct = round((win_nr_rows / float(win_banded_rows)) * 100.0, 1)
         # Per-NR-band dwell = each NR band's share of NR time in the window.
         nr_band_dwell_pct = {}
         if win_nr_rows:
@@ -14921,7 +14938,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 52
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 54
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15199,6 +15216,18 @@ def _benchmark_nemo_build_dataset(
             op_entry["downloadEventMarkers"] = dl_events["markers"]
         if dl_events.get("kpis"):
             op_entry["downloadEventKpis"] = dl_events["kpis"]
+        # Make the macro "5G %" match the authoritative "Radio presence (download)" panel
+        # (serving-cell, time-based). In EN-DC the device is on 5G+LTE simultaneously, so the
+        # serving-cell presence is the source of truth; override the row-derived nrDwellPct.
+        _sc = _serving_cells_by_op.get(str(op_name).upper()) or {}
+        _sc_dl5g = (_sc.get("radioPresenceBreakdownDownload") or {}).get("5G")
+        if _sc_dl5g is not None:
+            _dl_dict = dl_events.get("download")
+            if isinstance(_dl_dict, dict):
+                _dl_dict["nrDwellPct"] = _sc_dl5g
+            _kp_dict = dl_events.get("kpis")
+            if isinstance(_kp_dict, dict) and "nrDwellPct" in _kp_dict:
+                _kp_dict["nrDwellPct"] = _sc_dl5g
         # Per-operation session summary (download / upload / pings) for the upload, latency
         # and RF cards — all derived from the same time series.
         op_entry["sessionStats"] = {
