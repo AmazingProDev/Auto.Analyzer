@@ -9,6 +9,8 @@ Single-user desktop-style tool; Python stdlib HTTP backend + a large vanilla-JS 
 
 ## Run & verify
 
+> Fresh-clone setup (deps, LOS backend, BDD data, tests): see **`SETUP.md`**.
+
 - **Dev server:** `python3 server.py` on port **8000** (see `.claude/launch.json`, name `optim-analyzer`).
   Prefer the preview tooling / `preview_start` over raw Bash for the server.
 - **Frontend:** static `index.html` + `app.js` served by the same server. `app.js` is **cache-busted**
