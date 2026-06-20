@@ -113,7 +113,7 @@ BENCHMARK_NEMO_LIBRARY_DB_PATH = os.environ.get(
 # dataset cache key, so a bump misses the SQLite cache and forces a fresh re-parse of the
 # TXT files. (Analysis-only changes use _BENCHMARK_NEMO_ANALYSIS_VERSION, which rebuilds KPIs
 # from the already-parsed rows without re-parsing.)
-_BENCHMARK_NEMO_PARSER_VERSION = 6
+_BENCHMARK_NEMO_PARSER_VERSION = 7
 BENCHMARK_DEFAULT_PATH = os.environ.get(
     "OPTIM_BENCHMARK_PATH",
     "/Users/abdelilah/Desktop/AutoAnalyzer IAM/Benchmark/DR Rabat - Benchmark Avril 2026.xlsx",
@@ -2435,7 +2435,7 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         bw_samples = []
         measurement_title = None
 
-        def _append_sample(bucket, when, value, positive=False):
+        def _append_sample(bucket, when, value, positive=False, weight=None):
             if value is None:
                 return
             try:
@@ -2444,17 +2444,54 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 return
             if positive and num <= 0:
                 return
-            bucket.append((when, num))
+            w = None
+            if weight is not None:
+                try:
+                    w = float(weight)
+                except (TypeError, ValueError):
+                    w = None
+            bucket.append((when, num, w))
 
         def _avg_series(bucket, start_dt=None, min_points=2):
             if not bucket:
                 return None
             chosen = bucket
             if start_dt is not None:
-                scoped = [(dt, val) for dt, val in bucket if dt >= start_dt]
+                scoped = [
+                    (dt, val, weight)
+                    for dt, val, weight in bucket
+                    if dt >= start_dt
+                ]
                 if len(scoped) >= min_points:
                     chosen = scoped
-            vals = [val for _, val in chosen]
+            vals = [val for _, val, _ in chosen]
+            return _avg(vals)
+
+        def _weighted_avg_series(bucket, start_dt=None, min_points=2):
+            if not bucket:
+                return None
+            chosen = bucket
+            if start_dt is not None:
+                scoped = [
+                    (dt, val, weight)
+                    for dt, val, weight in bucket
+                    if dt >= start_dt
+                ]
+                if len(scoped) >= min_points:
+                    chosen = scoped
+            weighted = [
+                (val, weight)
+                for _, val, weight in chosen
+                if weight is not None and weight > 0
+            ]
+            if weighted:
+                total_weight = sum(weight for _, weight in weighted)
+                if total_weight > 0:
+                    return round(
+                        sum(val * weight for val, weight in weighted) / total_weight,
+                        2,
+                    )
+            vals = [val for _, val, _ in chosen]
             return _avg(vals)
 
         def _median_series(bucket, start_dt=None, min_points=1):
@@ -2462,10 +2499,10 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 return None
             chosen = bucket
             if start_dt is not None:
-                scoped = [val for dt, val in bucket if dt >= start_dt]
+                scoped = [val for dt, val, _ in bucket if dt >= start_dt]
                 if len(scoped) >= min_points:
-                    chosen = [(None, val) for val in scoped]
-            return _nemo_numeric_median([val for _, val in chosen])
+                    chosen = [(None, val, None) for val in scoped]
+            return _nemo_numeric_median([val for _, val, _ in chosen])
 
         if win_start and win_end:
             for row in rows:
@@ -2495,11 +2532,6 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 st = str(row.get("transferStatus") or "").strip()
                 if st.lower() in ("success", "protocol error or timeout", "failed", "aborted", "timeout"):
                     status = st
-                for col, bucket in (
-                    ("rsrpNr", rf_rsrp), ("sinrNr", rf_sinr), ("dlPrbPct", rf_prb),
-                    ("pdschDl5gMbps", nr_pdsch), ("pdschDlLteMbps", lte_pdsch),
-                ):
-                    _append_sample(bucket, rdt, row.get(col))
                 mac_total_val = row.get("totalMacDlMbps")
                 if mac_total_val in (None, ""):
                     mac_lte = row.get("macDlLteMbps")
@@ -2509,15 +2541,76 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                             mac_total_val = float(mac_lte or 0) + float(mac_nr or 0)
                         except (TypeError, ValueError):
                             mac_total_val = None
-                _append_sample(mac_total, rdt, mac_total_val, positive=True)
                 app_dl = row.get("appDlMbps")
+                app_dl_val = None
                 if app_dl is not None:
                     try:
                         app_dl_val = float(app_dl)
                         if app_dl_val > 0:
                             app_samples.append((rdt, app_dl_val))
                     except (TypeError, ValueError):
-                        pass
+                        app_dl_val = None
+                nr_pdsch_val = row.get("pdschDl5gMbps")
+                lte_pdsch_val = row.get("pdschDlLteMbps")
+                nr_pdsch_num = None
+                lte_pdsch_num = None
+                try:
+                    nr_pdsch_num = (
+                        float(nr_pdsch_val)
+                        if nr_pdsch_val not in (None, "")
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    nr_pdsch_num = None
+                try:
+                    lte_pdsch_num = (
+                        float(lte_pdsch_val)
+                        if lte_pdsch_val not in (None, "")
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    lte_pdsch_num = None
+                pdsch_total = max(
+                    (nr_pdsch_num or 0.0) + (lte_pdsch_num or 0.0),
+                    0.0,
+                )
+                active_slot_weight = None
+                if app_dl_val is not None and app_dl_val > 0:
+                    active_slot_weight = app_dl_val
+                elif pdsch_total > 0:
+                    active_slot_weight = pdsch_total
+                if active_slot_weight is not None:
+                    _append_sample(
+                        rf_rsrp,
+                        rdt,
+                        row.get("rsrpNr"),
+                        weight=active_slot_weight,
+                    )
+                    _append_sample(
+                        rf_sinr,
+                        rdt,
+                        row.get("sinrNr"),
+                        weight=active_slot_weight,
+                    )
+                    _append_sample(rf_prb, rdt, row.get("dlPrbPct"), positive=True)
+                    _append_sample(
+                        nr_pdsch,
+                        rdt,
+                        nr_pdsch_num,
+                        positive=True,
+                    )
+                    _append_sample(
+                        lte_pdsch,
+                        rdt,
+                        lte_pdsch_num,
+                        positive=True,
+                    )
+                    _append_sample(
+                        mac_total,
+                        rdt,
+                        mac_total_val,
+                        positive=True,
+                    )
                 bw_val = row.get("caTotalBwMhz")
                 if bw_val in (None, ""):
                     primary_bw = row.get("primaryBwMhz")
@@ -2529,7 +2622,7 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                             bw_val = primary_bw
                     else:
                         bw_val = primary_bw
-                if bw_val is not None:
+                if bw_val is not None and active_slot_weight is not None:
                     _append_sample(bw_samples, rdt, bw_val, positive=True)
         if not bw_samples:
             for row in rows:
@@ -2618,15 +2711,30 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 slow_start_dominated = ramp_up_s / eff_time >= 0.25
             if avg_rate_raw and avg_rate_raw > 0 and peak_raw > 0:
                 peak_to_avg_ratio = round(peak_raw / avg_rate_raw, 2)
-        rsrp_mean = _avg_series(rf_rsrp)
-        sinr_mean = _avg_series(rf_sinr)
+        rsrp_mean = _weighted_avg_series(rf_rsrp)
+        sinr_mean = _weighted_avg_series(rf_sinr)
         prb_util_mean = _avg_series(rf_prb)
         nr_pdsch_mean = _avg_series(nr_pdsch)
         lte_pdsch_mean = _avg_series(lte_pdsch)
         mac_total_mean = _avg_series(mac_total, plateau_start_dt)
         bw_mhz = _median_series(bw_samples)
+        active_slot_count = len(app_samples) or len(
+            {dt for dt, _, _ in nr_pdsch} | {dt for dt, _, _ in lte_pdsch}
+        )
+        rf_sample_count = max(len(rf_rsrp), len(rf_sinr))
         steady_or_avg = steady_state_mbps or avg_rate
         steady_or_avg_raw = steady_state_raw or avg_rate_raw
+        throughput_spread = None
+        if app_samples:
+            app_vals = [value for _, value in app_samples]
+            throughput_spread = {
+                "min": round(min(app_vals), 1),
+                "p10": round(_nemo_percentile(app_vals, 0.10), 1),
+                "p50": round(_nemo_percentile(app_vals, 0.50), 1),
+                "p90": round(_nemo_percentile(app_vals, 0.90), 1),
+                "max": round(max(app_vals), 1),
+                "n": len(app_vals),
+            }
         if steady_or_avg_raw and bw_mhz and bw_mhz > 0:
             mbps_per_mhz = round(steady_or_avg_raw / bw_mhz, 2)
             spectral_eff_bps_hz = mbps_per_mhz
@@ -2682,6 +2790,39 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             for value in (bw_mhz, prb_util_mean, sinr_mean, delivery_efficiency_pct, mac_total_mean)
             if value is not None
         )
+        rf_consistency_issues = []
+        if rf_sample_count < 3:
+            rf_consistency_issues.append("too_few_rf_samples")
+        if (
+            sinr_mean is not None
+            and sinr_mean < 0
+            and (
+                (nr_pdsch_mean is not None and nr_pdsch_mean >= 120)
+                or (steady_or_avg_raw is not None and steady_or_avg_raw >= 180)
+            )
+        ):
+            rf_consistency_issues.append("sinr_vs_nr_throughput")
+        if (
+            rsrp_mean is not None
+            and rsrp_mean <= -110
+            and (
+                (steady_or_avg_raw is not None and steady_or_avg_raw >= 150)
+                or (nr_pdsch_mean is not None and nr_pdsch_mean >= 120)
+            )
+        ):
+            rf_consistency_issues.append("rsrp_vs_throughput")
+        rf_consistency_note = None
+        if rf_consistency_issues:
+            issue_labels = {
+                "too_few_rf_samples": "too few active RF samples",
+                "sinr_vs_nr_throughput": "negative SINR with high NR throughput",
+                "rsrp_vs_throughput": "very low RSRP with high throughput",
+            }
+            rf_consistency_note = (
+                "RF consistency warning: "
+                + ", ".join(issue_labels[issue] for issue in rf_consistency_issues)
+                + ". Treat the RF diagnosis as low-confidence and verify the source export."
+            )
         if (eff_time and eff_time < 6) or (steady_sample_count < 3 and len(app_samples) < 6):
             confidence_class = "low"
             confidence_note = "Short transfer / sparse steady-state window — directional only."
@@ -2695,6 +2836,9 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         else:
             confidence_class = "medium"
             confidence_note = "Useful directional signal, but confirm on repeated DTs."
+        if rf_consistency_issues:
+            confidence_class = "low"
+            confidence_note = rf_consistency_note
         slow_start_note = None
         if (
             kind == "download"
@@ -2736,8 +2880,17 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "deliveryEfficiencyPct": delivery_efficiency_pct,
             "loadState": load_state,
             "confidenceClass": confidence_class,
+            "confidenceLevel": confidence_class,
             "confidenceNote": confidence_note,
+            "confidenceReason": confidence_note,
             "efficiencyClass": efficiency_class,
+            "throughputSpreadMbps": throughput_spread,
+            "dlSampleSpread": throughput_spread,
+            "activeSlotCount": active_slot_count or None,
+            "rfSampleCount": rf_sample_count or None,
+            "rfConsistencyIssues": rf_consistency_issues,
+            "rfConsistencyFlags": list(rf_consistency_issues),
+            "rfConsistencyNote": rf_consistency_note,
         })
 
     # Identify the operations (the DT runs ping ×2, one upload, one download).
@@ -2826,9 +2979,18 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "deliveryEfficiencyPct": ds.get("deliveryEfficiencyPct"),
             "loadState": ds.get("loadState"),
             "confidenceClass": ds.get("confidenceClass"),
+            "confidenceLevel": ds.get("confidenceLevel"),
             "confidenceNote": ds.get("confidenceNote"),
+            "confidenceReason": ds.get("confidenceReason"),
             "steadyStateSampleCount": ds.get("steadyStateSampleCount"),
             "efficiencyClass": ds.get("efficiencyClass"),
+            "throughputSpreadMbps": ds.get("throughputSpreadMbps"),
+            "dlSampleSpread": ds.get("dlSampleSpread"),
+            "activeSlotCount": ds.get("activeSlotCount"),
+            "rfSampleCount": ds.get("rfSampleCount"),
+            "rfConsistencyIssues": ds.get("rfConsistencyIssues") or [],
+            "rfConsistencyFlags": ds.get("rfConsistencyFlags") or [],
+            "rfConsistencyNote": ds.get("rfConsistencyNote"),
             "authoritative": True,
             "source": "timeseries",
             # Upload + ping summaries (also derived from the same time series)
@@ -3660,6 +3822,18 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
     ho_uplane_interruption_indices = resolve(header_map, ("HO U-plane interruption",))
     ppp_rate_dl_indices = resolve(header_map, ("PPP rate DL",))
     recv_ppp_bytes_indices = resolve(header_map, ("Recv. PPP bytes",))
+    device_model_indices = resolve(header_map, (
+        "Device name",
+        "Device label",
+        "Device",
+        "Terminal name",
+        "Terminal",
+        "Equipment",
+        "UE model",
+        "Model",
+        "Device model",
+        "Phone model",
+    ))
     # Event ID column (BF, index 57): DAA / DAC / DAD / DREQ / DCOMP markers
     event_id_indices = resolve(header_map, ("Event ID",))
     event_text_indices = resolve(header_map, ("Event",))
@@ -3691,6 +3865,7 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
     nr_bands = set()
     nr_presence_by_second = {}
     has_5g = False
+    device_models_seen = []
     parsing_qa = {
         "normalizedValueCount": 0,
         "normalizedFields": {},
@@ -3721,6 +3896,7 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
         transfer_status = _nemo_pick_text_resolved(row, transfer_status_indices, n)
         cell_types = _nemo_pick_all_texts_resolved(row, cell_type_indices, n)
         band_text = _nemo_pick_text_resolved(row, band_indices, n)
+        device_model = _nemo_pick_text_resolved(row, device_model_indices, n)
         # The "Measurement Title" (DT / "BJ" name) is only populated on the radio/serving rows that
         # start each DT block; transfer rows leave it blank. Forward-fill it so every row — including
         # the data-transfer rows — carries its DT name.
@@ -3729,6 +3905,8 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
             last_title = measurement_title
         else:
             measurement_title = last_title
+        if device_model:
+            device_models_seen.append(device_model)
 
         app_dl_raw = _nemo_pick_float_resolved(row, app_dl_indices, n)
         app_dl_avg_raw = _nemo_pick_float_resolved(row, app_dl_avg_indices, n)
@@ -3991,6 +4169,10 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
             else "No 5G NR/EN-DC detected in export. Operator remains in DL ranking but 5G-specific KPIs are N/A."
         ),
     }
+    device_model = None
+    if device_models_seen:
+        device_model = max(set(device_models_seen), key=device_models_seen.count)
+        technology_status["deviceModel"] = device_model
 
     return {
         "operator": operator,
@@ -4007,6 +4189,7 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
         "rowsByMeasurementTitle": rows_by_measurement_title,
         "coverage": coverage,
         "technologyStatus": technology_status,
+        "deviceModel": device_model,
         "parsingQa": parsing_qa,
         # Authoritative per-session statistics from the sibling "Data transfer session
         # statistics" export (ping/upload/download), when present alongside this file.
@@ -9222,6 +9405,28 @@ def _nemo_build_executive_conclusion(operators: list[dict], ranking: list[dict],
 def _nemo_build_validation_warnings(operators: list[dict], diagnosis: dict) -> dict:
     """Task 18 — validation warnings shown at the top of the report."""
     warnings = []
+    device_models = [
+        {
+            "operator": item.get("operator") or "UNKNOWN",
+            "deviceModel": str(item.get("deviceModel") or "").strip(),
+        }
+        for item in (operators or [])
+        if str(item.get("deviceModel") or "").strip()
+    ]
+    unique_device_models = sorted({item["deviceModel"] for item in device_models})
+
+    if len(unique_device_models) > 1:
+        warnings.append({
+            "type": "device_model_mismatch",
+            "severity": "warning",
+            "operator": "",
+            "message": "Different device models were used across operators: "
+            + "; ".join(
+                f"{item['operator']}: {item['deviceModel']}"
+                for item in device_models
+            )
+            + ". Confirm device parity before drawing strong conclusions from a single DT.",
+        })
 
     # No 5G detected for any operator
     any_5g = any(item.get("has5g") for item in operators or [])
@@ -11260,7 +11465,11 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "scellsAvg": _deep_num(kpis.get("scellsAvgAll")),
         "scellsMax": _deep_num(kpis.get("scellsMax")),
         "scellsActive": _deep_num(kpis.get("scellsActiveShare")),
-        "caActive": _deep_num(kpis.get("caActiveShare")),
+        "caActive": _deep_num(
+            kpis.get("caActiveShare")
+            if kpis.get("caActiveShare") is not None
+            else kpis.get("lteCaActiveShare")
+        ),
         "blerAvg": stat("bler", "average"),
         "blerP90": stat("bler", "p90"),
         "blerAbove10": _deep_num(kpis.get("blerAbove10Share")),
@@ -14556,7 +14765,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 48
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 49
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -14868,6 +15077,7 @@ def _benchmark_nemo_build_dataset(
             "fileName": item.get("fileName"),
             "path": item.get("path"),
             "delimiter": item.get("delimiter"),
+            "deviceModel": item.get("deviceModel"),
             "has5g": bool(item.get("has5g")),
             "fiveGStatus": item.get("fiveGStatus"),
             "measurementTitles": item.get("measurementTitles") or [],
@@ -14885,6 +15095,112 @@ def _benchmark_nemo_build_dataset(
         })
 
     raw_parsing_qa = _benchmark_raw_parsing_qa(prepared_operator_files)
+    dt_list = _nemo_build_dt_list(prepared_operator_files)
+    device_parity_models = [
+        {
+            "operator": item.get("operator"),
+            "deviceModel": str(item.get("deviceModel") or "").strip(),
+        }
+        for item in prepared_operator_files
+        if str(item.get("deviceModel") or "").strip()
+    ]
+    device_parity_unique = sorted({item["deviceModel"] for item in device_parity_models})
+    device_by_operator = {
+        str(item.get("operator") or "UNKNOWN"): (
+            str(item.get("deviceModel") or "").strip() or None
+        )
+        for item in prepared_operator_files
+    }
+    devices_comparable = len({value for value in device_by_operator.values() if value}) <= 1
+    device_parity_warning = ""
+    if len(device_parity_unique) > 1:
+        device_parity_warning = (
+            "Different device models were detected across operators: "
+            + "; ".join(
+                f"{item['operator']}: {item['deviceModel']}"
+                for item in device_parity_models
+            )
+            + ". Confirm device parity before drawing strong single-DT conclusions."
+        )
+
+    active_samples_by_operator = {}
+    low_sample_ops = []
+    rf_consistency_ops = []
+    for op_name, op_entry in dl_timeline_by_metric.items():
+        evt_kpis = (op_entry or {}).get("downloadEventKpis") or {}
+        active_count = evt_kpis.get("activeSlotCount")
+        active_samples_by_operator[op_name] = active_count
+        if active_count is not None and active_count < 5:
+            low_sample_ops.append((op_name, int(active_count)))
+        if evt_kpis.get("rfConsistencyIssues") or evt_kpis.get("rfConsistencyFlags"):
+            rf_consistency_ops.append(op_name)
+
+    dt_count = len(dt_list) if dt_list else 0
+    scorecard_confidence_level = "low"
+    if dt_count >= 4:
+        scorecard_confidence_level = "high"
+    elif dt_count >= 2:
+        scorecard_confidence_level = "medium"
+    if dt_count <= 1 or low_sample_ops or rf_consistency_ops:
+        scorecard_confidence_level = "low"
+
+    confidence_reason_parts = []
+    if dt_count <= 1:
+        confidence_reason_parts.append("n=1 drive test")
+    if low_sample_ops:
+        confidence_reason_parts.append(
+            "active download samples: "
+            + ", ".join(f"{op} {count}" for op, count in low_sample_ops)
+        )
+    if rf_consistency_ops:
+        confidence_reason_parts.append(
+            "RF consistency validator flagged " + ", ".join(rf_consistency_ops)
+        )
+    if device_parity_warning:
+        confidence_reason_parts.append("device models differ across operators")
+    scorecard_confidence_reason = (
+        "; ".join(confidence_reason_parts)
+        if confidence_reason_parts
+        else (
+            "Multiple drive tests with enough active download samples were available."
+            if scorecard_confidence_level == "high"
+            else "Directional result with moderate supporting sample depth."
+        )
+    )
+    methodology_note = (
+        f"Methodology note: n={dt_count or 1} DT"
+        + ("" if (dt_count or 1) == 1 else "s")
+        + ". Download-session RF is aggregated only on active slots (App DL or PDSCH > 0), "
+        + "SS-SINR and SS-RSRP are throughput-weighted, and active-bandwidth / load metrics use "
+        + "the same active-slot scope. Active download samples: "
+        + ", ".join(
+            f"{op} {active_samples_by_operator.get(op) or 0}"
+            for op in ("IAM", "Orange", "INWI")
+            if op in device_by_operator or op in active_samples_by_operator
+        )
+        + ". Devices: "
+        + ", ".join(
+            f"{op} {device_by_operator.get(op) or 'unknown'}"
+            for op in ("IAM", "Orange", "INWI")
+            if op in device_by_operator
+        )
+        + ". Confidence: "
+        + scorecard_confidence_reason
+        + "."
+    )
+    benchmark_validity = {
+        "deviceByOperator": device_by_operator,
+        "devicesComparable": devices_comparable,
+        "dtCount": dt_count or 1,
+        "confidenceLevel": (
+            scorecard_confidence_level.capitalize()
+            if scorecard_confidence_level
+            else "Low"
+        ),
+        "confidenceReason": scorecard_confidence_reason,
+        "activeSamplesByOperator": active_samples_by_operator,
+        "rfConsistencyOperators": rf_consistency_ops,
+    }
 
     # Deep Benchmark analysis (IAM rule engine). Single-DT scope = each operator has
     # exactly one measurement title (their own DT timestamp, which differs across
@@ -14913,6 +15229,7 @@ def _benchmark_nemo_build_dataset(
 
     return {
         "name": "Nemo TXT Benchmark",
+        "parserVersion": _BENCHMARK_NEMO_PARSER_VERSION,
         "analysisVersion": _BENCHMARK_NEMO_ANALYSIS_VERSION,
         "dlMode": dl_mode,
         "dlModeLabel": dl_mode_label,
@@ -14923,13 +15240,25 @@ def _benchmark_nemo_build_dataset(
             "No active-DL session detected in this scope — showing all-session KPIs."
             if window_fallback else ""
         ),
+        "scorecardConfidence": {
+            "confidenceLevel": scorecard_confidence_level,
+            "reason": scorecard_confidence_reason,
+        },
+        "deviceParity": {
+            "available": bool(device_parity_models),
+            "allSame": bool(device_parity_models) and len(device_parity_unique) <= 1,
+            "models": device_parity_models,
+            "warning": device_parity_warning,
+        },
+        "benchmarkValidity": benchmark_validity,
+        "methodologyNote": methodology_note,
         "rawParsingQa": raw_parsing_qa,
         "sourceFiles": [{"operator": item.get("operator"), "fileName": item.get("fileName"), "path": item.get("path")} for item in prepared_operator_files],
         "deepBenchmark": deep_benchmark,
         "operatorCount": len(operators_payload),
         "testCount": len(all_tests),
         "transferSessionCount": len(all_transfer_sessions),
-        "dtList": _nemo_build_dt_list(prepared_operator_files),
+        "dtList": dt_list,
         "operators": operators_payload,
         "ranking": ranking,
         "tests": all_tests,

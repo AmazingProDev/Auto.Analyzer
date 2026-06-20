@@ -62,7 +62,7 @@ except Exception as e:
     print("    (could not parse load response:", e, ")"); raise SystemExit
 ds = d.get("dataset", {}) or {}
 tl = (ds.get("charts", {}) or {}).get("dlTimelineByMetric", {}) or {}
-print(f"    cached={d.get('cached')} analysisVersion={ds.get('analysisVersion')} operators={list(tl.keys())}")
+print(f"    cached={d.get('cached')} parserVersion={ds.get('parserVersion')} analysisVersion={ds.get('analysisVersion')} operators={list(tl.keys())}")
 for op in ("IAM", "Orange", "INWI"):
     kp = (tl.get(op, {}) or {}).get("downloadEventKpis", {}) or {}
     if kp:

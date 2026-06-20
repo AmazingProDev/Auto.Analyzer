@@ -11,6 +11,7 @@ test("buildBenchmarkNemoScorecardModel ranks operators and builds a verdict", ()
       downloadEventKpis: {
         dlAppRateMbps: 338.4,
         dlSteadyStateMbps: 466.3,
+        throughputSpreadMbps: { min: 120, p10: 140, p50: 338, p90: 482, max: 500 },
         timeToConnectAvgMs: 81,
         startDelayAvgS: 0.84,
       },
@@ -32,6 +33,7 @@ test("buildBenchmarkNemoScorecardModel ranks operators and builds a verdict", ()
       downloadEventKpis: {
         dlAppRateMbps: 122.2,
         dlSteadyStateMbps: 122.4,
+        throughputSpreadMbps: { min: 80, p10: 90, p50: 122, p90: 150, max: 160 },
         timeToConnectAvgMs: 92,
         startDelayAvgS: 1.1,
       },
@@ -53,6 +55,7 @@ test("buildBenchmarkNemoScorecardModel ranks operators and builds a verdict", ()
       downloadEventKpis: {
         dlAppRateMbps: 375.3,
         dlSteadyStateMbps: 410,
+        throughputSpreadMbps: { min: 140, p10: 180, p50: 375, p90: 498, max: 500 },
         timeToConnectAvgMs: 109,
         startDelayAvgS: 1.6,
       },
@@ -84,6 +87,8 @@ test("buildBenchmarkNemoScorecardModel ranks operators and builds a verdict", ()
   assert.equal(model.rows[0].metrics.rf.rank, 1);
   assert.equal(model.rows[0].metrics.loadState.label, "Headroom");
   assert.equal(model.rows[0].metrics.confidence.label, "Low confidence");
+  assert.equal(model.rows[0].metrics.dlAvg.label, "338 Mbps");
+  assert.equal(model.rows[0].metrics.dlAvg.rangeLabel, "≈120–500");
   assert.match(model.verdict, /DL avg: INWI/);
   assert.match(model.verdict, /DL steady: IAM/);
   assert.match(model.verdict, /Upload: Orange/);

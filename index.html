@@ -553,7 +553,7 @@
                             </div>
                             <div id="benchmarkNemoScorecardCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
                                 <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Executive scorecard</div>
-                                <div style="color:#64748b;font-size:11px;margin-bottom:10px">Per-operator winner by dimension (this DT). n=1 drive test — directional, not statistically significant.</div>
+                                <div id="benchmarkNemoScorecardMeta" style="color:#64748b;font-size:11px;margin-bottom:10px">Per-operator winner by dimension (this DT). n=1 drive test — directional, not statistically significant.</div>
                                 <div id="benchmarkNemoScorecardBody"></div>
                             </div>
 
@@ -612,7 +612,7 @@
                                     <!-- Authoritative RF & layer split, scoped to the download session by Nemo -->
                                     <div id="benchmarkNemoAuthRfCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
                                         <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Download-session RF &amp; layer split</div>
-                                        <div style="color:#64748b;font-size:11px;margin-bottom:10px">RF/PHY averaged over the download session window (DAA→DAD), and the per-second vs byte-based throughput cross-check.</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:10px">RF/PHY aggregated on active download slots only (App DL or PDSCH &gt; 0), with throughput-weighted SS-SINR/SS-RSRP and the per-second vs byte-based throughput cross-check.</div>
                                         <div id="benchmarkNemoAuthRfBody"></div>
                                     </div>
 
@@ -1111,7 +1111,7 @@
     <script src="benchmark_nemo_ui_state.js?v=1"></script>
     <script src="theme_v2.js?v=v595"></script>
     <script src="window_manager.js?v=1"></script>
-    <script src="app.js?v=v629"></script>
+    <script src="app.js?v=v630"></script>
     <script src="local_ai_ui.js?v=6"></script>
     <script src="trp_import_ui.js?v=37"></script>
     <!-- User Point Modal -->

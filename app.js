@@ -993,6 +993,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const benchmarkNemoScorecardBody = document.getElementById(
     "benchmarkNemoScorecardBody",
   );
+  const benchmarkNemoScorecardMeta = document.getElementById(
+    "benchmarkNemoScorecardMeta",
+  );
   const benchmarkNemoDlTimelineCard = document.getElementById(
     "benchmarkNemoDlTimelineCard",
   );
@@ -2940,6 +2943,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (benchmarkNemoScorecardCard)
       benchmarkNemoScorecardCard.style.display = "none";
     if (benchmarkNemoScorecardBody) benchmarkNemoScorecardBody.innerHTML = "";
+    if (benchmarkNemoScorecardMeta) benchmarkNemoScorecardMeta.textContent = "";
     if (benchmarkNemoDlTimelineCard)
       benchmarkNemoDlTimelineCard.style.display = "none";
     if (benchmarkNemoSlowStartNote) {
@@ -3032,11 +3036,14 @@ document.addEventListener("DOMContentLoaded", () => {
       );
   };
 
-  const renderBenchmarkNemoScorecard = (tlByMetric, tlOpNames) => {
+  const renderBenchmarkNemoScorecard = (dataset, tlByMetric, tlOpNames) => {
     if (!benchmarkNemoScorecardCard || !benchmarkNemoScorecardBody) return;
     const model = buildBenchmarkNemoScorecardModel(tlByMetric, tlOpNames);
     if (!model.rows.length) {
       benchmarkNemoScorecardBody.innerHTML = "";
+      if (benchmarkNemoScorecardMeta) {
+        benchmarkNemoScorecardMeta.textContent = "";
+      }
       benchmarkNemoScorecardCard.style.display = "none";
       return;
     }
@@ -3100,7 +3107,7 @@ document.addEventListener("DOMContentLoaded", () => {
       'style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"';
     const scorecardTitles = {
       operator: "Mobile operator for this drive-test slice.",
-      dl: "Download score. Main value = file-average App DL for the session. The green steady line = mean throughput after ramp-up, starting at the first second reaching at least 90% of peak.",
+      dl: "Download score. Main value = session App DL rounded for executive readability. The range line shows the observed active-download spread, and the green steady line = mean throughput after ramp-up, starting at the first second reaching at least 90% of peak.",
       ul: "Upload score based on session App UL throughput. It is shown separately because the slow-start analysis is download-specific.",
       latency: "Latency score based on successful ping RTT. The small caption below provides session setup or connection context when available.",
       reliability: "Reliability score for this DT slice. It combines ping success with whether DL and UL sessions completed instead of failing.",
@@ -3108,10 +3115,26 @@ document.addEventListener("DOMContentLoaded", () => {
       load: "Load and bottleneck heuristic derived from PRB utilization, RF quality, and delivery efficiency. It helps separate spare capacity from pressure or RF limitation.",
       confidence: "Interpretation confidence based on transfer duration, steady-state sample count, and how much supporting KPI evidence was available.",
     };
+    const validity =
+      (dataset && dataset.benchmarkValidity) || {};
+    const scorecardConfidence =
+      (dataset && dataset.scorecardConfidence) || {};
+    const confidenceKey = String(
+      validity.confidenceLevel ||
+        scorecardConfidence.confidenceLevel ||
+        "",
+    ).toLowerCase();
+    const showRanges = confidenceKey === "low";
 
     const rowsHtml = model.rows
       .map((row) => {
         const cells = row.metrics;
+        const rangeHtml =
+          showRanges && cells.dlAvg.rangeLabel
+            ? '<div style="font-size:10px;color:#93c5fd">(' +
+              escapeHtml(cells.dlAvg.rangeLabel) +
+              ")</div>"
+            : "";
         return (
           "<tr>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);font-size:11px;font-weight:700;color:' +
@@ -3123,7 +3146,9 @@ document.addEventListener("DOMContentLoaded", () => {
           rankTone("dlAvg", cells.dlAvg.rank, model.rows) +
           '"><div style="font-size:11px;color:#e2e8f0;font-weight:700">' +
           escapeHtml(cells.dlAvg.label) +
-          '</div><div style="font-size:10px;color:#34d399"' +
+          "</div>" +
+          rangeHtml +
+          '<div style="font-size:10px;color:#34d399"' +
           titleAttr("Steady-state App DL mean after the initial ramp-up period. Ramp-up ends at the first second that reaches at least 90% of the session peak throughput.") +
           '>steady ' +
           escapeHtml(cells.dlSteady.label) +
@@ -3163,6 +3188,52 @@ document.addEventListener("DOMContentLoaded", () => {
       })
       .join("");
 
+    const confidenceTone = {
+      low: "background:rgba(251,191,36,0.14);color:#fde68a;border:1px solid rgba(251,191,36,0.24);",
+      medium: "background:rgba(96,165,250,0.14);color:#bfdbfe;border:1px solid rgba(96,165,250,0.24);",
+      high: "background:rgba(34,197,94,0.14);color:#86efac;border:1px solid rgba(34,197,94,0.24);",
+    };
+    const confidenceLabel = confidenceKey
+      ? confidenceKey.charAt(0).toUpperCase() +
+        confidenceKey.slice(1) +
+        " confidence"
+      : "";
+    const dtCount = Number(validity.dtCount || 1) || 1;
+    const confidenceReason = String(
+      validity.confidenceReason || scorecardConfidence.reason || "",
+    );
+    if (benchmarkNemoScorecardMeta) {
+      benchmarkNemoScorecardMeta.innerHTML =
+        'Per-operator winner by dimension (this DT). ' +
+        (confidenceLabel
+          ? '<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;margin:0 6px 0 2px;' +
+            (confidenceTone[confidenceKey] || confidenceTone.medium) +
+            '">' +
+            escapeHtml(confidenceLabel) +
+            "</span>"
+          : "") +
+        "<span>n=" +
+        escapeHtml(String(dtCount)) +
+        " DT" +
+        (dtCount === 1 ? "" : "s") +
+        " — directional" +
+        (confidenceKey === "low"
+          ? ", not statistically significant."
+          : ".") +
+        "</span>" +
+        (confidenceReason
+          ? '<div style="margin-top:6px;color:#94a3b8;font-size:10px">' +
+            escapeHtml(confidenceReason) +
+            "</div>"
+          : "");
+    }
+    const deviceParityWarning =
+      dataset && dataset.deviceParity && dataset.deviceParity.warning
+        ? String(dataset.deviceParity.warning)
+        : "";
+    const methodologyNote =
+      dataset && dataset.methodologyNote ? String(dataset.methodologyNote) : "";
+
     benchmarkNemoScorecardBody.innerHTML =
       '<div style="overflow:auto">' +
       '<table style="width:100%;border-collapse:collapse;min-width:1040px">' +
@@ -3180,7 +3251,17 @@ document.addEventListener("DOMContentLoaded", () => {
       "</tbody></table></div>" +
       '<div style="margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(37,99,235,0.10);border:1px solid rgba(37,99,235,0.16);color:#dbeafe;font-size:11px"><strong style="color:#93c5fd">Verdict:</strong> ' +
       escapeHtml(model.verdict) +
-      "</div>";
+      "</div>" +
+      (deviceParityWarning
+        ? '<div style="margin-top:10px;padding:9px 11px;border-radius:10px;background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.18);color:#fde68a;font-size:11px"><strong style="color:#fbbf24">Device parity:</strong> ' +
+          escapeHtml(deviceParityWarning) +
+          "</div>"
+        : "") +
+      (methodologyNote
+        ? '<div style="margin-top:10px;color:#64748b;font-size:10px;line-height:1.5">' +
+          escapeHtml(methodologyNote) +
+          "</div>"
+        : "");
     benchmarkNemoScorecardCard.style.display = "";
   };
 
@@ -3204,7 +3285,15 @@ document.addEventListener("DOMContentLoaded", () => {
     // ── DL Throughput Timeline (multi-metric) ────────────────────────────
     const tlByMetric = (dataset.charts || {}).dlTimelineByMetric || {};
     const tlOpNames = Object.keys(tlByMetric);
-    renderBenchmarkNemoScorecard(tlByMetric, tlOpNames);
+    renderBenchmarkNemoScorecard(dataset, tlByMetric, tlOpNames);
+    const benchmarkValidity =
+      (dataset && dataset.benchmarkValidity) || {};
+    const lowConfidenceExecutive =
+      String(
+        benchmarkValidity.confidenceLevel ||
+          ((dataset && dataset.scorecardConfidence) || {}).confidenceLevel ||
+          "",
+      ).toLowerCase() === "low";
     const CAT_META = {
       app: {
         label: "App Layer",
@@ -3542,6 +3631,19 @@ document.addEventListener("DOMContentLoaded", () => {
       // ── Stats row below chart ──
       const renderStats = (statsItems) => {
         if (!benchmarkNemoDlTimelineStats) return;
+        const fmtMbps = (value) => {
+          if (value == null) return "—";
+          return lowConfidenceExecutive
+            ? Math.round(Number(value)) + " Mbps"
+            : Number(value).toFixed(1) + " Mbps";
+        };
+        const fmtSpread = (spread) =>
+          spread && spread.min != null && spread.max != null
+            ? "≈" +
+              Math.round(Number(spread.min)) +
+              "–" +
+              Math.round(Number(spread.max))
+            : "";
         benchmarkNemoDlTimelineStats.innerHTML = statsItems
           .map(
             ({ op, color, avg, max, durationSec, keyLabel, evtKpis }) =>
@@ -3556,21 +3658,26 @@ document.addEventListener("DOMContentLoaded", () => {
               "</strong>" +
               '<span style="color:#94a3b8;font-size:10px">avg app</span>' +
               '<strong style="color:#e2e8f0;font-size:11px">' +
-              avg.toFixed(1) +
-              " Mbps</strong>" +
+              fmtMbps(avg) +
+              "</strong>" +
+              (lowConfidenceExecutive && evtKpis && evtKpis.throughputSpreadMbps
+                ? '<span style="color:#93c5fd;font-size:10px">(' +
+                  escapeHtml(fmtSpread(evtKpis.throughputSpreadMbps)) +
+                  ")</span>"
+                : "") +
               (evtKpis && evtKpis.dlAppRateMbps != null
                 ? '<span style="color:#475569;font-size:10px">·</span>' +
                   '<span style="color:#94a3b8;font-size:10px" title="Bytes DL × 8 / Download time">DL avg</span>' +
                   '<strong style="color:#e2e8f0;font-size:11px">' +
-                  evtKpis.dlAppRateMbps.toFixed(1) +
-                  " Mbps</strong>"
+                  fmtMbps(evtKpis.dlAppRateMbps) +
+                  "</strong>"
                 : "") +
               (evtKpis && evtKpis.dlSteadyStateMbps != null
                 ? '<span style="color:#475569;font-size:10px">·</span>' +
                   '<span style="color:#34d399;font-size:10px">steady</span>' +
                   '<strong style="color:#d1fae5;font-size:11px">' +
-                  evtKpis.dlSteadyStateMbps.toFixed(1) +
-                  " Mbps</strong>"
+                  fmtMbps(evtKpis.dlSteadyStateMbps) +
+                  "</strong>"
                 : "") +
               '<span style="color:#475569;font-size:10px">·</span>' +
               '<span style="color:#94a3b8;font-size:10px">max</span>' +
@@ -4255,6 +4362,17 @@ document.addEventListener("DOMContentLoaded", () => {
             .map(({ op, dl, kp, curveAvg }) => {
               const nr = dl.nrPdschTput;
               const lte = dl.ltePdschTput;
+              const rfIssues = Array.isArray(dl.rfConsistencyFlags)
+                ? dl.rfConsistencyFlags
+                : Array.isArray(dl.rfConsistencyIssues)
+                  ? dl.rfConsistencyIssues
+                  : [];
+              const rfWarningTitle = dl.rfConsistencyNote || rfIssues.join(", ");
+              const rfWarningBadge = rfIssues.length
+                ? '<span style="display:inline-flex;align-items:center;padding:2px 6px;border-radius:999px;border:1px solid rgba(245,158,11,0.22);background:rgba(245,158,11,0.12);color:#fbbf24;font-size:9px;font-weight:700;margin-left:6px" title="' +
+                  escapeHtml(rfWarningTitle) +
+                  '">RF check</span>'
+                : "";
               const tot = (nr || 0) + (lte || 0);
               const nrPct = tot > 0 ? Math.round(((nr || 0) / tot) * 100) : null;
               const splitTxt =
@@ -4274,7 +4392,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
               return (
                 "<tr>" +
-                '<td ' + td + ';font-weight:700;color:' + opColorFor(op) + '">' + escapeHtml(op) + "</td>" +
+                '<td ' + td + ';font-weight:700;color:' + opColorFor(op) + '">' + escapeHtml(op) + rfWarningBadge + "</td>" +
                 "<td " + td + ">" + num(dl.ssRsrpMean, 1) + " dBm</td>" +
                 '<td ' + td + ';color:' + sinrColor(dl.ssSinrMean) + ';font-weight:700">' + num(dl.ssSinrMean, 1) + " dB</td>" +
                 "<td " + td + ">" + num(dl.prbUtilMean, 1) + "%</td>" +
@@ -4310,7 +4428,7 @@ document.addEventListener("DOMContentLoaded", () => {
             "</tr></thead><tbody>" +
             rfRowsHtml +
             "</tbody></table>" +
-            '<div style="color:#64748b;font-size:10px;margin-top:8px">The RF ratios use steady-state DL when available; otherwise they fall back to the file-average. The last column cross-validates the per-second timeline average against Nemo\'s authoritative file-based app throughput (Δ = relative difference).</div>';
+            '<div style="color:#64748b;font-size:10px;margin-top:8px">The RF ratios use active download slots only (App DL or PDSCH &gt; 0). SS-SINR and SS-RSRP are throughput-weighted, the throughput spread captures observed uncertainty, and the last column cross-validates the per-second timeline average against Nemo\'s authoritative file-based app throughput (Δ = relative difference).</div>';
           rfCard.style.display = "";
         } else if (rfCard) {
           rfCard.style.display = "none";

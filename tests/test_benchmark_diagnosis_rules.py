@@ -224,6 +224,25 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(repaired["rows"][0]["appDlMbps"], 107.158)
         self.assertEqual(repaired["rows"][1]["totalMacDlMbps"], 510.0)
 
+    def test_nemo_parse_operator_file_uncached_extracts_device_model(self):
+        headers = [
+            "Time",
+            "Measurement Title",
+            "Device name",
+            "App. rate DL",
+        ]
+        data_rows = [
+            ["2026-06-20 08:40:00.000", "DT1", "Samsung Galaxy S24", "125000000"],
+        ]
+        with mock.patch.object(server, "_nemo_read_tabular_file", return_value=("\t", headers, data_rows)), \
+             mock.patch.object(server, "_nemo_guess_operator", return_value="IAM"), \
+             mock.patch.object(server, "_nemo_find_session_stats_path", return_value=""), \
+             mock.patch.object(server, "_nemo_parse_session_stats", return_value={}):
+            parsed = server._nemo_parse_operator_file_uncached("/tmp/iam_benchmark.txt")
+
+        self.assertEqual(parsed["deviceModel"], "Samsung Galaxy S24")
+        self.assertEqual(parsed["technologyStatus"]["deviceModel"], "Samsung Galaxy S24")
+
     def test_benchmark_dl_prefers_download_average_rows(self):
         base = datetime(2026, 5, 8, 8, 40, 0)
         rows = [
@@ -1187,6 +1206,142 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(download["confidenceClass"], "high")
         self.assertEqual(kpis["confidenceClass"], "high")
 
+    def test_nemo_extract_dl_events_uses_only_active_slots_for_rf_means(self):
+        rows = self._nemo_download_session_rows(
+            dreq_offset_s=0.3,
+            dcomp_offset_s=4.3,
+            dad_offset_s=4.8,
+            download_time_s=4.0,
+            final_bytes_dl=180_000_000,
+            samples=[
+                (1.0, 100.0),
+                (2.0, 200.0),
+                (3.0, 300.0),
+            ],
+            prb_pct=18.0,
+            bw_mhz=40.0,
+            sinr_db=0.0,
+        )
+        idle_rows = [
+            {
+                "_dt": datetime(2026, 6, 20, 8, 40, 0, 100000),
+                "time": datetime(2026, 6, 20, 8, 40, 0, 100000).isoformat(),
+                "measurementTitle": "DT1",
+                "dataTransferDirection": "Downlink",
+                "applicationProtocol": "HTTP",
+                "sinrNr": -18.0,
+                "rsrpNr": -120.0,
+                "dlPrbPct": 2.0,
+                "pdschDl5gMbps": 0.0,
+                "pdschDlLteMbps": 0.0,
+            },
+            {
+                "_dt": datetime(2026, 6, 20, 8, 40, 4, 700000),
+                "time": datetime(2026, 6, 20, 8, 40, 4, 700000).isoformat(),
+                "measurementTitle": "DT1",
+                "dataTransferDirection": "Downlink",
+                "applicationProtocol": "HTTP",
+                "sinrNr": -15.0,
+                "rsrpNr": -118.0,
+                "dlPrbPct": 1.0,
+                "pdschDl5gMbps": 0.0,
+                "pdschDlLteMbps": 0.0,
+            },
+        ]
+        rows.extend(idle_rows)
+        active_rows = [row for row in rows if row.get("appDlMbps") is not None]
+        active_rows[0]["sinrNr"] = 10.0
+        active_rows[0]["rsrpNr"] = -95.0
+        active_rows[1]["sinrNr"] = 12.0
+        active_rows[1]["rsrpNr"] = -92.0
+        active_rows[2]["sinrNr"] = 14.0
+        active_rows[2]["rsrpNr"] = -90.0
+
+        result = server._nemo_extract_dl_events(rows)
+        download = result["download"]
+        kpis = result["kpis"]
+
+        self.assertAlmostEqual(download["ssSinrMean"], 12.7, places=1)
+        self.assertAlmostEqual(download["ssRsrpMean"], -91.5, places=1)
+        self.assertEqual(download["rfSampleCount"], 3)
+        self.assertEqual(kpis["rfSampleCount"], 3)
+        self.assertEqual(download["activeSlotCount"], 3)
+        self.assertEqual(kpis["activeSlotCount"], 3)
+
+    def test_nemo_extract_dl_events_flags_physically_impossible_rf_combo(self):
+        rows = self._nemo_download_session_rows(
+            dreq_offset_s=0.4,
+            dcomp_offset_s=8.4,
+            dad_offset_s=8.8,
+            download_time_s=8.0,
+            final_bytes_dl=250_000_000,
+            samples=[
+                (1.0, 240.0),
+                (2.0, 280.0),
+                (3.0, 320.0),
+                (4.0, 300.0),
+                (5.0, 290.0),
+                (6.0, 310.0),
+                (7.0, 305.0),
+                (8.0, 295.0),
+            ],
+            prb_pct=32.0,
+            bw_mhz=80.0,
+            sinr_db=-2.5,
+        )
+        for row in rows:
+            if row.get("appDlMbps") is not None:
+                row["rsrpNr"] = -114.0
+                row["pdschDl5gMbps"] = row["appDlMbps"] * 0.97
+
+        result = server._nemo_extract_dl_events(rows)
+        download = result["download"]
+        kpis = result["kpis"]
+
+        self.assertIn("sinr_vs_nr_throughput", download["rfConsistencyIssues"])
+        self.assertIn("rsrp_vs_throughput", download["rfConsistencyIssues"])
+        self.assertEqual(download["confidenceLevel"], "low")
+        self.assertEqual(kpis["confidenceLevel"], "low")
+        self.assertIn("RF consistency", download["confidenceReason"])
+        self.assertIn("RF consistency", kpis["confidenceReason"])
+
+    def test_nemo_extract_dl_events_adds_throughput_spread_and_confidence_aliases(self):
+        rows = self._nemo_download_session_rows(
+            dreq_offset_s=0.4,
+            dcomp_offset_s=5.4,
+            dad_offset_s=5.7,
+            download_time_s=5.0,
+            final_bytes_dl=180_000_000,
+            samples=[
+                (1.0, 100.0),
+                (2.0, 200.0),
+                (3.0, 300.0),
+                (4.0, 400.0),
+                (5.0, 500.0),
+            ],
+            prb_pct=20.0,
+            bw_mhz=100.0,
+            sinr_db=11.0,
+        )
+
+        result = server._nemo_extract_dl_events(rows)
+        download = result["download"]
+        kpis = result["kpis"]
+
+        self.assertEqual(
+            download["throughputSpreadMbps"],
+            {"min": 100.0, "p10": 140.0, "p50": 300.0, "p90": 460.0, "max": 500.0, "n": 5},
+        )
+        self.assertEqual(kpis["throughputSpreadMbps"], download["throughputSpreadMbps"])
+        self.assertEqual(download["dlSampleSpread"], download["throughputSpreadMbps"])
+        self.assertEqual(kpis["dlSampleSpread"], download["throughputSpreadMbps"])
+        self.assertEqual(download["confidenceLevel"], download["confidenceClass"])
+        self.assertEqual(kpis["confidenceLevel"], kpis["confidenceClass"])
+        self.assertEqual(download["confidenceReason"], download["confidenceNote"])
+        self.assertEqual(kpis["confidenceReason"], kpis["confidenceNote"])
+        self.assertEqual(download["rfConsistencyFlags"], download["rfConsistencyIssues"])
+        self.assertEqual(kpis["rfConsistencyFlags"], kpis["rfConsistencyIssues"])
+
     def test_nemo_extract_dl_events_uses_peak_plateau_for_iam_source_like_samples(self):
         rows = self._nemo_download_session_rows(
             dreq_offset_s=0.272,
@@ -1286,6 +1441,41 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(kpis["loadState"], "delivery_limited")
         self.assertAlmostEqual(download["deliveryEfficiencyPct"], 55.56, places=2)
         self.assertEqual(kpis["confidenceClass"], "high")
+
+    def test_benchmark_build_dataset_warns_when_device_models_differ(self):
+        operator_files = [
+            self._benchmark_operator_fixture("IAM", 338.4, [120.0, 482.0]),
+            self._benchmark_operator_fixture("Orange", 122.2, [80.0, 160.0]),
+            self._benchmark_operator_fixture("INWI", 375.3, [140.0, 500.0]),
+        ]
+        operator_files[0]["deviceModel"] = "Samsung Galaxy S24"
+        operator_files[1]["deviceModel"] = "iPhone 15 Pro"
+        operator_files[2]["deviceModel"] = "Samsung Galaxy S24"
+
+        dataset = server._benchmark_nemo_build_dataset(
+            deepcopy(operator_files),
+            dl_mode="app_rate_dl_avg",
+            window_mode="all_dt_session",
+        )
+
+        warnings = ((dataset.get("validationWarnings") or {}).get("warnings")) or []
+        mismatch = next((item for item in warnings if item.get("type") == "device_model_mismatch"), None)
+
+        self.assertIsNotNone(mismatch)
+        self.assertIn("different device models", mismatch["message"].lower())
+        self.assertIn("Samsung Galaxy S24", mismatch["message"])
+        self.assertIn("iPhone 15 Pro", mismatch["message"])
+        self.assertEqual(
+            dataset["benchmarkValidity"]["deviceByOperator"],
+            {
+                "IAM": "Samsung Galaxy S24",
+                "Orange": "iPhone 15 Pro",
+                "INWI": "Samsung Galaxy S24",
+            },
+        )
+        self.assertFalse(dataset["benchmarkValidity"]["devicesComparable"])
+        self.assertEqual(dataset["benchmarkValidity"]["dtCount"], 1)
+        self.assertEqual(dataset["benchmarkValidity"]["confidenceLevel"], "Low")
 
     def test_dt_clone_keeps_only_selected_downlink_session(self):
         base = datetime(2026, 5, 8, 8, 40, 0)

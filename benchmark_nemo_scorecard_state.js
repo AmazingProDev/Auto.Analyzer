@@ -61,6 +61,19 @@
       return CONFIDENCE_LABELS[key] ? key : "";
     }
 
+    function formatRoundedMbps(value) {
+      const num = asNumber(value);
+      return num === null ? "—" : Math.round(num) + " Mbps";
+    }
+
+    function formatRangeLabel(spread) {
+      if (!spread || typeof spread !== "object") return "";
+      const low = asNumber(spread.min);
+      const high = asNumber(spread.max);
+      if (low === null || high === null) return "";
+      return "≈" + Math.round(low) + "–" + Math.round(high);
+    }
+
     function rankNumericRows(rows, getter, direction) {
       const valid = rows
         .map((row) => ({ row, value: asNumber(getter(row)) }))
@@ -118,14 +131,17 @@
           metrics: {
             dlAvg: {
               value: asNumber(evtKpis.dlAppRateMbps),
-              label: evtKpis.dlAppRateMbps != null ? Number(evtKpis.dlAppRateMbps).toFixed(1) + " Mbps" : "—",
+              label: formatRoundedMbps(evtKpis.dlAppRateMbps),
+              rangeLabel: formatRangeLabel(
+                evtKpis.throughputSpreadMbps || evtKpis.dlSampleSpread,
+              ),
               rank: null,
             },
             dlSteady: {
               value: asNumber(evtKpis.dlSteadyStateMbps),
               label:
                 evtKpis.dlSteadyStateMbps != null
-                  ? Number(evtKpis.dlSteadyStateMbps).toFixed(1) + " Mbps"
+                  ? Math.round(Number(evtKpis.dlSteadyStateMbps)) + " Mbps"
                   : "—",
               rank: null,
             },
