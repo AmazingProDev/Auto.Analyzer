@@ -1,0 +1,397 @@
+/* ── LOS panel — centered, draggable, resizable ─────────────────────── */
+#los-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 460px;
+    min-width: 320px;
+    max-width: 96vw;
+    max-height: 92vh;
+    background: #1e293b;
+    border: 1px solid #475569;
+    border-radius: 10px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.65);
+    color: #e2e8f0;
+    font-family: inherit;
+    font-size: 13px;
+    z-index: 2500;
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+    resize: both;
+}
+#los-panel.los-panel--open { display: flex; }
+
+/* ── Header (drag handle) ──────────────────────────────────────────── */
+#los-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: #0f172a;
+    border-bottom: 1px solid #334155;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+    cursor: move;
+    -webkit-user-select: none;
+    user-select: none;
+    flex-shrink: 0;
+}
+#los-panel-close {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 4px;
+}
+#los-panel-close:hover { color: #e2e8f0; }
+
+/* ── Top pane (fields + actions + results) ─────────────────────────── */
+#los-top-pane {
+    overflow-y: auto;
+    flex: 0 1 auto;
+    display: flex;
+    flex-direction: column;
+}
+
+#los-instructions {
+    padding: 8px 14px;
+    color: #94a3b8;
+    font-size: 12px;
+    line-height: 1.5;
+    border-bottom: 1px solid #1e293b;
+    flex-shrink: 0;
+    min-height: 36px;
+}
+
+/* inputs */
+.los-field-group {
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border-bottom: 1px solid #334155;
+}
+.los-field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.los-field-row label {
+    flex: 0 0 120px;
+    color: #94a3b8;
+    font-size: 11px;
+}
+.los-field-row input[type=number] {
+    flex: 1;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #e2e8f0;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+.los-coord-display {
+    flex: 1;
+    font-size: 11px;
+    color: #60a5fa;
+    font-variant-numeric: tabular-nums;
+}
+
+/* action buttons */
+#los-actions {
+    display: flex;
+    gap: 8px;
+    padding: 8px 14px;
+    border-top: 1px solid #334155;
+    flex-shrink: 0;
+}
+.los-btn {
+    flex: 1;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.los-btn:hover { opacity: 0.85; }
+.los-btn--primary   { background: #3b82f6; color: #fff; }
+.los-btn--secondary { background: #334155; color: #e2e8f0; }
+.los-btn--viewshed  { background: #065f46; color: #6ee7b7; border: 1px solid #059669; }
+.los-btn--viewshed:hover { opacity: 0.9; }
+.los-layer-btn--clear { color: #f87171; border-color: #7f1d1d; }
+
+/* spinner */
+.los-spinner {
+    display: none;
+    width: 16px; height: 16px;
+    border: 2px solid #334155;
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: los-spin 0.7s linear infinite;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.los-spinner--active { display: block; }
+@keyframes los-spin { to { transform: rotate(360deg); } }
+
+/* result badge */
+#los-result {
+    padding: 8px 14px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+}
+#los-result.los-result--show { display: flex; }
+
+.los-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 13px;
+}
+.los-badge--clear   { background: rgba(34,197,94,0.15);  color: #22c55e; border: 1px solid #22c55e; }
+.los-badge--blocked { background: rgba(239,68,68,0.15);  color: #ef4444; border: 1px solid #ef4444; }
+
+.los-stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+}
+.los-stat { display: flex; flex-direction: column; gap: 1px; }
+.los-stat__label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+.los-stat__value { font-size: 12px; color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.los-stat__value--warn { color: #f97316; }
+
+/* ── Map overlay layer toggle bar ──────────────────────────────────── */
+#los-layer-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: #0f172a;
+    border-top: 1px solid #1e3a5f;
+    flex-shrink: 0;
+}
+.los-layer-btn {
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #94a3b8;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.los-layer-btn--active {
+    background: #1e3a5f;
+    color: #e2e8f0;
+    border-color: #3b82f6;
+}
+.los-layer-btn--compute {
+    background: #1e40af;
+    color: #bfdbfe;
+    border-color: #3b82f6;
+    font-weight: 700;
+}
+.los-layer-btn--compute:hover { background: #2563eb; color: #fff; }
+.los-layer-sep {
+    width: 1px;
+    background: #334155;
+    align-self: stretch;
+    margin: 0 2px;
+    flex-shrink: 0;
+}
+
+/* ── Section resize handle ─────────────────────────────────────────── */
+.los-section-handle {
+    height: 5px;
+    background: #1e3a5f;
+    cursor: ns-resize;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+}
+.los-section-handle::after {
+    content: '';
+    width: 32px;
+    height: 2px;
+    background: #475569;
+    border-radius: 2px;
+}
+.los-section-handle:hover { background: #1e4080; }
+.los-section-handle:hover::after { background: #3b82f6; }
+
+/* ── Elevation profile pane ────────────────────────────────────────── */
+#los-profile-wrap {
+    background: #0a1628;
+    display: flex;
+    flex-direction: column;
+    height: 200px;
+    min-height: 80px;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 0 0 10px 10px;
+}
+#los-profile-title {
+    padding: 4px 14px 2px;
+    font-size: 10px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+    height: 20px;
+    box-sizing: border-box;
+}
+#los-profile-canvas {
+    width: 100%;
+    height: calc(100% - 20px);
+    display: block;
+}
+
+/* ── Custom obstacles section ──────────────────────────────────────── */
+#los-obs-section {
+    flex-shrink: 0;
+    border-top: 1px solid #1e3a5f;
+}
+#los-obs-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 10px;
+    background: #0f172a;
+}
+.los-obs-section-label {
+    font-size: 10px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+#los-obs-instructions {
+    font-size: 11px;
+    color: #60a5fa;
+    padding: 3px 10px;
+    min-height: 0;
+    line-height: 1.4;
+}
+
+/* Property form */
+#los-obs-form {
+    padding: 6px 10px 8px;
+    background: #0f172a;
+    border-top: 1px solid #1e3a5f;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.los-obs-form-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.los-obs-form-row label {
+    flex: 0 0 90px;
+    font-size: 11px;
+    color: #94a3b8;
+}
+.los-obs-form-row input,
+.los-obs-form-row select {
+    flex: 1;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #e2e8f0;
+    padding: 3px 7px;
+    font-size: 12px;
+}
+.los-obs-form-btns {
+    display: flex;
+    gap: 6px;
+    margin-top: 3px;
+}
+.los-obs-form-btns button {
+    flex: 1;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: none;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.los-obs-confirm { background: #3b82f6; color: #fff; }
+.los-obs-cancel  { background: #334155; color: #e2e8f0; }
+
+/* Obstacle list */
+#los-obs-list {
+    max-height: 90px;
+    overflow-y: auto;
+}
+.los-obs-empty {
+    font-size: 11px;
+    color: #475569;
+    padding: 5px 10px;
+}
+.los-obs-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid #1e293b;
+    font-size: 11px;
+}
+.los-obs-item:last-child { border-bottom: none; }
+.los-obs-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.los-obs-name { flex: 1; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.los-obs-meta { color: #64748b; font-size: 10px; white-space: nowrap; }
+.los-obs-del  {
+    background: none; border: none; color: #475569;
+    cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1;
+}
+.los-obs-del:hover { color: #f87171; }
+
+/* Leaflet tooltip for drawn obstacles */
+.los-obs-tooltip {
+    background: rgba(15,23,42,0.92) !important;
+    border: 1px solid #475569 !important;
+    border-radius: 5px !important;
+    color: #e2e8f0 !important;
+    font-size: 11px !important;
+    padding: 4px 8px !important;
+    box-shadow: none !important;
+}
+.los-obs-tooltip::before { display: none !important; }
+
+/* ── Custom draggable markers ──────────────────────────────────────── */
+.los-marker-antenna,
+.los-marker-phone {
+    cursor: grab;
+    line-height: 0;
+    -webkit-user-select: none;
+    user-select: none;
+}
+.los-marker-antenna:active,
+.los-marker-phone:active { cursor: grabbing; }
+
+.los-marker-antenna {
+    filter: drop-shadow(0 3px 6px rgba(0,0,0,0.7));
+}
+.los-marker-phone {
+    filter: drop-shadow(0 2px 5px rgba(0,0,0,0.6));
+}
+
+/* #los-open-btn uses the standard header-btn class from the main app */

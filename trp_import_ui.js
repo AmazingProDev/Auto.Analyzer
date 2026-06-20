@@ -435,12 +435,21 @@
         const sendOnce = (url) => new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('POST', url, true);
+            xhr.timeout = 15 * 60 * 1000;
             xhr.upload.onprogress = (e) => {
                 if (typeof onProgress !== 'function') return;
-                if (e.lengthComputable && e.total > 0) onProgress((e.loaded / e.total) * 100);
-                else onProgress(null);
+                if (e.lengthComputable && e.total > 0) {
+                    onProgress({ phase: 'uploading', percent: (e.loaded / e.total) * 100 });
+                } else {
+                    onProgress({ phase: 'uploading', percent: null });
+                }
+            };
+            xhr.upload.onloadend = () => {
+                if (typeof onProgress !== 'function') return;
+                onProgress({ phase: 'processing', percent: 100 });
             };
             xhr.onerror = () => reject(new Error('Network error during upload'));
+            xhr.ontimeout = () => reject(new Error('Upload/import timed out after 15 minutes'));
             xhr.onload = () => {
                 let payload = null;
                 try { payload = JSON.parse(xhr.responseText || 'null'); }
@@ -484,15 +493,33 @@
         if (!importTrpBtn) {
             importTrpBtn = document.createElement('button');
             importTrpBtn.id = 'importTrpBtn';
-            importTrpBtn.className = 'btn header-btn';
+            importTrpBtn.className = 'menu-trigger';
             importTrpBtn.title = 'Import TRP run and decode KPIs/events';
-            importTrpBtn.textContent = '📥 Import TRP';
+            importTrpBtn.innerHTML = '📥 <span class="btn-text">Import TRP</span>';
             const importBtn = qs('importBtn');
             if (importBtn && importBtn.parentNode === actions) {
                 actions.insertBefore(importTrpBtn, importBtn.nextSibling);
             } else {
                 actions.appendChild(importTrpBtn);
             }
+        }
+
+        let runsListBtn = qs('runsListBtn');
+        if (!runsListBtn) {
+            runsListBtn = document.createElement('button');
+            runsListBtn.id = 'runsListBtn';
+            runsListBtn.className = 'menu-trigger';
+            runsListBtn.title = 'View and manage previously imported TRP runs';
+            runsListBtn.innerHTML = '📂 <span class="btn-text">Runs</span>';
+            importTrpBtn.parentNode.insertBefore(runsListBtn, importTrpBtn.nextSibling);
+        }
+
+        if (!runsListBtn.dataset.bound) {
+            runsListBtn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                openRunsList();
+            });
+            runsListBtn.dataset.bound = '1';
         }
         if (!importTrpBtn.dataset.bound) {
             importTrpBtn.addEventListener('click', (ev) => {
@@ -515,10 +542,7 @@
             importTrpBtn.dataset.bound = '1';
         }
 
-        const runsBtn = qs('runsListBtn');
-        if (runsBtn && runsBtn.parentNode) {
-            runsBtn.parentNode.removeChild(runsBtn);
-        }
+        // Previously removed runsBtn check was here; now restored above.
 
         if (!input.dataset.bound) {
             input.addEventListener('change', async () => {
@@ -543,9 +567,42 @@
         if (el) el.textContent = text;
     }
 
+    function getImportProgressTracker() {
+        const tracker = window.ProgressTracker;
+        if (!tracker) return null;
+        if (typeof tracker.show !== 'function' || typeof tracker.update !== 'function' || typeof tracker.hide !== 'function') return null;
+        return tracker;
+    }
+
+    function showTrpImportProgress(file) {
+        const tracker = getImportProgressTracker();
+        if (!tracker) return;
+        tracker.show('Importing TRP Run...', file?.name || '');
+        tracker.update(0, 'Preparing TRP upload...');
+    }
+
+    function updateTrpImportProgress(percent, detail) {
+        const tracker = getImportProgressTracker();
+        if (!tracker) return;
+        tracker.update(percent, detail);
+    }
+
+    async function completeTrpImportProgress(detail) {
+        const tracker = getImportProgressTracker();
+        if (!tracker) return;
+        await tracker.complete(detail || 'TRP import complete');
+    }
+
+    function hideTrpImportProgress() {
+        const tracker = getImportProgressTracker();
+        if (!tracker) return;
+        tracker.hide();
+    }
+
     async function uploadTrp(file) {
         await ensureApiReadyForUpload();
         resetUploadProgressState();
+        showTrpImportProgress(file);
         setStatus('Uploading TRP: 0%');
         setUploadProgress(0, '0%');
         startUploadProgressTicker();
@@ -556,21 +613,34 @@
         let payload;
         try {
             const out = await postFormWithProgress('/api/trp/import', form, (p) => {
-                if (Number.isFinite(Number(p))) {
+                if (p && typeof p === 'object' && p.phase === 'processing') {
                     uploadProgressState.hasComputableProgress = true;
                     stopUploadProgressTicker();
-                    const pct = Math.round(Number(p));
-                    setUploadProgress(p, pct + '%');
+                    setUploadProgress(95, '95%');
+                    setStatus('Upload complete. Importing TRP on server...');
+                    updateTrpImportProgress(78, 'Upload complete. Importing TRP on server...');
+                    startFinalizingProgressTicker();
+                    return;
+                }
+                const percent = p && typeof p === 'object' ? p.percent : p;
+                if (Number.isFinite(Number(percent))) {
+                    uploadProgressState.hasComputableProgress = true;
+                    stopUploadProgressTicker();
+                    const pct = Math.round(Number(percent));
+                    setUploadProgress(percent, pct + '%');
                     setStatus('Uploading TRP: ' + pct + '%');
+                    updateTrpImportProgress(Math.min(72, Math.max(2, Number(percent) * 0.72)), 'Uploading TRP archive...');
                 } else {
                     setUploadProgress(null, 'Uploading...');
                     setStatus('Uploading TRP...');
+                    updateTrpImportProgress(12, 'Uploading TRP archive...');
                 }
             });
             response = { ok: out.ok, status: out.status };
             payload = out.payload;
         } catch (err) {
             hideUploadProgress();
+            hideTrpImportProgress();
             setStatus('TRP: upload failed');
             alert('Upload failed: ' + (err && err.message ? err.message : err));
             return;
@@ -578,6 +648,7 @@
 
         if (!payload) {
             hideUploadProgress();
+            hideTrpImportProgress();
             setStatus('TRP: invalid server response');
             alert('Invalid response from server.');
             return;
@@ -585,6 +656,7 @@
 
         if (!response.ok || payload.status !== 'success') {
             hideUploadProgress();
+            hideTrpImportProgress();
             setStatus('TRP: import failed');
             const report = payload && payload.importReport ? payload.importReport : null;
             let msg = (payload && payload.message) || ('HTTP ' + response.status);
@@ -604,16 +676,16 @@
         if (uploadProgressState.percent < 95) {
             setUploadProgress(95, '95%');
         }
-        setStatus('Importing KPIs...');
+        setStatus('Import complete. Loading run...');
+        updateTrpImportProgress(92, 'Import complete. Loading run into workspace...');
         startFinalizingProgressTicker();
         await injectRunIntoLoadedLogs(payload.runId, file.name);
         stopUploadProgressTicker();
         setUploadProgress(100, '100%');
         setStatus('TRP loaded: 100%');
-        setTimeout(() => {
-            hideUploadProgress();
-            setStatus('');
-        }, 3000);
+        await completeTrpImportProgress('TRP import complete');
+        hideUploadProgress();
+        setStatus('');
     }
 
     function escapeHtml(v) {
@@ -666,9 +738,10 @@
             '      </div>',
             '      <div style="background:#111c2f;border:1px solid #2b3f63;border-radius:10px;padding:10px;display:flex;flex-direction:column;min-height:0;flex:1;">',
             '        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">',
-            '          <button id="trpTabKpis" class="btn header-btn" style="padding:4px 8px;">KPIs</button>',
-            '          <button id="trpTabEvents" class="btn header-btn" style="padding:4px 8px;">Events</button>',
-            '          <input id="trpCatalogSearch" placeholder="Search KPI or Event" style="flex:1;background:#0a1424;color:#dbeafe;border:1px solid #35507a;border-radius:6px;padding:4px 8px;"/>',
+            '          <button id="trpTabKpis" class="btn header-btn trp-tab-btn" style="padding:4px 8px;">KPIs</button>',
+            '          <button id="trpTabEvents" class="btn header-btn trp-tab-btn" style="padding:4px 8px;">Events</button>',
+            '          <button id="trpTabSignaling" class="btn header-btn trp-tab-btn" style="padding:4px 8px;">Signaling</button>',
+            '          <input id="trpCatalogSearch" placeholder="Search..." style="flex:1;background:#0a1424;color:#dbeafe;border:1px solid #35507a;border-radius:6px;padding:4px 8px;"/>',
             '        </div>',
             '        <div id="trpCatalogHint" style="font-size:11px;color:#93c5fd;margin-bottom:6px;"></div>',
             '        <div id="trpCatalogPane" style="overflow:auto;flex:1;min-height:0;border:1px solid #1f3559;border-radius:8px;padding:6px;background:#08101d;"></div>',
@@ -704,14 +777,31 @@
             if (e.target === overlay) overlay.style.display = 'none';
         });
 
-        qs('trpTabKpis').addEventListener('click', () => {
-            trpState.sidebarTab = 'kpis';
+        const updateTabs = () => {
+            [qs('trpTabKpis'), qs('trpTabEvents'), qs('trpTabSignaling')].forEach(b => {
+                if (!b) return;
+                const tab = b.id.replace('trpTab', '').toLowerCase();
+                if (tab === trpState.sidebarTab) b.classList.add('active');
+                else b.classList.remove('active');
+            });
+        };
+
+        const selectTab = (tabId) => {
+            trpState.sidebarTab = tabId;
+            updateTabs();
             renderCatalogPane();
+        };
+
+        qs('trpTabKpis').addEventListener('click', () => {
+            selectTab('kpis');
         });
         qs('trpTabEvents').addEventListener('click', () => {
-            trpState.sidebarTab = 'events';
-            renderCatalogPane();
+            selectTab('events');
         });
+        qs('trpTabSignaling').addEventListener('click', () => {
+            selectTab('signaling');
+        });
+
         qs('trpCatalogSearch').addEventListener('input', () => renderCatalogPane());
         qs('trpKpiSelect').addEventListener('change', async (e) => {
             const name = e.target.value;
@@ -766,57 +856,90 @@
         const listEl = qs('trpRunsList');
         const searchEl = qs('trpRunsSearch');
         if (!listEl || !searchEl) return;
-        listEl.innerHTML = '<div style="color:#cbd5e1;">Loading runs...</div>';
+        
+        listEl.innerHTML = '<div style="color:#cbd5e1; padding: 10px;">Loading runs...</div>';
+        
         let rows = [];
         try {
             rows = await fetchRunsList();
         } catch (err) {
-            listEl.innerHTML = `<div style="color:#fca5a5;">Failed to load runs: ${escapeHtml(err && err.message ? err.message : err)}</div>`;
+            listEl.innerHTML = `<div style="color:#fca5a5; padding: 10px;">Failed to load runs: ${escapeHtml(err && err.message ? err.message : err)}</div>`;
             return;
         }
+
         const render = () => {
             const q = String(searchEl.value || '').trim().toLowerCase();
             const filtered = rows.filter(r => !q || String(r.filename || '').toLowerCase().includes(q));
+            
+            listEl.innerHTML = ''; // Clear
             if (!filtered.length) {
-                listEl.innerHTML = '<div style="color:#cbd5e1;">No runs found.</div>';
+                listEl.innerHTML = '<div style="color:#cbd5e1; padding: 20px; text-align: center;">No runs found.</div>';
                 return;
             }
-            listEl.innerHTML = [
-                '<table style="width:100%;border-collapse:collapse;font-size:12px;color:#dbeafe;">',
-                '<thead><tr style="text-align:left;background:#0e1a2e;">',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">Run ID</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">File</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">Imported</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">Start</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">End</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">KPIs</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">Events</th>',
-                '<th style="padding:8px;border-bottom:1px solid #2b3f63;">Action</th>',
-                '</tr></thead><tbody>',
-                filtered.map(r => (
-                    `<tr style="border-bottom:1px solid #1e2d46;">` +
-                    `<td style="padding:8px;">${escapeHtml(r.id)}</td>` +
-                    `<td style="padding:8px;">${escapeHtml(r.filename || '')}</td>` +
-                    `<td style="padding:8px;">${escapeHtml(r.imported_at || '')}</td>` +
-                    `<td style="padding:8px;">${escapeHtml(r.start_time || 'n/a')}</td>` +
-                    `<td style="padding:8px;">${escapeHtml(r.end_time || 'n/a')}</td>` +
-                    `<td style="padding:8px;">${escapeHtml((r.metadata && r.metadata.metric_count) || 0)}</td>` +
-                    `<td style="padding:8px;">${escapeHtml((r.metadata && r.metadata.event_count) || 0)}</td>` +
-                    `<td style="padding:8px;"><button class=\"btn header-btn trp-open-run\" data-run-id=\"${escapeHtml(r.id)}\" style=\"padding:4px 8px;\">Open</button></td>` +
-                    `</tr>`
-                )).join(''),
-                '</tbody></table>'
-            ].join('');
-            const btns = listEl.querySelectorAll('.trp-open-run');
-            btns.forEach(btn => {
-                btn.addEventListener('click', async () => {
-                    const id = Number(btn.getAttribute('data-run-id'));
-                    if (!Number.isFinite(id)) return;
-                    overlay.style.display = 'none';
-                    await openRunDetail(id);
+
+            const table = document.createElement('table');
+            table.style.cssText = 'width:100%; border-collapse:collapse; font-size:12px; color:#dbeafe;';
+            
+            const thead = document.createElement('thead');
+            thead.innerHTML = '<tr style="text-align:left; background:#0e1a2e;">' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">Run ID</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">File</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">Imported</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">Start</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">End</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">KPIs</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">Events</th>' +
+                '<th style="padding:10px 8px; border-bottom:1px solid #2b3f63;">Action</th>' +
+                '</tr>';
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+            const fragment = document.createDocumentFragment();
+
+            filtered.forEach(r => {
+                const tr = document.createElement('tr');
+                tr.style.cssText = 'border-bottom:1px solid #1e2d46; transition: background 0.15s;';
+                tr.onmouseenter = () => tr.style.background = 'rgba(255,255,255,0.03)';
+                tr.onmouseleave = () => tr.style.background = 'transparent';
+
+                const cols = [
+                    r.id,
+                    r.filename || '',
+                    r.imported_at || '',
+                    r.start_time || r.startTime || '-',
+                    r.end_time || r.endTime || '-',
+                    r.kpi_count || (r.catalog && r.catalog.kpis ? r.catalog.kpis.length : '-'),
+                    r.event_count || (r.catalog && r.catalog.events ? r.catalog.events.length : '-'),
+                ];
+
+                cols.forEach(val => {
+                    const td = document.createElement('td');
+                    td.style.padding = '8px';
+                    td.textContent = val;
+                    tr.appendChild(td);
                 });
+
+                const actionTd = document.createElement('td');
+                actionTd.style.padding = '8px';
+                const viewBtn = document.createElement('button');
+                viewBtn.className = 'btn header-btn';
+                viewBtn.style.padding = '4px 8px';
+                viewBtn.textContent = '🔍 View';
+                viewBtn.onclick = () => {
+                    overlay.style.display = 'none';
+                    openRunDetail(r.id);
+                };
+                actionTd.appendChild(viewBtn);
+                tr.appendChild(actionTd);
+
+                fragment.appendChild(tr);
             });
+
+            tbody.appendChild(fragment);
+            table.appendChild(tbody);
+            listEl.appendChild(table);
         };
+
         searchEl.oninput = render;
         render();
     }
@@ -897,27 +1020,68 @@
         (metricNames || []).forEach(name => {
             const n = String(name || '');
             const nl = n.toLowerCase();
-            if (nl.includes('rsrp') && !nl.includes('neighbor')) labels[n] = 'RSRP';
-            else if (nl.includes('rsrq') && !nl.includes('neighbor')) labels[n] = 'RSRQ';
-            else if (nl.includes('sinr') || nl.includes('rs-sinr') || nl.includes('rssinr')) labels[n] = 'SINR';
+
+            // ---- NR ServingCell explicit matches (most specific first) ----
+            if (nl.includes('radio.nr.servingcell')) {
+                if (nl.endsWith('.ssrsrp'))                       labels[n] = 'LTE SS RSRP';
+                else if (nl.endsWith('.ssrsrq'))                  labels[n] = 'LTE SS RSRQ';
+                else if (nl.endsWith('.sssinr'))                  labels[n] = 'LTE SS SINR';
+                else if (nl.includes('ssbbeam.serving.rsrp'))     labels[n] = 'NR Beam RSRP';
+                else if (nl.includes('ssbbeam.serving.rsrq'))     labels[n] = 'NR Beam RSRQ';
+                else if (nl.includes('ssbbeam.serving.beamindex')) labels[n] = 'NR Serving Beam';
+                else if (nl.endsWith('.pci'))                     labels[n] = 'NR PCI';
+                else if (nl.includes('rxantenna') && nl.endsWith('.rsrp')) labels[n] = 'NR Ant RSRP';
+                else if (nl.includes('rxantenna') && nl.endsWith('.sinr')) labels[n] = 'NR Ant SINR';
+                else if (nl.includes('pdsch') && nl.includes('throughput')) labels[n] = 'NR DL throughput';
+                else if (nl.includes('pusch') && nl.includes('throughput')) labels[n] = 'NR UL throughput';
+                else if (nl.includes('mac.downlink') && nl.includes('throughput')) labels[n] = 'NR DL throughput';
+                else if (nl.includes('mac.uplink') && nl.includes('throughput'))   labels[n] = 'NR UL throughput';
+            }
+            // ---- LTE ServingCell explicit matches ----
+            else if (nl.includes('radio.lte.servingcell')) {
+                if (nl.endsWith('.rsrp'))                          labels[n] = 'RSRP';
+                else if (nl.endsWith('.rsrq'))                     labels[n] = 'RSRQ';
+                else if (nl.endsWith('.rssinr') || nl.endsWith('.rss-sinr')) labels[n] = 'SINR';
+                else if (nl.includes('.pdsch.sinr'))               labels[n] = 'SINR';
+                else if (nl.includes('pdsch.numberofresourceblocks')) labels[n] = 'LTE PDSCH Resource Blocks';
+                else if (nl.includes('pusch.numberofresourceblocks')) labels[n] = 'LTE PUSCH Resource Blocks';
+                else if (nl.includes('pdsch.resourceblockspercentage')) labels[n] = 'LTE PDSCH Resource Block Allocation (%)';
+                else if (nl.includes('pusch.resourceblockspercentage')) labels[n] = 'LTE PUSCH Resource Block Allocation (%)';
+                else if (nl.includes('pdsch.resourceblockallocationcount')) labels[n] = 'LTE PDSCH Res. Block Allocation Count Per Second';
+                else if (nl.includes('pusch.resourceblockallocationcount')) labels[n] = 'LTE PUSCH Res. Block Allocation Count Per Second';
+                else if (nl.includes('pdsch.resourceblockallocationpercentage')) labels[n] = 'EPS PDSCH RB Allocation Usage (%)';
+                else if (nl.includes('pusch.resourceblockallocationpercentage')) labels[n] = 'LTE PUSCH RB Allocation Usage (%)';
+                else if (nl.endsWith('.pci'))                      labels[n] = 'LTE PCI';
+                else if (nl.includes('downlink.earfcn'))           labels[n] = 'LTE Freq (EARFCN)';
+                else if (nl.includes('cellidentity.cell'))         labels[n] = 'LTE Cell ID';
+                else if (nl.includes('cellidentity.enodeb'))       labels[n] = 'eNodeB ID';
+                else if (nl.includes('pdsch') && nl.includes('throughput')) labels[n] = 'DL throughput';
+                else if (nl.includes('pusch') && nl.includes('throughput')) labels[n] = 'UL throughput';
+            }
+            else if (nl.includes('number of pdsch resource blocks')) labels[n] = 'LTE PDSCH Resource Blocks';
+            else if (nl.includes('number of pusch resource blocks')) labels[n] = 'LTE PUSCH Resource Blocks';
+            else if (nl.includes('pdsch resource block allocation count')) labels[n] = 'LTE PDSCH Res. Block Allocation Count Per Second';
+            else if (nl.includes('pusch resource block allocation count')) labels[n] = 'LTE PUSCH Res. Block Allocation Count Per Second';
+            else if (nl.includes('pdsch resource block allocation usage')) labels[n] = 'EPS PDSCH RB Allocation Usage (%)';
+            else if (nl.includes('pusch resource block allocation usage')) labels[n] = 'LTE PUSCH RB Allocation Usage (%)';
+            else if (nl.includes('pdsch resource block allocation (%)') || nl.includes('pdsch resource block allocation carrier')) labels[n] = 'LTE PDSCH Resource Block Allocation (%)';
+            else if (nl.includes('pusch resource block allocation carrier')) labels[n] = 'LTE PUSCH Resource Block Allocation (%)';
+            // ---- Application / generic throughput ----
             else if (nl.includes('data.http') && nl.includes('throughput') && (nl.includes('download') || nl.includes('downlink'))) labels[n] = 'Application throughput DL';
             else if (nl.includes('data.http') && nl.includes('throughput') && (nl.includes('upload') || nl.includes('uplink'))) labels[n] = 'Application throughput UL';
-            else if (nl.includes('radio.lte.servingcell') && nl.includes('pdsch') && nl.includes('throughput')) labels[n] = 'DL throughput';
-            else if (nl.includes('radio.lte.servingcelltotal.pusch.throughput') || (nl.includes('radio.lte.servingcell') && nl.includes('pusch') && nl.includes('throughput'))) labels[n] = 'UL throughput';
             else if ((nl.includes('downlink') || nl.includes('dl')) && nl.includes('throughput')) labels[n] = 'DL throughput';
-            else if ((nl.includes('uplink') || nl.includes('ul')) && nl.includes('throughput')) labels[n] = 'UL throughput';
-            else if (nl.includes('throughput') && nl.includes('down')) labels[n] = 'DL throughput';
-            else if (nl.includes('throughput') && nl.includes('up')) labels[n] = 'UL throughput';
+            else if ((nl.includes('uplink') || nl.includes('ul')) && nl.includes('throughput'))   labels[n] = 'UL throughput';
+            // ---- Identifiers ----
             else if (nl.includes('cellid') || nl.includes('cell identity') || nl.includes('.cell_id')) labels[n] = 'Cellid';
             else if (nl.includes('physical cell id') || nl.includes('.pci')) labels[n] = 'Physical cell ID';
-            else if (nl.includes('enodeb id') || nl.includes('.enodebid')) labels[n] = 'eNodeB ID';
+            else if (nl.includes('enodeb id') || nl.includes('.enodebid'))   labels[n] = 'eNodeB ID';
             else if (nl.includes('tracking area code') || nl.includes('.tac')) labels[n] = 'Tracking area code';
-            else if (nl.includes('earfcn')) labels[n] = 'Downlink EARFCN';
-            else if (nl.includes(' cell id') || nl.includes('.cell.id') || nl.endsWith('.cellid')) labels[n] = 'Cell ID';
-            else if (nl.startsWith('__derived_enodeb_id')) labels[n] = 'eNodeB ID';
-            else if (nl.startsWith('__derived_cell_id')) labels[n] = 'Cell ID';
+            else if (nl.includes('earfcn'))   labels[n] = 'Downlink EARFCN';
+            else if (nl.startsWith('__derived_enodeb_id'))   labels[n] = 'eNodeB ID';
+            else if (nl.startsWith('__derived_cell_id'))     labels[n] = 'Cell ID';
+            else if (nl === '__derived_packet_technology')   labels[n] = 'Packet Technology';
         });
-        // If we still have unlabeled throughput metrics (some logs use generic names), label by position.
+        // Fallback: two unlabelled throughput metrics → DL/UL by position
         const tp = (metricNames || []).filter(m => String(m||'').toLowerCase().includes('throughput'));
         if (tp.length === 2) {
             const a = String(tp[0]); const b = String(tp[1]);
@@ -1154,23 +1318,48 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         return best;
     }
 
+    // Exact metric name → friendly label mapping for the sidebar (used by pickCoreSidebarMetrics)
+    // Maps the raw TRP metric name to what the user sees on the button.
+    const CORE_SIDEBAR_EXACT = [
+        // Label                          exact name (or substring match)
+        { label: 'LTE SS RSRP',          match: n => n === 'Radio.Nr.ServingCell[16].SsRsrp' },
+        { label: 'LTE SS RSRQ',          match: n => n === 'Radio.Nr.ServingCell[16].SsRsrq' },
+        { label: 'LTE SS SINR',          match: n => n === 'Radio.Nr.ServingCell[16].SsSinr' },
+        { label: 'LTE PCI',             match: n => n === 'Radio.Lte.ServingCell[8].Pci' },
+        { label: 'LTE Freq (EARFCN)',   match: n => n === 'Radio.Lte.ServingCell[8].Downlink.Earfcn' },
+        { label: 'LTE Cell ID',         match: n => n === 'Radio.Lte.ServingCell[8].CellIdentity.Cell' },
+        { label: 'NR PCI',             match: n => n === 'Radio.Nr.ServingCell[16].Pci' },
+        { label: 'NR Serving Beam',    match: n => n === 'Radio.Nr.ServingCell[16].SsbBeam.Serving.BeamIndex' },
+        { label: 'NR Beam RSRP',       match: n => n === 'Radio.Nr.ServingCell[16].SsbBeam.Serving.Rsrp' },
+        { label: 'NR Beam RSRQ',       match: n => n === 'Radio.Nr.ServingCell[16].SsbBeam.Serving.Rsrq' },
+        { label: 'NR Ant SINR',        match: n => n === 'Radio.Nr.ServingCell[16].RxAntenna[4].Sinr' },
+        { label: 'Packet Technology',   match: n => n === '__derived_packet_technology' },
+        // LTE RF
+        { label: 'RSRP',               match: n => n === 'Radio.Lte.ServingCell[8].Rsrp' },
+        { label: 'RSRQ',               match: n => n === 'Radio.Lte.ServingCell[8].Rsrq' },
+        { label: 'SINR',               match: n => n === 'Radio.Lte.ServingCell[8].RsSinr' || n === 'Radio.Lte.ServingCell[8].Pdsch.Sinr' },
+    ];
+
     function pickCoreSidebarMetrics(orderedNames, tech) {
         const names = orderedNames || [];
         const out = [];
-        const add = (v) => { if (v && !out.includes(v)) out.push(v); };
+        const seen = new Set();
+        const add = (v) => { if (v && !seen.has(v)) { seen.add(v); out.push(v); } };
 
-        if (tech === '5G NR') {
-            add(pickFirstByKeywords(names, ['ss-rsrp', 'ssrsrp', 'rsrp'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
-            add(pickFirstByKeywords(names, ['ss-rsrq', 'ssrsrq', 'rsrq'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
-            add(pickFirstByKeywords(names, ['ss-sinr', 'sinr']));
-        } else if (tech === 'UMTS 3G') {
+        // Priority list matching the user's requested sidebar order:
+        // NR SS RSRP, NR SS RSRQ, NR SS SINR, LTE PCI, LTE Freq, LTE Cell ID,
+        // NR PCI, NR Serving Beam, NR Beam RSRP, NR Beam RSRQ, NR Ant SINR
+        // (+ LTE RSRP/RSRQ/SINR for pure LTE/NSA fallback)
+        for (const def of CORE_SIDEBAR_EXACT) {
+            const found = names.find(n => def.match(n));
+            if (found) add(found);
+        }
+
+        // UMTS 3G fallback
+        if (tech === 'UMTS 3G' && out.length === 0) {
             add(pickFirstByKeywords(names, ['rscp', 'rsrp']));
             add(pickFirstByKeywords(names, ['ecno', 'rsrq']));
             add(pickFirstByKeywords(names, ['sinr']));
-        } else {
-            add(pickFirstByKeywords(names, ['rsrp'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
-            add(pickFirstByKeywords(names, ['rsrq'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
-            add(pickFirstByKeywords(names, ['rs-sinr', 'sinr'], { prefer: ['servingcell'], avoid: ['neighbor'] }));
         }
 
         add(pickFirstByKeywords(
@@ -1222,14 +1411,25 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
     
     function mapSeriesToPoints(points, metricName, series, toleranceMs = 2000) {
         if (!Array.isArray(points) || !Array.isArray(series) || !metricName) return;
+
+        // Identity metrics (PCI, EARFCN, CellIdentity) are recorded on-change (sparse).
+        // They need unlimited forward-fill: once a PCI is set it remains valid until the
+        // next change event.  RF metrics (RSRP, RSRQ, SINR) are periodic and should use
+        // the standard nearest-neighbor-with-tolerance approach.
+        const nm = String(metricName).toLowerCase();
+        const isIdentity = nm.includes('.pci') || nm.includes('earfcn') || nm.includes('nrarfcn')
+            || nm.includes('cellidentity') || nm.includes('.band') || nm.includes('.tac');
+
         // Prepare sorted series by time (epoch ms)
         const s = series
             .map(r => ({ t: toEpochMs(r.time), v: Number(r.value_num) }))
             .filter(x => Number.isFinite(x.t) && Number.isFinite(x.v))
             .sort((a,b) => a.t - b.t);
+
         if (!s.length) return;
 
         let j = 0;
+        let _dbgStamped = 0;
         for (let i = 0; i < points.length; i++) {
             const pt = points[i];
             const t = Number(pt.timestamp || toEpochMs(pt.time));
@@ -1242,11 +1442,46 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
                 const a = s[j], b = s[j+1];
                 if (Math.abs(b.t - t) < Math.abs(a.t - t)) best = b;
             }
+
+            let stamped = false;
             if (best && Math.abs(best.t - t) <= toleranceMs) {
                 pt[metricName] = best.v;
+                stamped = true;
+            }
+
+            if (!stamped && isIdentity) {
+                // Identity forward-fill: find the last sample at-or-before this point.
+                // These metrics are valid until the next change, so no tolerance limit.
+                let lastBefore = null;
+                for (let k = j; k >= 0; k--) {
+                    if (s[k].t <= t) { lastBefore = s[k]; break; }
+                }
+                if (lastBefore) {
+                    pt[metricName] = lastBefore.v;
+                    stamped = true;
+                } else if (s.length > 0) {
+                    // All samples are AFTER this point — use the first known value
+                    // (the session hadn't changed yet, so the first value is the initial state)
+                    pt[metricName] = s[0].v;
+                    stamped = true;
+                }
+            } else if (!stamped) {
+                // Non-identity metrics: try forward-fill but only within a larger tolerance
+                let lastBefore = null;
+                for (let k = j; k >= 0; k--) {
+                    if (s[k].t <= t) { lastBefore = s[k]; break; }
+                }
+                if (lastBefore) {
+                    pt[metricName] = lastBefore.v;
+                    stamped = true;
+                }
+            }
+
+            if (stamped) {
+                _dbgStamped++;
                 // keep legacy field for rendering if needed
-                if (String(metricName).toLowerCase().includes('rsrp') || String(metricName).toLowerCase().includes('rscp')) {
-                    pt.level = best.v;
+                if (nm.includes('rsrp') || nm.includes('rscp')) {
+                    pt.level = pt[metricName];
                 }
             }
         }
@@ -1258,12 +1493,12 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         if (s === 'rsrp') return 'rsrp';
         if (s === 'rsrq') return 'rsrq';
         if (s === 'cinr' || s === 'sinr') return 'cinr';
-        if (s === 'earfcn' || s === 'frequency') return 'earfcn';
+        if (s === 'earfcn' || s === 'frequency' || s === 'nrarfcn') return 'earfcn';
         return null;
     }
 
-    function parseLteNeighborMetricName(metricName) {
-        const m = String(metricName || '').match(/^Radio\.Lte\.Neighbor\[(\d+)\]\.(Pci|Rsrp|Rsrq|Cinr|Earfcn|Frequency)$/i);
+    function parseTrpNeighborMetricName(metricName) {
+        const m = String(metricName || '').match(/^(?:Radio\.Lte\.Neighbor|Radio\.Nr\.Neighbor|Radio\.Nr\.StrongestSsbBeam)\[(\d+)\]\.(Pci|Rsrp|Rsrq|Cinr|Sinr|Earfcn|NrArfcn|Frequency)$/i);
         if (!m) return null;
         const field = normalizeNeighborFieldName(m[2]);
         if (!field) return null;
@@ -1362,7 +1597,7 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         const metricNames = Array.from(new Set(
             (sidebarNeighbors || [])
                 .map(row => row && row.name)
-                .filter(name => parseLteNeighborMetricName(name))
+                .filter(name => parseTrpNeighborMetricName(name))
         ));
         if (!metricNames.length) return;
 
@@ -1385,7 +1620,7 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         };
 
         loaded.forEach(({ name, rows }) => {
-            const meta = parseLteNeighborMetricName(name);
+            const meta = parseTrpNeighborMetricName(name);
             if (!meta) return;
             rows.forEach((r) => {
                 const t = toEpochMs(r && r.time);
@@ -1659,9 +1894,15 @@ function detectTrpTechnology(metricsFlat, eventCatalog) {
         }
     }
 
-function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
+    function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const points = (track || []).map((p, idx) => {
             const ts = toEpochMs(p.time);
+            const extra = {};
+            Object.keys(p || {}).forEach((key) => {
+                if (key === 'lat' || key === 'lon' || key === 'time') return;
+                extra[key] = p[key];
+            });
+            const baseProperties = (p && typeof p.properties === 'object' && p.properties) ? { ...p.properties } : {};
             return {
                 id: idx,
                 lat: Number(p.lat),
@@ -1673,7 +1914,8 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
                 sc: null,
                 ecno: null,
                 cellId: 'N/A',
-                properties: { source: 'trp_track' }
+                properties: { source: 'trp_track', ...baseProperties },
+                ...extra
             };
         }).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
 
@@ -1689,6 +1931,96 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             }
         }
         return points;
+    }
+
+    function stampTrpServingIdentityAliases(points) {
+        if (!Array.isArray(points) || !points.length) return;
+
+        const pickFirst = (obj, keys) => {
+            if (!obj || typeof obj !== 'object') return null;
+            for (const key of keys) {
+                const value = obj[key];
+                if (value !== undefined && value !== null && value !== '') return value;
+            }
+            return null;
+        };
+        const toInt = (value) => {
+            const n = Number(value);
+            return Number.isFinite(n) ? Math.trunc(n) : null;
+        };
+        const setIfMissing = (obj, key, value) => {
+            if (value === undefined || value === null || value === '') return;
+            if (obj[key] === undefined || obj[key] === null || obj[key] === '' || obj[key] === 'N/A') {
+                obj[key] = value;
+            }
+        };
+
+        points.forEach((pt) => {
+            if (!pt || typeof pt !== 'object') return;
+
+            const pci = pickFirst(pt, [
+                'pci',
+                'sc',
+                'Serving PCI',
+                'Radio.Lte.ServingCell[8].Pci',
+                'Radio.Lte.ServingCell[0].Pci',
+                'Radio.Lte.ServingCellTotal.Pci',
+            ]);
+            const earfcn = pickFirst(pt, [
+                'earfcn',
+                'freq',
+                'Serving EARFCN',
+                'Radio.Lte.ServingCell[8].Downlink.Earfcn',
+                'Radio.Lte.ServingCell[0].Downlink.Earfcn',
+                'Radio.Lte.ServingCellTotal.Downlink.Earfcn',
+            ]);
+            const eci = pickFirst(pt, [
+                'cellIdentityComplete',
+                'lteEci',
+                'eci',
+                'Radio.Lte.ServingCell[8].CellIdentity.Complete',
+                'Radio.Lte.ServingCell[0].CellIdentity.Complete',
+                'Radio.Lte.ServingCellTotal.CellIdentity.Complete',
+            ]);
+            const cellName = pickFirst(pt, [
+                'serving_cell_name',
+                'Serving Cell Name',
+                'Serving cell name',
+                'cellName',
+            ]);
+
+            const pciInt = toInt(pci);
+            const earfcnInt = toInt(earfcn);
+            const eciInt = toInt(eci);
+
+            if (pciInt !== null) {
+                setIfMissing(pt, 'pci', pciInt);
+                setIfMissing(pt, 'sc', pciInt);
+                setIfMissing(pt, 'Serving PCI', pciInt);
+            }
+            if (earfcnInt !== null) {
+                setIfMissing(pt, 'earfcn', earfcnInt);
+                setIfMissing(pt, 'freq', earfcnInt);
+                setIfMissing(pt, 'Serving EARFCN', earfcnInt);
+            }
+            if (eciInt !== null) {
+                const enb = Math.floor(eciInt / 256);
+                const cid = eciInt % 256;
+                setIfMissing(pt, 'cellIdentityComplete', eciInt);
+                setIfMissing(pt, 'lteEci', eciInt);
+                setIfMissing(pt, 'eci', eciInt);
+                setIfMissing(pt, 'rnc', enb);
+                setIfMissing(pt, 'cid', cid);
+                setIfMissing(pt, 'rawEnodebCellId', `${enb}-${cid}`);
+                setIfMissing(pt, 'enodebCellId', `${enb}-${cid}`);
+                setIfMissing(pt, 'enodebCellIdKey', `${enb}-${cid}`);
+                setIfMissing(pt, 'eNodeB ID-Cell ID', `${enb}-${cid}`);
+            }
+            if (cellName) {
+                setIfMissing(pt, 'serving_cell_name', String(cellName).trim());
+                setIfMissing(pt, 'Serving Cell Name', String(cellName).trim());
+            }
+        });
     }
 
 
@@ -1719,9 +2051,10 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
 
         const metricsForSelection = sampledMetrics.length ? sampledMetrics : allMetrics;
         let detectedTech = detectTrpTechnology(metricsForSelection, catalog.events || []);
+        const rankedMetricNames = buildTechMetricOrder(metricsForSelection, detectedTech);
         const orderedMetricNames = sidebarMetricNames.length
-            ? sidebarMetricNames.slice()
-            : buildTechMetricOrder(metricsForSelection, detectedTech);
+            ? sidebarMetricNames.concat(rankedMetricNames.filter(n => !sidebarMetricNames.includes(n)))
+            : rankedMetricNames;
         if (detectedTech === 'UMTS 3G') {
             const hasLte = orderedMetricNames.some(n => String(n).toLowerCase().includes('radio.lte') || String(n).toLowerCase().includes('rsrp') || String(n).toLowerCase().includes('rsrq'));
             if (hasLte) detectedTech = 'LTE';
@@ -1729,7 +2062,31 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const defaultCandidates = [defaults.rsrpMetricName, defaults.sinrMetricName, defaults.mosMetricName].filter(Boolean);
         const defaultMetricName = defaultCandidates.find(n => orderedMetricNames.includes(n)) || orderedMetricNames[0] || null;
         const defaultSeries = defaultMetricName ? await fetchSeries(runId, defaultMetricName) : [];
-        const points = buildTrpPointsFromTrack(detail.track_points || [], defaultMetricName, defaultSeries);
+        let points = buildTrpPointsFromTrack(detail.track_points || [], defaultMetricName, defaultSeries);
+        const noGps = !detail.track_points || detail.track_points.length === 0;
+
+        // No GPS in this file — build virtual timeline points from KPI series so chart/analysis still works
+        if (noGps && Array.isArray(defaultSeries) && defaultSeries.length) {
+            points = defaultSeries
+                .filter(s => s && s.time)
+                .map((s, idx) => {
+                    const ts = toEpochMs(s.time);
+                    const v = (s.value_num !== undefined && s.value_num !== null) ? Number(s.value_num) : null;
+                    const p = {
+                        id: idx,
+                        lat: NaN, lng: NaN,
+                        time: s.time || '',
+                        timestamp: ts || 0,
+                        type: 'MEASUREMENT',
+                        level: Number.isFinite(v) ? v : -140,
+                        sc: null, ecno: null, cellId: 'N/A',
+                        properties: { source: 'trp_kpi_no_gps' }
+                    };
+                    if (defaultMetricName && Number.isFinite(v)) p[defaultMetricName] = v;
+                    return p;
+                });
+            console.warn('[TRP] No GPS track — built', points.length, 'virtual KPI points (chart only, no map dots)');
+        }
         const servingEarfcnSet = await fetchServingEarfcnSet(runId, orderedMetricNames);
 
         if (String(detectedTech || '').toUpperCase().includes('LTE')) {
@@ -1744,11 +2101,53 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             }
         }
 
+        // Pre-fetch LTE + NR serving metrics so points are fully populated before first click.
+        // Without this, the initial render falls back to p.level (the default metric value)
+        // for any metric that hasn't been mapped yet, showing wrong values.
+        try {
+            const servingPreloadNames = orderedMetricNames.filter(m => {
+                const n = String(m || '').toLowerCase();
+                if (n === String(defaultMetricName || '').toLowerCase()) return false;
+                const isLteServing = n.includes('radio.lte.servingcell');
+                const isNrServing = n.includes('radio.nr.servingcell');
+                if (!isLteServing && !isNrServing) return false;
+                return n.endsWith('.rsrp') || n.endsWith('.rsrq') || n.endsWith('.rssinr') ||
+                       n.endsWith('.ssrsrp') || n.endsWith('.ssrsrq') || n.endsWith('.sssinr') ||
+                       n.endsWith('.pci') || n.includes('earfcn') || n.includes('nrarfcn') ||
+                       n.includes('sinr') || n.includes('band') || n.includes('cellidentity.complete');
+            });
+            if (servingPreloadNames.length) {
+                const preloaded = await Promise.all(servingPreloadNames.map(async (m) => {
+                    // For ServingCell array metrics, request only idx=0 (PCell) to avoid
+                    // mixing PCell and SCell values during carrier aggregation.
+                    // EXCEPTION: identity metrics (PCI, EARFCN, CellIdentity) should NOT
+                    // be filtered by idx — they may only exist under the aggregate index
+                    // (e.g. ServingCell[8]) which has idx=8, and idx=0 would filter them out.
+                    const isServingArray = /Radio\.(Lte|Nr)\.ServingCell\[/i.test(m);
+                    const ml = String(m).toLowerCase();
+                    const isIdentityMetric = ml.endsWith('.pci') || ml.includes('earfcn')
+                        || ml.includes('nrarfcn') || ml.includes('cellidentity')
+                        || ml.includes('.band') || ml.includes('.tac');
+                    const fetchName = (isServingArray && !isIdentityMetric) ? (m + '|idx=0') : m;
+                    try { return { m, s: await fetchSeries(runId, fetchName) }; }
+                    catch (_e) { console.warn('[TRP preload] fetch failed for', fetchName, _e); return { m, s: [] }; }
+                }));
+                preloaded.forEach(({ m, s }) => {
+                    if (Array.isArray(s) && s.length) {
+                        mapSeriesToPoints(points, m, s);
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('[TRP] serving metrics preload failed:', e);
+        }
+        stampTrpServingIdentityAliases(points);
+
         const coreFromFullList = pickCoreSidebarMetrics(orderedMetricNames, detectedTech);
         const orderedKpis = coreFromFullList.length
             ? coreFromFullList
             : (() => {
-                const desiredOrder = ['RSRP', 'RSRQ', 'SINR', 'DL throughput', 'UL throughput'];
+                const desiredOrder = ['RSRP', 'RSRQ', 'SINR', 'NR SS RSRP', 'NR SS RSRQ', 'NR SS SINR', 'DL throughput', 'UL throughput', 'NR DL throughput', 'NR UL throughput'];
                 const tmpLabels = buildFriendlyTrpLabels(sidebarMetricNames);
                 return (sidebarMetricNames || []).slice().sort((a, b) => {
                     const la = tmpLabels[a] || a;
@@ -1759,7 +2158,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
                     const sb = ib === -1 ? 999 : ib;
                     if (sa !== sb) return sa - sb;
                     return String(la).localeCompare(String(lb));
-                }).slice(0, 5);
+                }).slice(0, 10);
             })();
 
         const identifierMetrics = pickIdentifierMetrics(metricsForSelection);
@@ -1771,6 +2170,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const labelMapForOrder = buildFriendlyTrpLabels(
             customMetrics.concat([appTpMetrics.dl, appTpMetrics.ul].filter(Boolean))
         );
+        const orderedMetricLabelMap = buildFriendlyTrpLabels(orderedMetricNames);
         const insertAfterLabel = (metricName, anchorLabel) => {
             if (!metricName || customMetrics.includes(metricName)) return;
             let idx = -1;
@@ -1781,8 +2181,24 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             if (idx >= 0) customMetrics.splice(idx + 1, 0, metricName);
             else customMetrics.push(metricName);
         };
+        const findMetricByFriendlyLabel = (friendlyLabel) => {
+            if (!friendlyLabel) return null;
+            for (const metricName of (orderedMetricNames || [])) {
+                const lbl = orderedMetricLabelMap[metricName] || metricName;
+                if (lbl === friendlyLabel) return metricName;
+            }
+            return null;
+        };
         insertAfterLabel(appTpMetrics.dl, 'DL throughput');
         insertAfterLabel(appTpMetrics.ul, 'UL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PDSCH Resource Blocks'), 'DL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PDSCH Resource Block Allocation (%)'), 'DL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PDSCH Res. Block Allocation Count Per Second'), 'DL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('EPS PDSCH RB Allocation Usage (%)'), 'DL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PUSCH Resource Blocks'), 'UL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PUSCH Resource Block Allocation (%)'), 'UL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PUSCH Res. Block Allocation Count Per Second'), 'UL throughput');
+        insertAfterLabel(findMetricByFriendlyLabel('LTE PUSCH RB Allocation Usage (%)'), 'UL throughput');
 
         // Identifier buttons should be driven by real sample-backed series when possible (so legends show multiple unique values).
         // Only fall back to run-level info (__info_*) if no per-sample identifier metric exists.
@@ -1847,7 +2263,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             if (!customMetrics.includes(k)) customMetrics.push(k);
         });
 
-        const trpMetricLabels = buildFriendlyTrpLabels(customMetrics);
+        const trpMetricLabels = buildFriendlyTrpLabels(orderedMetricNames);
         Object.assign(trpMetricLabels, infoFallback.labels);
         // Stamp fallback info values onto all points for __info_* metrics.
         if (Object.keys(trpInfoMetricValues).length) {
@@ -1890,10 +2306,25 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         updateLogsList();
 
         if (window.map && points.length > 0 && window.L) {
-            try {
-                const bounds = window.L.latLngBounds(points.map(p => [p.lat, p.lng]));
-                window.map.fitBounds(bounds);
-            } catch (_e) {}
+            const gpsPoints = points.filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+            if (gpsPoints.length > 0) {
+                try {
+                    const bounds = window.L.latLngBounds(gpsPoints.map(p => [p.lat, p.lng]));
+                    window.map.fitBounds(bounds);
+                } catch (_e) {}
+            }
+        }
+
+        if (noGps && points.length > 0) {
+            // Show a persistent banner warning and auto-open the chart view
+            const banner = document.createElement('div');
+            banner.style.cssText = 'position:fixed;top:54px;left:50%;transform:translateX(-50%);background:#92400e;color:#fef3c7;padding:8px 16px;border-radius:6px;font-size:13px;z-index:20000;display:flex;align-items:center;gap:12px;box-shadow:0 4px 12px rgba(0,0,0,0.5)';
+            banner.innerHTML = '<span>⚠️ <strong>No GPS in this file</strong> — ' + points.length + ' KPI samples decoded. Map dots unavailable; data shown in chart view.</span>'
+                + '<button style="background:#78350f;border:none;color:#fef3c7;cursor:pointer;padding:2px 8px;border-radius:4px;font-size:12px" onclick="this.parentNode.remove()">✕</button>';
+            document.body.appendChild(banner);
+            setTimeout(() => { if (banner.parentNode) banner.remove(); }, 8000);
+            // Auto-open TRP detail view so user can see charts
+            try { await openRunDetail(runId); } catch (_e) {}
         }
 
         if (!customMetrics.length) {
@@ -1962,7 +2393,17 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             // Constant run-level info: values are already stamped onto points (if present).
             series = [];
         } else {
-            series = await fetchSeries(log.trpRunId, metricName);
+            // For ServingCell array metrics, request only idx=0 (PCell) to avoid
+            // mixing PCell and SCell values during carrier aggregation.
+            // EXCEPTION: identity metrics should NOT be filtered by idx — they may
+            // only exist under the aggregate index (e.g. ServingCell[8]).
+            const isServingArray = /Radio\.(Lte|Nr)\.ServingCell\[/i.test(metricName);
+            const ml = String(metricName).toLowerCase();
+            const isIdentityMetric = ml.endsWith('.pci') || ml.includes('earfcn')
+                || ml.includes('nrarfcn') || ml.includes('cellidentity')
+                || ml.includes('.band') || ml.includes('.tac');
+            const fetchName = (isServingArray && !isIdentityMetric) ? (metricName + '|idx=0') : metricName;
+            series = await fetchSeries(log.trpRunId, fetchName);
             if (!series || !series.length) return false;
         }
 
@@ -1976,6 +2417,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
 
         if (series && series.length) {
             mapSeriesToPoints(log.points || [], metricName, series);
+            stampTrpServingIdentityAliases(log.points || []);
         }
 
         // For LTE TRP points-details, preload serving/neighbor context metrics so clicking a map point
@@ -1987,11 +2429,13 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
                 const n = String(name || '').toLowerCase();
                 let s = 0;
                 if (n.includes('radio.lte.servingcell')) s += 20;
-                if (n.includes('radio.lte.neighbor')) s += 15;
+                if (n.includes('radio.nr.servingcell')) s += 20;
+                if (n.includes('radio.lte.neighbor') || n.includes('radio.nr.neighbor')) s += 15;
                 if (n.endsWith('.pci')) s += 8;
-                if (n.endsWith('.rsrp')) s += 7;
-                if (n.endsWith('.rsrq')) s += 6;
-                if (n.includes('earfcn')) s += 5;
+                if (n.endsWith('.rsrp') || n.endsWith('.ssrsrp')) s += 7;
+                if (n.endsWith('.rsrq') || n.endsWith('.ssrsrq')) s += 6;
+                if (n.endsWith('.sssinr')) s += 5;
+                if (n.includes('earfcn') || n.includes('nrarfcn')) s += 5;
                 return s;
             };
             const related = log.customMetrics
@@ -1999,18 +2443,22 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
                     const n = String(m || '').toLowerCase();
                     if (n === String(metricName || '').toLowerCase()) return false;
                     if (hasMapped(m)) return false;
-                    const isServing = n.includes('radio.lte.servingcell');
-                    const isNeighbor = n.includes('radio.lte.neighbor');
-                    const isWanted = n.endsWith('.pci') || n.endsWith('.rsrp') || n.endsWith('.rsrq') || n.includes('earfcn') || n.includes('cellidentity');
-                    return (isServing || isNeighbor) && isWanted;
+                    const isLteServing = n.includes('radio.lte.servingcell');
+                    const isNrServing = n.includes('radio.nr.servingcell');
+                    const isNeighbor = n.includes('radio.lte.neighbor') || n.includes('radio.nr.neighbor');
+                    const isWanted = n.endsWith('.pci') || n.endsWith('.rsrp') || n.endsWith('.ssrsrp') || n.endsWith('.rsrq') || n.endsWith('.ssrsrq') || n.endsWith('.sssinr') || n.endsWith('.nrarfcn') || n.includes('earfcn') || n.includes('cellidentity');
+                    return (isLteServing || isNrServing || isNeighbor) && isWanted;
                 })
                 .sort((a, b) => rank(b) - rank(a))
-                .slice(0, 18);
+                .slice(0, 24);
 
             if (related.length) {
                 const loaded = await Promise.all(related.map(async (m) => {
                     try {
-                        const s = await fetchSeries(log.trpRunId, m);
+                        // For ServingCell array metrics, request only idx=0 (PCell)
+                        const isServingArray = /Radio\.(Lte|Nr)\.ServingCell\[/i.test(m);
+                        const fetchName = isServingArray ? (m + '|idx=0') : m;
+                        const s = await fetchSeries(log.trpRunId, fetchName);
                         return { m, s: Array.isArray(s) ? s : [] };
                     } catch (_e) {
                         return { m, s: [] };
@@ -2060,6 +2508,7 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const md = run.metadata || {};
         const metricsCount = (catalog && Array.isArray(catalog.metricsFlat)) ? catalog.metricsFlat.length : 0;
         const eventTypesCount = (catalog && Array.isArray(catalog.events)) ? catalog.events.length : 0;
+        const pcapUrl = `/api/runs/${run.id}/pcap`;
         qs('trpRunSummary').innerHTML = [
             `<div><b>Run #${escapeHtml(run.id)}</b> - ${escapeHtml(run.filename || '')}</div>`,
             `<div style="margin-top:6px;font-size:12px;">Imported: ${escapeHtml(run.imported_at || 'n/a')}</div>`,
@@ -2067,8 +2516,18 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             `<div style="font-size:12px;">End: ${escapeHtml(end)}</div>`,
             `<div style="font-size:12px;">Duration: ${escapeHtml(duration)}</div>`,
             `<div style="margin-top:8px;font-size:12px;">KPI rows: ${escapeHtml(md.metric_count || 0)} | Event rows: ${escapeHtml(md.event_count || 0)} | Track: ${escapeHtml(md.track_points || 0)}</div>`,
-            `<div style="font-size:12px;">Catalog: ${escapeHtml(metricsCount)} metrics, ${escapeHtml(eventTypesCount)} event types</div>`
+            `<div style="font-size:12px;">Catalog: ${escapeHtml(metricsCount)} metrics, ${escapeHtml(eventTypesCount)} event types</div>`,
+            `<div id="trpPcapRow" style="margin-top:10px;display:none;">`,
+            `  <a id="trpPcapLink" href="${escapeHtml(pcapUrl)}" download style="display:inline-block;padding:5px 12px;background:#1e3a5f;color:#93c5fd;border:1px solid #2b6cb0;border-radius:6px;font-size:12px;text-decoration:none;cursor:pointer;">`,
+            `    Download IP PCAP (Wireshark)`,
+            `  </a>`,
+            `</div>`
         ].join('');
+        // Probe the pcap endpoint; show the button only if data exists
+        fetch(pcapUrl, { method: 'HEAD' }).then(r => {
+            const row = document.getElementById('trpPcapRow');
+            if (row) row.style.display = r.ok ? 'block' : 'none';
+        }).catch(() => {});
     }
 
     function renderMap(track) {
@@ -2170,29 +2629,123 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
             pane.innerHTML = renderMetricsTreeHtml(cat.metricsTree || []);
             bindMetricsTreeHandlers(pane);
         } else {
-            const grouped = cat.eventsGrouped || {};
-            const sections = [];
-            const roots = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
-            roots.forEach(root => {
-                const rows = grouped[root] || [];
-                const filtered = q ? rows.filter(r => String(r.event_name || '').toLowerCase().includes(q)) : rows;
-                if (!filtered.length) return;
-                sections.push(`<div style=\"padding:6px 8px;font-size:12px;font-weight:700;color:#93c5fd;\">${escapeHtml(root)}</div>`);
-                filtered.forEach(r => {
-                    sections.push(`<div class=\"trp-event-type-hit\" data-name=\"${escapeHtml(r.event_name)}\" style=\"padding:6px 10px;border-bottom:1px solid #1f3559;cursor:pointer;display:flex;justify-content:space-between;gap:8px;\">` +
-                        `<span style=\"font-size:12px;color:#dbeafe;\">${escapeHtml(r.event_name)}</span>` +
-                        `<span style=\"font-size:11px;color:#7dd3fc;\">${escapeHtml(r.count || 0)}</span>` +
-                        `</div>`);
+            const isSignaling = trpState.sidebarTab === 'signaling';
+            if (isSignaling) {
+                // Render flat chronological flow for signaling
+                const allEvents = cat.events || [];
+                const sigEvents = allEvents.filter(ev => {
+                    const name = String(ev.event_name || '');
+                    const parts = name.split('.');
+                    const root = parts[0] || 'Generic';
+                    const isSig = /rrc|nas|layer3|signaling|msg|errc|prot|sig/i.test(root) || 
+                                  /rrc|nas|l3|layer3/i.test(name);
+                    if (!isSig) return false;
+                    if (q) return name.toLowerCase().includes(q);
+                    return true;
                 });
-            });
-            pane.innerHTML = sections.join('') || '<div style="padding:8px;color:#cbd5e1;">No event match.</div>';
-            pane.querySelectorAll('.trp-event-type-hit').forEach(node => {
-                node.addEventListener('click', async () => {
-                    const name = node.getAttribute('data-name');
-                    if (name) await selectEventType(name);
+
+                // Sort by time
+                sigEvents.sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
+
+                const html = sigEvents.map((ev, idx) => {
+                    const name = String(ev.event_name || '');
+                    let badgeClass = 'badge-sig-app';
+                    let badgeText = 'SIG';
+                    const lower = name.toLowerCase();
+                    if (lower.includes('rrc')) { badgeClass = 'badge-sig-rrc'; badgeText = 'RRC'; }
+                    else if (lower.includes('nas') || lower.includes('auth') || lower.includes('ident') || lower.includes('security')) { 
+                        badgeClass = 'badge-sig-nas'; badgeText = 'NAS'; 
+                    }
+
+                    return `<div class="trp-sig-flow-item" data-sig-idx="${idx}" style="padding:8px 10px; border-bottom:1px solid #1f3559; cursor:pointer; transition: background 0.2s;">` +
+                        `<div style="font-size:10px; color:#94a3b8; margin-bottom:2px;">${escapeHtml(ev.time || '')}</div>` +
+                        `<div style="font-size:12px; color:#dbeafe; display:flex; align-items:center; gap:6px;">` +
+                        `<span class="badge-sig ${badgeClass}" style="font-size:9px; padding:1px 4px; border-radius:3px; font-weight:700;">${badgeText}</span>` +
+                        `<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(name)}</span>` +
+                        `</div>` +
+                        `</div>`;
+                }).join('') || `<div style="padding:16px; color:#94a3b8; text-align:center;">No signaling messages found.</div>`;
+
+                pane.innerHTML = html;
+                pane.querySelectorAll('.trp-sig-flow-item').forEach(node => {
+                    node.addEventListener('click', () => {
+                        const idx = parseInt(node.getAttribute('data-sig-idx'));
+                        const ev = sigEvents[idx];
+                        if (ev) selectEventInstance(ev, node);
+                    });
                 });
-            });
+            } else {
+                // Render grouped event types
+                const grouped = cat.eventsGrouped || {};
+                const sections = [];
+                const roots = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
+                
+                roots.forEach(root => {
+                    const isSigRoot = /rrc|nas|layer3|signaling|msg|errc|prot|sig/i.test(root);
+                    if (isSigRoot) return; // Hide signaling in generic Events tab
+
+                    const rows = grouped[root] || [];
+                    const filtered = q ? rows.filter(r => String(r.event_name || '').toLowerCase().includes(q)) : rows;
+                    if (!filtered.length) return;
+                    sections.push(`<div style="padding:6px 8px; font-size:11px; font-weight:700; color:#93c5fd; background: rgba(30,58,138,0.3); margin-top:4px;">${escapeHtml(root)}</div>`);
+                    filtered.forEach(r => {
+                        sections.push(`<div class="trp-event-type-hit" data-name="${escapeHtml(r.event_name)}" style="padding:6px 10px; border-bottom:1px solid #1f3559; cursor:pointer; display:flex; justify-content:space-between; gap:8px;">` +
+                            `<span style="font-size:12px; color:#dbeafe;">${escapeHtml(r.event_name)}</span>` +
+                            `<span style="font-size:11px; color:#7dd3fc;">${escapeHtml(r.count || 0)}</span>` +
+                            `</div>`);
+                    });
+                });
+                pane.innerHTML = sections.join('') || `<div style="padding:8px; color:#cbd5e1;">No event match.</div>`;
+                pane.querySelectorAll('.trp-event-type-hit').forEach(node => {
+                    node.addEventListener('click', async () => {
+                        const name = node.getAttribute('data-name');
+                        if (name) await selectEventType(name);
+                    });
+                });
+            }
         }
+    }
+
+    function selectEventInstance(ev, node) {
+        // Highlight in sidebar
+        if (node && node.parentNode) {
+            node.parentNode.querySelectorAll('.trp-sig-flow-item').forEach(el => el.style.background = 'transparent');
+            node.style.background = 'rgba(59,130,246,0.2)';
+        }
+
+        setMainMode('events');
+        setMainTitle('Signaling: ' + ev.event_name);
+        
+        // Show in detail area
+        const list = qs('trpEventsList');
+        const params = qs('trpEventParams');
+        if (!list || !params) return;
+
+        // In "Flow" mode, we might want to keep the list empty or show only this one.
+        // Actually, let's just use the params pane directly.
+        list.innerHTML = `<div style="padding:16px; color:#94a3b8; text-align:center;">Showing message detail...</div>`;
+        
+        renderEventParams(ev, params);
+    }
+
+    function renderEventParams(ev, container) {
+        container.innerHTML = '';
+        const tree = document.createElement('div');
+        tree.className = 'trp-json-tree';
+        
+        const rawParams = ev.params || [];
+        if (rawParams.length > 0) {
+            const data = {};
+            rawParams.forEach(p => {
+                if (p && p.param_id) data[p.param_id] = p.param_value;
+            });
+            renderJsonNode(tree, 'Parameters', data, true);
+        } else if (ev.decoded_json) {
+            renderJsonNode(tree, 'Decoded Message', ev.decoded_json, true);
+        } else {
+            tree.innerHTML = `<div style="padding:16px; color:#94a3b8;">No decoded parameters for this message.</div>`;
+        }
+        container.appendChild(tree);
     }
 
     function renderMetricsTreeHtml(nodes, depth) {
@@ -2321,7 +2874,23 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         return data;
     }
 
+    // MRDC/EN-DC serving-cell snapshot (LTE PCell + NR PSCell + CA SCells) at a timestamp.
+    async function fetchMrdcCellsAtTime(runId, timeIso, options = {}) {
+        const tolMs = Number.isFinite(Number(options.tolMs))
+            ? Math.max(20, Math.round(Number(options.tolMs)))
+            : 1500;
+        const path = '/api/runs/' + encodeURIComponent(runId) + '/mrdc_cells_at_time'
+            + '?time=' + encodeURIComponent(String(timeIso || ''))
+            + '&tolMs=' + encodeURIComponent(String(tolMs));
+        const { res, payload: data } = await fetchJsonWithApiFallback(path);
+        if (!res.ok || !data || data.status !== 'success') {
+            throw new Error((data && data.message) || ('HTTP ' + res.status));
+        }
+        return data;
+    }
+
     // Expose helpers for cross-module consumers (sidebar throughput analysis).
+    window.trpMapSeriesToPoints = mapSeriesToPoints;
     window.trpFetchSeries = fetchSeries;
     window.trpFetchEvents = fetchEvents;
     window.trpFetchCatalog = fetchRunCatalog;
@@ -2331,7 +2900,9 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     window.trpFetchNeighborsAtTime = fetchNeighborsAtTime;
     window.trpFetchL1L2AtTime = fetchL1L2AtTime;
     window.trpFetchL1L2Capabilities = fetchL1L2Capabilities;
+    window.trpFetchMrdcCellsAtTime = fetchMrdcCellsAtTime;
     window.trpGetNeighborWindowConfig = getNeighborWindowConfig;
+    window.injectRunIntoLoadedLogs = injectRunIntoLoadedLogs;
 
     async function selectKpiMetric(name) {
         trpState.selectedMetric = name;
@@ -2364,20 +2935,120 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
         const params = qs('trpEventParams');
         if (!list || !params) return;
 
-        list.innerHTML = (events || []).map((e, idx) =>
-            `<div class="trp-event-item" data-idx="${idx}" style="padding:6px 8px;border-bottom:1px solid #22334f;cursor:pointer;">` +
-            `<div style="font-size:11px;color:#94a3b8;">${escapeHtml(e.time || '')}</div>` +
-            `<div style="font-size:12px;color:#e2e8f0;">${escapeHtml(e.event_name || '')}</div>` +
-            `</div>`
-        ).join('') || '<div style="padding:8px;color:#cbd5e1;">No events found.</div>';
+        list.innerHTML = (events || []).map((e, idx) => {
+            const name = String(e.event_name || '');
+            let badge = '';
+            const lower = name.toLowerCase();
+            if (lower.includes('rrc')) badge = '<span class="badge-sig badge-sig-rrc">RRC</span>';
+            else if (lower.includes('nas') || lower.includes('auth') || lower.includes('ident') || lower.includes('security')) badge = '<span class="badge-sig badge-sig-nas">NAS</span>';
+            else if (lower.includes('message') || lower.includes('l3') || lower.includes('layer3')) badge = '<span class="badge-sig badge-sig-app">SIG</span>';
+            
+            return `<div class="trp-event-item" data-idx="${idx}" style="padding:8px;border-bottom:1px solid #22334f;cursor:pointer;border-left:3px solid transparent;">` +
+                `<div style="font-size:10px;color:#94a3b8;margin-bottom:2px;">${escapeHtml(e.time || '')}</div>` +
+                `<div style="font-size:12px;color:#e2e8f0;display:flex;align-items:center;">${badge}${escapeHtml(name)}</div>` +
+                `</div>`;
+        }).join('') || '<div style="padding:16px;color:#cbd5e1;text-align:center;">No events found.</div>';
 
-        params.textContent = 'Click an event to view params';
+        params.innerHTML = '<div style="padding:20px;color:#94a3b8;text-align:center;font-style:italic;">Select an event to view decoded parameters</div>';
+        
         list.querySelectorAll('.trp-event-item').forEach((n, i) => {
             n.addEventListener('click', () => {
+                list.querySelectorAll('.trp-event-item').forEach(el => el.classList.remove('active'));
+                n.classList.add('active');
+                
                 const e = (events || [])[i] || {};
-                params.textContent = JSON.stringify(e.params || [], null, 2);
+                params.innerHTML = '';
+                const tree = document.createElement('div');
+                tree.className = 'trp-json-tree';
+                
+                const rawParams = e.params || [];
+                const obj = {};
+                if (Array.isArray(rawParams)) {
+                    rawParams.forEach(p => {
+                        if (p && p.param_id) obj[p.param_id] = p.param_value;
+                    });
+                }
+                
+                // If it's a decoded message, it might have 'decoded_json' at the root
+                if (e.decoded_json) {
+                    renderJsonNode(tree, 'DECODED MESSAGE', e.decoded_json, true);
+                    const hr = document.createElement('hr');
+                    hr.style.cssText = 'border:0;border-top:1px solid #2b3f63;margin:12px 0;';
+                    tree.appendChild(hr);
+                }
+                
+                renderJsonNode(tree, 'PARAMETERS', obj, e.decoded_json ? false : true);
+                params.appendChild(tree);
             });
         });
+    }
+
+    function renderJsonNode(container, key, value, expanded) {
+        const node = document.createElement('div');
+        node.className = 'trp-json-node';
+        
+        const isObj = value !== null && typeof value === 'object';
+        const header = document.createElement('div');
+        
+        if (isObj) {
+            const toggle = document.createElement('span');
+            toggle.className = 'trp-json-toggle' + (expanded ? ' expanded' : '');
+            toggle.textContent = '▶';
+            header.appendChild(toggle);
+            
+            const keySpan = document.createElement('span');
+            keySpan.className = 'trp-json-key';
+            keySpan.textContent = key + ': ';
+            header.appendChild(keySpan);
+            
+            const summary = document.createElement('span');
+            summary.style.color = '#94a3b8';
+            summary.textContent = Array.isArray(value) ? `[${value.length}]` : '{...}';
+            header.appendChild(summary);
+            
+            const children = document.createElement('div');
+            children.style.display = expanded ? 'block' : 'none';
+            
+            toggle.onclick = (ev) => {
+                ev.stopPropagation();
+                const now = children.style.display === 'none';
+                children.style.display = now ? 'block' : 'none';
+                toggle.classList.toggle('expanded', now);
+            };
+            header.onclick = toggle.onclick;
+            header.style.cursor = 'pointer';
+            
+            Object.keys(value).forEach(k => {
+                renderJsonNode(children, k, value[k], false);
+            });
+            
+            node.appendChild(header);
+            node.appendChild(children);
+        } else {
+            const keySpan = document.createElement('span');
+            keySpan.className = 'trp-json-key';
+            keySpan.textContent = key + ': ';
+            header.appendChild(keySpan);
+            
+            const valSpan = document.createElement('span');
+            if (typeof value === 'string') {
+                valSpan.className = 'trp-json-string';
+                valSpan.textContent = `"${value}"`;
+            } else if (typeof value === 'number') {
+                valSpan.className = 'trp-json-number';
+                valSpan.textContent = value;
+            } else if (typeof value === 'boolean') {
+                valSpan.className = 'trp-json-boolean';
+                valSpan.textContent = value;
+            } else if (value === null) {
+                valSpan.className = 'trp-json-null';
+                valSpan.textContent = 'null';
+            }
+            header.appendChild(valSpan);
+            node.appendChild(header);
+        }
+        
+        container.appendChild(node);
     }
 
     async function renderKpiChart(runId, kpiNames) {
@@ -2446,6 +3117,60 @@ function buildTrpPointsFromTrack(track, defaultMetricName, defaultSeries) {
     window.trpGetApiBase = () => trpApiBase;
     window.trpSetApiBase = (url) => setApiBase(url);
     window.setOptimApiBase = (url) => setApiBase(url);
+
+    // Expose the TRP upload function globally so app.js can route .trp files from the main Import button
+    // to this server-side handler (which supports NR/5G metrics) instead of the old client-side parser.
+    window.handleTrpFileImport = async (file) => {
+        await ensureTrpControls();
+        await uploadTrp(file);
+    };
+
+    window.openRunDetail = openRunDetail;
+
+    window.selectTrpSidebarTab = (tabId) => {
+        trpState.sidebarTab = tabId;
+        // If modal is open, update UI by clicking the corresponding tab button
+        const btnId = 'trpTab' + tabId.charAt(0).toUpperCase() + tabId.slice(1);
+        const btn = document.getElementById(btnId);
+        if (btn) btn.click(); 
+    };
+
+    window.showTrpSignaling = async (logIdOrRunId) => {
+        const log = (window.loadedLogs || []).find(l => String(l.id) === String(logIdOrRunId));
+        if (!log) return;
+
+        if (log.trpRunId) {
+            try {
+                const events = await fetchEvents(log.trpRunId);
+                if (Array.isArray(events) && events.length) {
+                    log.events = events;
+                    log.signaling = events.filter(ev => {
+                        const text = [
+                            ev && ev.event_name,
+                            ev && ev.message,
+                            ev && ev.category,
+                            ev && ev.fullDecodedMessage
+                        ].filter(Boolean).join(' ').toLowerCase();
+                        return /rrc|nas|l3|layer3|signaling|message\.3gpp|message\.layer3/.test(text);
+                    });
+                    log.signalingFlow = log.signaling.length > 0;
+                }
+            } catch (err) {
+                console.warn('[TRP] Failed to refresh signaling events before opening viewer:', err);
+            }
+        }
+        
+        if (typeof window.showSignalingModal === 'function') {
+            window.showSignalingModal(log.id);
+        } else {
+            // Fallback
+            let runId = log.trpRunId || log.id;
+            await openRunDetail(runId);
+            setTimeout(() => {
+                window.selectTrpSidebarTab('signaling');
+            }, 150);
+        }
+    };
 
     initApiBase();
 

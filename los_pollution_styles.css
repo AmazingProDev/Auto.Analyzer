@@ -1,0 +1,175 @@
+/**
+ * los_pollution_styles.css — Styles for LOS-enhanced pilot pollution analysis
+ */
+
+/* Shimmer loading animation for LOS cells */
+@keyframes losShimmer {
+    0%   { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.los-cell-shimmer {
+    display: inline-block;
+    width: 72px;
+    height: 14px;
+    border-radius: 7px;
+    background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+    background-size: 200% 100%;
+    animation: losShimmer 1.5s infinite ease-in-out;
+}
+
+/* LOS verdict pills */
+.los-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    cursor: default;
+}
+
+.los-pill--los {
+    background: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.los-pill--nlos-over {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px dashed rgba(239, 68, 68, 0.6);
+}
+
+.los-pill--nlos {
+    background: rgba(100, 116, 139, 0.15);
+    color: #94a3b8;
+    border: 1px solid rgba(100, 116, 139, 0.3);
+}
+
+.los-pill--unknown {
+    background: rgba(148, 163, 184, 0.08);
+    color: #64748b;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+/* LOS pill dot indicators */
+.los-pill::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+}
+
+.los-pill--los::before {
+    background: #22c55e;
+}
+
+.los-pill--nlos-over::before {
+    background: #ef4444;
+}
+
+.los-pill--nlos::before {
+    background: #64748b;
+}
+
+.los-pill--unknown::before {
+    background: #475569;
+}
+
+/* LOS recommendations section */
+#dt-los-recs {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: rgba(14, 165, 233, 0.05);
+    border: 1px solid rgba(14, 165, 233, 0.15);
+    border-radius: 8px;
+}
+
+#dt-los-recs .los-recs-title {
+    font-size: 12px;
+    color: #38bdf8;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    font-weight: 600;
+}
+
+#dt-los-recs .los-rec-item {
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: #e5e7eb;
+    line-height: 1.5;
+}
+
+#dt-los-recs .los-rec-item .los-rec-cell {
+    font-weight: 700;
+    color: #f0abfc;
+}
+
+#dt-los-recs .los-rec-item .los-rec-action {
+    color: #94a3b8;
+}
+
+/* Offline / unavailable banner */
+.los-pollution-banner {
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.los-pollution-banner--offline {
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    color: #fbbf24;
+}
+
+.los-pollution-banner--nodata {
+    background: rgba(100, 116, 139, 0.1);
+    border: 1px solid rgba(100, 116, 139, 0.25);
+    color: #94a3b8;
+}
+
+.los-pollution-banner .banner-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+/* Open in LOS Simulator button */
+.los-sim-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: rgba(14, 165, 233, 0.12);
+    border: 1px solid rgba(14, 165, 233, 0.3);
+    border-radius: 6px;
+    color: #38bdf8;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.los-sim-btn:hover {
+    background: rgba(14, 165, 233, 0.2);
+    border-color: rgba(14, 165, 233, 0.5);
+}
+
+.los-sim-btn .sim-icon {
+    font-size: 13px;
+}
+
+/* Tooltip for clearance info */
+.los-pill[title] {
+    position: relative;
+}

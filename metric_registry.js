@@ -2,6 +2,11 @@
     // Registry tuned to the KPIs/events confirmed in the current TRP family.
     // Unsupported items are kept for traceability but hidden in UI via `disabled: true`.
     const REGISTRY = [
+        { key: 'kpi_ss_rsrp', label: 'NR SS RSRP', type: 'kpi', category: 'PHY', normalization: 'dBm', sanity: null, exactCandidates: ['Radio.Nr.ServingCell[16].SsRsrp'], regexCandidates: ['ssrsrp', 'nr.*rsrp', 'mrdc.*rsrp', 'averagersrp'] },
+        { key: 'kpi_ss_rsrq', label: 'NR SS RSRQ', type: 'kpi', category: 'PHY', normalization: 'dB', sanity: null, exactCandidates: ['Radio.Nr.ServingCell[16].SsRsrq'], regexCandidates: ['ssrsrq', 'nr.*rsrq', 'mrdc.*rsrq', 'averagersrq'] },
+        { key: 'kpi_ss_sinr', label: 'NR SS SINR', type: 'kpi', category: 'PHY', normalization: 'dB', sanity: null, exactCandidates: ['Radio.Nr.ServingCell[16].SsSinr'], regexCandidates: ['sssinr', 'nr.*sinr', 'mrdc.*sinr', 'averagesinr'] },
+        { key: 'kpi_nr_pci', label: 'NR Serving PCI', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 1008 }, exactCandidates: ['Radio.Nr.ServingCell[16].Pci'], regexCandidates: ['nr.*pci'] },
+        { key: 'kpi_nr_arfcn', label: 'NR EARFCN / ARFCN', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: null }, exactCandidates: ['Radio.Nr.ServingCell[16].Downlink.NrArfcn'], regexCandidates: ['nrarfcn', 'nr.*arfcn'] },
         { key: 'kpi_cqi_dl', label: 'CQI (DL)', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 15 }, exactCandidates: ['Radio.Lte.ServingCell[8].Stream[2].Cqi'], regexCandidates: ['(lte).*cqi', '(dl).*cqi', '(servingcell|pcell).*cqi', 'cqi\\b'] },
         { key: 'kpi_mcs_dl', label: 'DL MCS', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 31 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pdsch.Stream[2].Mcs'], regexCandidates: ['(dl).*mcs', 'mcs.*(dl)', '(pdsch|dlsch).*mcs'] },
         { key: 'kpi_mcs_ul', label: 'UL MCS', type: 'kpi', category: 'PHY', normalization: 'unitless', sanity: { min: 0, max: 31 }, exactCandidates: ['Radio.Lte.ServingCell[8].Pusch.Mcs'], regexCandidates: ['(ul).*mcs', 'mcs.*(ul)', '(pusch|ulsch).*mcs'] },

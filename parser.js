@@ -4262,16 +4262,19 @@ const NMFParser = {
 };
 
 const ExcelParser = {
-    parse(arrayBuffer) {
+    async parseAsync(arrayBuffer, onProgress) {
+        if (onProgress) onProgress(5, 'Reading file structure...');
         const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        
+        if (onProgress) onProgress(15, 'Extracting worksheets...');
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
         const json = XLSX.utils.sheet_to_json(worksheet, { defval: "" }); // defval to keep empty/nulls safely
 
         if (json.length === 0) return { points: [], tech: 'Unknown', customMetrics: [] };
 
+        if (onProgress) onProgress(25, 'Analyzing headers...');
         // 1. Identify Key Columns (Time, Lat, Lon)
-        // ROBUST HEADER EXTRACTION: Scan first 50 rows to find ALL potential keys (sparse data support)
         const keysSet = new Set();
         if (json && json.length > 0) {
             const scanLimit = Math.min(json.length, 50);
@@ -4280,41 +4283,29 @@ const ExcelParser = {
             }
         }
         const keys = Array.from(keysSet);
-
         const normalize = k => k.toLowerCase().replace(/[\s_\.]/g, '');
 
-        let timeKey = keys.find(k => /^(time|timestamp|date|datetime)$/i.test(normalize(k)) || /time/i.test(normalize(k))); // Prioritize exact, then loose
+        let timeKey = keys.find(k => /^(time|timestamp|date|datetime)$/i.test(normalize(k)) || /time/i.test(normalize(k)));
         let latKey = keys.find(k => /^(lat|latitude|y_coord|y|cgpslat|cgpslatitude)$/i.test(normalize(k)) || /latitude/i.test(normalize(k)));
         let lngKey = keys.find(k => /^(lon|long|longitude|lng|x_coord|x|cgpslon|cgpslongitude)$/i.test(normalize(k)) || /longitude/i.test(normalize(k)));
 
-        // 2. Identify Metrics (Include All Keys as requested)
-        const customMetrics = [...keys]; // User wants EVERY column to be a metric
-        // const customMetrics = keys.filter(k => k !== timeKey && k !== latKey && k !== lngKey);
+        const customMetrics = [...keys];
 
-        // 1. Identify Best Columns for Primary Metrics
         const detectBestColumn = (candidates, exclusions = []) => {
-            // Enhanced exclusion check
             const isExcluded = (n) => {
-                if (n.includes('serving') || n.includes('bestactive')) return false; // Always trust 'serving' or Nemo 'bestactive'
+                if (n.includes('serving') || n.includes('bestactive')) return false;
                 if (exclusions.some(ex => n.includes(ex))) return true;
-
-                // Strict 'AS' and 'Neighbor' patterns
                 if (n.includes('as') && !n.includes('meas') && !n.includes('class') && !n.includes('phase') && !n.includes('pass') && !n.includes('alias')) return true;
-                if (/\bn\d/.test(n) || /^n\d/.test(n)) return true; // n1, n2...
-
+                if (/\bn\d/.test(n) || /^n\d/.test(n)) return true;
                 return false;
             };
-
             for (let cand of candidates) {
-                // 1. Strict match
                 let match = keys.find(k => {
                     const n = normalize(k);
                     if (isExcluded(n)) return false;
                     return n === cand || n === normalize(cand);
                 });
                 if (match) return match;
-
-                // 2. Loose match
                 match = keys.find(k => {
                     const n = normalize(k);
                     if (isExcluded(n)) return false;
@@ -4325,36 +4316,32 @@ const ExcelParser = {
             return null;
         };
 
-        const scCol = detectBestColumn(['servingcellsc', 'servingsc', 'primarysc', 'primarypci', 'dl_pci', 'dl_sc', 'bestsc', 'bestpci', 'sc', 'pci', 'psc', 'scramblingcode', 'physicalcellid', 'physicalcellidentity', 'phycellid'], ['active', 'set', 'neighbor', 'target', 'candidate']);
+        const scCol = detectBestColumn(['servingcellidentity', 'servingcellsc', 'servingsc', 'primarysc', 'primarypci', 'dl_pci', 'dl_sc', 'bestsc', 'bestpci', 'sc', 'pci', 'psc', 'scramblingcode', 'physicalcellid', 'physicalcellidentity', 'phycellid'], ['active', 'set', 'neighbor', 'target', 'candidate']);
         const levelCol = detectBestColumn(['servingcellrsrp', 'servingrsrp', 'rsrp', 'bestactiverscp', 'rscp', 'level'], ['active', 'set', 'neighbor']);
         const ecnoCol = detectBestColumn(['servingcellrsrq', 'servingrsrq', 'rsrq', 'bestactiveec/n0', 'bestactiveecn0', 'bestecno', 'ecno', 'sinr'], ['active', 'set', 'neighbor']);
         const freqCol = detectBestColumn(['servingcelldlearfcn', 'earfcn', 'uarfcn', 'freq', 'channel', 'ch'], ['active', 'set', 'neighbor']);
         const bandCol = detectBestColumn(['band'], ['active', 'set', 'neighbor']);
-        // Prioritize "NodeB ID-Cell ID" or "EnodeB ID-Cell ID" for strict sector matching
+        const servingCellNameCol = detectBestColumn(['servingcellname'], ['cellid']);
         const cellIdCol = detectBestColumn(['enodeb id-cell id', 'enodebid-cellid', 'nodeb id-cell id', 'cellid', 'ci', 'cid', 'cell_id', 'identity'], ['active', 'set', 'neighbor', 'target']);
+        const effectiveCellIdCol = (cellIdCol && cellIdCol === scCol) ? null : cellIdCol;
 
-        // Explicit Multi-RAT Serving Columns
         const lteServingRsrpCol = detectBestColumn(['lteservingrsrp']);
         const lteServingRsrqCol = detectBestColumn(['lteservingrsrq']);
         const lteServingSinrCol = detectBestColumn(['lteservingsinr']);
         const lteServingPciCol = detectBestColumn(['lteservingpci/sc', 'lteservingpci']);
         const lteServingEarfcnCol = detectBestColumn(['lteservingearfcn']);
-        
         const umtsServingRscpCol = detectBestColumn(['3gservingrscp']);
         const umtsServingEcnoCol = detectBestColumn(['3gservingecno']);
         const umtsServingScCol = detectBestColumn(['3gservingsc', '3gservingpci/sc']);
         const umtsServingFreqCol = detectBestColumn(['3gservingfreq']);
-        
         const gsmServingRxlevCol = detectBestColumn(['2grxlevsub', '2gservingrxlev']);
         const gsmServingRxqualCol = detectBestColumn(['2grxqualsub', '2gservingrxqual']);
         const gsmServingArfcnCol = detectBestColumn(['2garfcn']);
         const gsmServingBsicCol = detectBestColumn(['2gbsic']);
 
-        // Throughput Detection
         const dlThputCol = detectBestColumn(['averagedlthroughput', 'dlthroughput', 'downlinkthroughput'], []);
         const ulThputCol = detectBestColumn(['averageulthroughput', 'ulthroughput', 'uplinkthroughput'], []);
 
-        // Number Parsing Helper (handles comma decimals)
         const parseNumber = (val) => {
             if (typeof val === 'number') return val;
             if (typeof val === 'string') {
@@ -4382,7 +4369,6 @@ const ExcelParser = {
         const normalizeTimeValue = (value) => {
             if (value === undefined || value === null || value === '') return 'N/A';
             if (typeof value === 'number' && Number.isFinite(value)) {
-                // Excel serial date/time or time fraction
                 if ((value > 20000 && value < 90000) || (value >= 0 && value < 1)) {
                     const out = toTimeStringFromDayFraction(value);
                     if (out) return out;
@@ -4404,54 +4390,40 @@ const ExcelParser = {
         const points = [];
         const len = json.length;
 
-        // HEURISTIC: Check if detected CellID column is actually PCI (Small Integers)
-        // If we found a CellID column but NO SC Column, and values are small (< 1000), swap it.
-        if (cellIdCol && !scCol && len > 0) {
-            let smallCount = 0;
-            let checkLimit = Math.min(len, 20);
-            for (let i = 0; i < checkLimit; i++) {
-                const val = json[i][cellIdCol];
-                const num = parseNumber(val);
-                if (!isNaN(num) && num >= 0 && num < 1000) {
-                    smallCount++;
-                }
-            }
-            // If majority look like PCIs, treat as PCI
-            if (smallCount > (checkLimit * 0.8)) {
-                // console.log('[Parser] Swapping CellID column to SC column based on value range.');
-                // We treat this column as SC. We can also keep it as ID if we have nothing else? 
-                // Using valid PCI as ID isn't great for uniqueness, but better than nothing.
-                // Actually, let's just assign it to scCol variable context for the loop
-            }
-        }
+        if (onProgress) onProgress(35, 'Initializing data map...');
 
-        for (let i = 0; i < len; i++) {
-            const row = json[i];
-            const rawLat = latKey ? parseNumber(row[latKey]) : NaN;
-            const rawLng = lngKey ? parseNumber(row[lngKey]) : NaN;
-            const lat = !isNaN(rawLat) ? rawLat : null;
-            const lng = !isNaN(rawLng) ? rawLng : null;
-            const time = normalizeTimeValue(row[timeKey]);
+        // Processing in chunks to maintain responsiveness and show progress
+        const chunkSize = 500;
+        for (let i = 0; i < len; i += chunkSize) {
+            const end = Math.min(i + chunkSize, len);
+            for (let j = i; j < end; j++) {
+                const row = json[j];
+                if (!row) continue;
+                
+                const rawLat = latKey ? parseNumber(row[latKey]) : NaN;
+                const rawLng = lngKey ? parseNumber(row[lngKey]) : NaN;
+                const lat = !isNaN(rawLat) ? rawLat : null;
+                const lng = !isNaN(rawLng) ? rawLng : null;
+                const time = normalizeTimeValue(row[timeKey]);
 
-            if ((lat !== null && lng !== null) || time !== 'N/A') {
-                // Create Base Point from Best Columns
-                const point = {
-                    lat: lat,
-                    lng: lng,
-                    time: time || 'N/A',
-                    type: 'MEASUREMENT',
-                    level: -999,
-                    ecno: 0,
-                    sc: 0,
-                    rnc: null, // Init RNC
-                    cid: null, // Init CID
-                    // Use resolved columns directly
-                    level: (levelCol && row[levelCol] !== undefined) ? parseNumber(row[levelCol]) : -999,
-                    ecno: (ecnoCol && row[ecnoCol] !== undefined) ? parseNumber(row[ecnoCol]) : 0,
+                if ((lat !== null && lng !== null) || time !== 'N/A') {
+                    const point = {
+                        lat: lat,
+                        lng: lng,
+                        time: time || 'N/A',
+                        type: 'MEASUREMENT',
+                        level: -999,
+                        ecno: 0,
+                        sc: 0,
+                        rnc: null,
+                        cid: null,
+                        level: (levelCol && row[levelCol] !== undefined) ? parseNumber(row[levelCol]) : -999,
+                        ecno: (ecnoCol && row[ecnoCol] !== undefined) ? parseNumber(row[ecnoCol]) : 0,
                     sc: (scCol && row[scCol] !== undefined) ? parseInt(parseNumber(row[scCol])) : 0,
                     freq: (freqCol && row[freqCol] !== undefined) ? parseNumber(row[freqCol]) : undefined,
                     band: (bandCol && row[bandCol] !== undefined) ? row[bandCol] : undefined,
-                    cellId: (cellIdCol && row[cellIdCol] !== undefined) ? row[cellIdCol] : undefined,
+                    serving_cell_name: (servingCellNameCol && row[servingCellNameCol] !== undefined) ? String(row[servingCellNameCol]).trim() : undefined,
+                    cellId: (effectiveCellIdCol && row[effectiveCellIdCol] !== undefined) ? row[effectiveCellIdCol] : undefined,
                     throughput_dl: (dlThputCol && row[dlThputCol] !== undefined) ? (parseNumber(row[dlThputCol]) * 1000.0) : undefined, // Convert -> Kbps
                     throughput_ul: (ulThputCol && row[ulThputCol] !== undefined) ? (parseNumber(row[ulThputCol]) * 1000.0) : undefined  // Convert -> Kbps
                 };
@@ -4491,8 +4463,8 @@ const ExcelParser = {
 
                 // Add Custom Metrics (keep existing logic for other columns)
                 // Also scan for Neighbors (N1..N32) and Detected Set (D1..D12)
-                for (let j = 0; j < customMetrics.length; j++) {
-                    const m = customMetrics[j];
+                for (let k = 0; k < customMetrics.length; k++) {
+                    const m = customMetrics[k];
                     const val = row[m];
 
                     // Add all proprietary columns to point for popup details
@@ -4680,6 +4652,7 @@ const ExcelParser = {
                         sc: point.sc,
                         freq: point.freq,
                         band: point.band,
+                        cellName: point.serving_cell_name || null,
                         lac: point.lac || 0 // Default LAC
                     },
                     serving_lte: servingLte,
@@ -4689,8 +4662,16 @@ const ExcelParser = {
                 };
 
                 points.push(point);
-            } // End if !isNaN
-        } // End for i loop
+            } // End if (lat/lng/time)
+        } // End j loop
+        
+        if (onProgress) {
+            const pct = 35 + ((i / len) * 55);
+            onProgress(pct, `Processing data (${i}/${len})...`);
+        }
+        // Yield to UI
+        await new Promise(resolve => setTimeout(resolve, 0));
+    } // End i loop
 
         // Add Computed Metrics to List
         if (dlThputCol) customMetrics.push('throughput_dl');
@@ -4711,6 +4692,23 @@ const ExcelParser = {
                 if (lowCol.includes('rsrp')) detectedTech = '4G (Excel)';
                 else if (lowCol.includes('rscp')) detectedTech = '3G (Excel)';
             }
+        }
+
+        // Post-process 4G points: backfill serving_lte RF values and promote neighbor RATs
+        if (detectedTech.startsWith('4G') || detectedTech.startsWith('5G')) {
+            points.forEach(pt => {
+                if (pt.parsed && pt.parsed.serving_lte) {
+                    const sl = pt.parsed.serving_lte;
+                    if (sl.rsrp === null && Number.isFinite(pt.level) && pt.level > -200) sl.rsrp = pt.level;
+                    if (sl.rsrq === null && Number.isFinite(pt.ecno) && pt.ecno !== 0) sl.rsrq = pt.ecno;
+                    if (sl.earfcn === null && Number.isFinite(pt.freq) && pt.freq > 0) sl.earfcn = pt.freq;
+                }
+                if (pt.parsed && Array.isArray(pt.parsed.neighbors)) {
+                    pt.parsed.neighbors.forEach(n => {
+                        if (n.rat === 'UTRA') n.rat = 'E-UTRA';
+                    });
+                }
+            });
         }
 
         // Synthesize Events and CallSessions from specialized Excel columns
@@ -4772,11 +4770,15 @@ const ExcelParser = {
                 const upperName = eventName.toUpperCase();
                 
                 // Active Call Tracker Logic
-                if (upperName.includes('ATTEMPT') || upperName.includes('SETUP')) {
+                const isAttempt = upperName.includes('ATTEMPT') || upperName.includes('SETUP') || upperName.includes('CALL ATTEMPT');
+                
+                if (isAttempt) {
                     // Start a new call
                     if (activeCall) callSessions.push(activeCall); // Push previous if unclosed
                     activeCall = {
                         id: `xlscall_${callSessionId++}`,
+                        kind: 'UMTS_CALL',
+                        callTransactionId: p['Event id'] || p['Call ID'] || p['CallId'] || '-',
                         type: 'unknown',
                         technology: detectedTech,
                         startTs: evt.time || null,
@@ -4790,12 +4792,14 @@ const ExcelParser = {
                         cause: '',
                         messages: [],
                         drop: false,
+                        setupFailure: false,
                         outcome: 'INCOMPLETE',
                         endType: 'UNKNOWN'
                     };
                 } else if (activeCall) {
                     // Connect event
-                    if (upperName.includes('CONNECT')) {
+                    const isConnect = upperName.includes('CONNECT') || upperName.includes('CALL CONNECTED');
+                    if (isConnect) {
                         activeCall.events.push(evt);
                         activeCall.properties = activeCall.properties || {};
                         if (callSetupTimeKey && p[callSetupTimeKey]) {
@@ -4803,7 +4807,11 @@ const ExcelParser = {
                         }
                     }
                     // End events
-                    else if (upperName.includes('DROP')) {
+                    const isDrop = upperName.includes('DROP') || upperName.includes('DROP_CALL');
+                    const isFail = upperName.includes('FAIL') || upperName.includes('BLOCK') || upperName.includes('CALL FAILURE');
+                    const isNormalEnd = upperName.includes('SESSION') || upperName.includes('END') || upperName.includes('DISCONNECT') || upperName.includes('CALL DISCONNECTED');
+                    
+                    if (isDrop) {
                         activeCall.type = 'drop';
                         activeCall.drop = true;
                         activeCall.outcome = 'DROP_CALL';
@@ -4820,9 +4828,10 @@ const ExcelParser = {
                         
                         callSessions.push(activeCall);
                         activeCall = null;
-                    } else if (upperName.includes('FAIL') || upperName.includes('BLOCK')) {
+                    } else if (isFail) {
                         activeCall.type = 'setup_fail';
                         activeCall.drop = false;
+                        activeCall.setupFailure = true;
                         activeCall.outcome = 'CALL_SETUP_FAILURE';
                         activeCall.endType = 'SETUP_FAILURE';
                         activeCall.endTs = evt.time;
@@ -4833,7 +4842,7 @@ const ExcelParser = {
                         
                         callSessions.push(activeCall);
                         activeCall = null;
-                    } else if (upperName.includes('SESSION') || upperName.includes('END')) { // Normal end
+                    } else if (isNormalEnd) { // Normal end
                         activeCall.type = 'normal';
                         activeCall.drop = false;
                         activeCall.outcome = 'SUCCESS';
@@ -4852,27 +4861,32 @@ const ExcelParser = {
                     }
                 } else {
                     // Event outside of known call (maybe orphaned Drop or session end)
-                    const isDrop = upperName.includes('DROP');
-                    const isBlock = upperName.includes('FAIL') || upperName.includes('BLOCK');
-                    const isSession = upperName.includes('SESSION');
+                    const isDrop = upperName.includes('DROP') || upperName.includes('DROP_CALL');
+                    const isBlock = upperName.includes('FAIL') || upperName.includes('BLOCK') || upperName.includes('CALL FAILURE');
+                    const isSessionEnd = upperName.includes('SESSION') || upperName.includes('END') || upperName.includes('DISCONNECT') || upperName.includes('CALL DISCONNECTED');
                     
-                    if (isDrop || isBlock || isSession) {
+                    if (isDrop || isBlock || isSessionEnd) {
                         callSessions.push({
                             id: `xlscall_${callSessionId++}`,
+                            kind: 'UMTS_CALL',
+                            callTransactionId: p['Event id'] || p['Call ID'] || p['CallId'] || '-',
                             type: isDrop ? 'drop' : (isBlock ? 'setup_fail' : 'normal'),
                             technology: detectedTech,
-                            startTs: null,
+                            startTs: evt.time || null, // Best guess for orphaned
                             endTs: evt.time || null,
-                            startGps: null,
+                            startGps: { lat: evt.lat, lng: evt.lng },
                             endGps: { lat: evt.lat, lng: evt.lng },
-                            startCell: null,
+                            startCell: { sc: evt.sc, cellId: evt.cellId },
                             endCell: { sc: evt.sc, cellId: evt.cellId },
                             events: [ evt ],
                             durationSec: (callDurationKey && p[callDurationKey]) ? parseFloat(p[callDurationKey]) : null,
                             finalRscp: evt.rscp !== undefined ? evt.rscp : evt.rsrp,
                             finalEcno: evt.ecno !== undefined ? evt.ecno : evt.rsrq,
                             cause: (rrcCauseKey && p[rrcCauseKey]) ? String(p[rrcCauseKey]) : eventName,
-                            messages: []
+                            messages: [],
+                            drop: isDrop,
+                            setupFailure: isBlock,
+                            radioMeasurementsTimeline: [] // Will still show as 0 measurements if row is sparse
                         });
                     }
                 }
@@ -4895,6 +4909,315 @@ const ExcelParser = {
                 rncCol: null, // extracted from cellId usually
                 levelCol: levelCol
             }
+        };
+    }
+};
+
+const DualSignalingParser = {
+    parse(content) {
+        const text = String(content || '');
+        const lines = text.split(/\r?\n/);
+        if (!lines.length) return { points: [], signaling: [], tech: 'Dual Signaling TXT', customMetrics: [] };
+
+        const header = (lines[0] || '').split('\t').map((v) => String(v || '').trim());
+        const indexOfHeader = (...names) => {
+            const wanted = names.map((n) => String(n || '').trim().toLowerCase());
+            return header.findIndex((h) => wanted.includes(String(h || '').trim().toLowerCase()));
+        };
+
+        const idxEventId = indexOfHeader('Event ID');
+        const idxSystem = indexOfHeader('System');
+        const idxTime = indexOfHeader('Time');
+        const idxSubchannel = indexOfHeader('Subchannel');
+        const idxUl = indexOfHeader('UL Message');
+        const idxDl = indexOfHeader('DL Message');
+        const idxDecoded = indexOfHeader('Decoded_Message', 'Decoded Message');
+        const idxMsgType = indexOfHeader('Msg. type', 'Msg type');
+        const idxMessageName = indexOfHeader('Message name');
+
+        const getCol = (parts, idx) => (idx >= 0 && idx < parts.length) ? String(parts[idx] || '').trim() : '';
+        const toTod = (fullTs) => {
+            const m = String(fullTs || '').match(/(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)/);
+            return m ? m[1] : String(fullTs || '').trim();
+        };
+        const inferDirection = (ul, dl, decoded) => {
+            if (ul && !dl) return 'UL';
+            if (dl && !ul) return 'DL';
+            const txt = `${ul} ${dl} ${decoded}`.toUpperCase();
+            if (/\bUPLINK\b/.test(txt)) return 'UL';
+            if (/\bDOWNLINK\b/.test(txt)) return 'DL';
+            return 'N/A';
+        };
+        const inferCategory = (system, subchannel, message, decoded, msgType) => {
+            const txt = `${system} ${subchannel} ${message} ${decoded} ${msgType}`.toUpperCase();
+            if (
+                txt.includes('RRC_') ||
+                txt.includes('SYSTEM_INFORMATION') ||
+                txt.includes('ACTIVE_SET_UPDATE') ||
+                txt.includes('MEASUREMENT_CONTROL') ||
+                txt.includes('MEASUREMENT REPORT') ||
+                txt.includes('MEASUREMENT_REPORT') ||
+                txt.includes('PHYSICAL_CHANNEL_RECONFIGURATION') ||
+                txt.includes('RADIO_BEARER_RECONFIGURATION') ||
+                txt.includes('TRANSPORT_CHANNEL_RECONFIGURATION') ||
+                txt.includes('CELL_UPDATE') ||
+                txt.includes('URA_UPDATE') ||
+                txt.includes('UTRAN_MOBILITY_INFORMATION')
+            ) {
+                return 'RRC';
+            }
+            return 'L3';
+        };
+        const extractFirstInt = (text, patterns) => {
+            const src = String(text || '');
+            for (const re of patterns) {
+                const m = src.match(re);
+                if (m) {
+                    const n = Number(m[1]);
+                    if (Number.isFinite(n)) return n;
+                }
+            }
+            return null;
+        };
+        const isMessageHeaderLine = (line) => {
+            if (!line || line.indexOf('\t') === -1) return false;
+            const parts = line.split('\t');
+            const timeVal = getCol(parts, idxTime >= 0 ? idxTime : 2);
+            const decoded = getCol(parts, idxDecoded >= 0 ? idxDecoded : 6);
+            const ul = getCol(parts, idxUl >= 0 ? idxUl : 4);
+            const dl = getCol(parts, idxDl >= 0 ? idxDl : 5);
+            const system = getCol(parts, idxSystem >= 0 ? idxSystem : 1);
+            return /\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}\.\d{3}/.test(timeVal)
+                && !!system
+                && !!(decoded || ul || dl);
+        };
+
+        const signaling = [];
+        let current = null;
+
+        const finalizeCurrent = () => {
+            if (!current) return;
+            const fullDecodedMessage = current.blockLines.join('\n').trim();
+            const message = current.decodedMessage || current.ulMessage || current.dlMessage || current.msgType || 'Unknown';
+            const category = inferCategory(current.system, current.subchannel, message, current.decodedMessage, current.msgType);
+            const parsedRncId = extractFirstInt(fullDecodedMessage, [
+                /rnc id\s*:\s*(\d+)/i,
+                /srnc-identity[\s\S]*?=\s*(\d+)/i,
+                /drnc-identity[\s\S]*?=\s*(\d+)/i
+            ]);
+            const parsedCellId = extractFirstInt(fullDecodedMessage, [
+                /cell id\s*:\s*(\d+)/i,
+                /cellidentity[\s\S]*?=\s*(\d+)/i
+            ]);
+            const parsedPsc = extractFirstInt(fullDecodedMessage, [
+                /primaryScramblingCode\s*:\s*(\d+)/i,
+                /primary scrambling code\s*:\s*(\d+)/i,
+                /psc\s*:\s*(\d+)/i
+            ]);
+            const parsedUarfcn = extractFirstInt(fullDecodedMessage, [
+                /uarfcn\s*:\s*(\d+)/i,
+                /downlink uarfcn\s*:\s*(\d+)/i
+            ]);
+            const parsedLac = extractFirstInt(fullDecodedMessage, [
+                /\blac\s*:\s*(\d+)/i
+            ]);
+            const parsedRac = extractFirstInt(fullDecodedMessage, [
+                /\brac\s*:\s*(\d+)/i
+            ]);
+            const parsedSrnti = extractFirstInt(fullDecodedMessage, [
+                /s-RNTI[\s\S]*?=\s*(\d+)/i,
+                /\bs-rnti\s*:\s*(\d+)/i
+            ]);
+            const parsedPrimaryCpich = extractFirstInt(fullDecodedMessage, [
+                /primary CPICH info[\s\S]*?primaryScramblingCode\s*:\s*(\d+)/i,
+                /primary cpich[\s\S]*?primaryScramblingCode\s*:\s*(\d+)/i
+            ]);
+            const parsedRrcState = (() => {
+                const m = fullDecodedMessage.match(/rrc-StateIndicator\s*:\s*([A-Za-z0-9-]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedReleaseCause = (() => {
+                const m = fullDecodedMessage.match(/releaseCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedCsReleaseCause = (() => {
+                const patterns = [
+                    /\bcc[-\s]*cause\s*:\s*([^\n\r]+)/i,
+                    /\bcs[-\s]*cause\s*:\s*([^\n\r]+)/i,
+                    /\bcause value\s*:\s*([^\n\r]+)/i,
+                    /\bcause\s*:\s*([^\n\r]+)/i
+                ];
+                for (const pattern of patterns) {
+                    const m = fullDecodedMessage.match(pattern);
+                    if (!m) continue;
+                    const txt = String(m[1] || '').trim();
+                    if (!txt) continue;
+                    if (/^rrc/i.test(txt)) continue;
+                    return txt;
+                }
+                return null;
+            })();
+            const parsedRrcReason = (() => {
+                const patterns = [
+                    /releaseCause\s*:\s*([^\n\r]+)/i,
+                    /rejectCause\s*:\s*([^\n\r]+)/i,
+                    /failureCause\s*:\s*([^\n\r]+)/i,
+                    /rrc[^:\n\r]{0,40}cause\s*:\s*([^\n\r]+)/i,
+                    /cause\s*value\s*:\s*([^\n\r]+)/i
+                ];
+                for (const pattern of patterns) {
+                    const m = fullDecodedMessage.match(pattern);
+                    if (m && String(m[1] || '').trim()) return String(m[1]).trim();
+                }
+                return null;
+            })();
+            const parsedCellUpdateCause = (() => {
+                const m = fullDecodedMessage.match(/cellUpdateCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedEstablishmentCause = (() => {
+                const m = fullDecodedMessage.match(/establishmentCause\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedEventId = (() => {
+                const m = fullDecodedMessage.match(/eventID\s*:\s*([^\n\r]+)/i);
+                return m ? String(m[1]).trim() : null;
+            })();
+            const parsedRachEcnoDb = (() => {
+                const m = fullDecodedMessage.match(/measuredResultsOnRACH[\s\S]*?cpich-Ec-N0\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dB\)/i);
+                if (!m) return null;
+                const n = Number(m[1]);
+                return Number.isFinite(n) ? n : null;
+            })();
+            const measuredCells = (() => {
+                const pscs = [...fullDecodedMessage.matchAll(/primaryScramblingCode\s*:\s*(\d+)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const rscps = [...fullDecodedMessage.matchAll(/cpich-RSCP\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dBm\)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const ecnos = [...fullDecodedMessage.matchAll(/cpich-Ec-N0\s*:\s*\d+\s+\(=\s*([-\d.]+)\s*dB\)/gi)].map((m) => Number(m[1])).filter(Number.isFinite);
+                const len = Math.min(pscs.length, Math.max(rscps.length, ecnos.length));
+                const out = [];
+                for (let i = 0; i < len; i += 1) {
+                    out.push({
+                        psc: pscs[i] ?? null,
+                        rscpDbm: Number.isFinite(rscps[i]) ? rscps[i] : null,
+                        ecnoDb: Number.isFinite(ecnos[i]) ? ecnos[i] : null
+                    });
+                }
+                return out;
+            })();
+            signaling.push({
+                time: current.time,
+                timestamp: current.timestamp,
+                type: category,
+                category,
+                direction: current.direction,
+                message,
+                event: message,
+                details: current.decodedMessage || message,
+                payload: fullDecodedMessage,
+                fullDecodedMessage,
+                eventId: current.eventId,
+                system: current.system,
+                subchannel: current.subchannel,
+                ulMessage: current.ulMessage,
+                dlMessage: current.dlMessage,
+                msgType: current.msgType,
+                messageSpec: current.messageName,
+                parsedRncId,
+                parsedCellId,
+                parsedPsc,
+                parsedUarfcn,
+                parsedLac,
+                parsedRac,
+                parsedSrnti,
+                parsedPrimaryCpich,
+                parsedRrcState,
+                parsedReleaseCause,
+                parsedCsReleaseCause,
+                rrc_rel_cause: parsedReleaseCause,
+                cs_rel_cause: parsedCsReleaseCause,
+                parsedRrcReason,
+                parsedCellUpdateCause,
+                parsedEstablishmentCause,
+                parsedEventId,
+                parsedRachEcnoDb,
+                measuredCells,
+                rawHeaderLine: current.rawHeaderLine,
+                properties: {
+                    Time: current.time,
+                    Timestamp: current.timestamp,
+                    Type: category,
+                    Direction: current.direction,
+                    Message: message,
+                    Event: message,
+                    System: current.system,
+                    Subchannel: current.subchannel,
+                    'UL Message': current.ulMessage,
+                    'DL Message': current.dlMessage,
+                    'Decoded Message': current.decodedMessage,
+                    'Message Spec': current.messageName,
+                    'Event ID': current.eventId,
+                    'Parsed RNC ID': parsedRncId,
+                    'Parsed Cell ID': parsedCellId,
+                    'Parsed PSC': parsedPsc,
+                    'Parsed UARFCN': parsedUarfcn,
+                    'Parsed LAC': parsedLac,
+                    'Parsed RAC': parsedRac,
+                    'Parsed S-RNTI': parsedSrnti,
+                    'Parsed Primary CPICH': parsedPrimaryCpich,
+                    'Parsed RRC State': parsedRrcState,
+                    'Parsed Release Cause': parsedReleaseCause,
+                    'Parsed CS Release Cause': parsedCsReleaseCause,
+                    'RRC Release Cause': parsedReleaseCause,
+                    'CS Release Cause': parsedCsReleaseCause,
+                    'Parsed RRC Reason': parsedRrcReason,
+                    'Parsed Cell Update Cause': parsedCellUpdateCause,
+                    'Parsed Establishment Cause': parsedEstablishmentCause,
+                    'Parsed Event ID': parsedEventId,
+                    'Parsed RACH EcNo (dB)': parsedRachEcnoDb,
+                    'Full Decoded Message': fullDecodedMessage
+                }
+            });
+            current = null;
+        };
+
+        for (let i = 1; i < lines.length; i += 1) {
+            const line = lines[i];
+            if (isMessageHeaderLine(line)) {
+                finalizeCurrent();
+                const parts = line.split('\t');
+                const timestamp = getCol(parts, idxTime >= 0 ? idxTime : 2);
+                const ulMessage = getCol(parts, idxUl >= 0 ? idxUl : 4);
+                const dlMessage = getCol(parts, idxDl >= 0 ? idxDl : 5);
+                const decodedMessage = getCol(parts, idxDecoded >= 0 ? idxDecoded : 6);
+                current = {
+                    eventId: getCol(parts, idxEventId >= 0 ? idxEventId : 0),
+                    system: getCol(parts, idxSystem >= 0 ? idxSystem : 1),
+                    timestamp,
+                    time: toTod(timestamp),
+                    subchannel: getCol(parts, idxSubchannel >= 0 ? idxSubchannel : 3),
+                    ulMessage,
+                    dlMessage,
+                    decodedMessage,
+                    msgType: getCol(parts, idxMsgType >= 0 ? idxMsgType : 7),
+                    messageName: getCol(parts, idxMessageName >= 0 ? idxMessageName : 8),
+                    direction: inferDirection(ulMessage, dlMessage, decodedMessage),
+                    rawHeaderLine: line,
+                    blockLines: []
+                };
+                continue;
+            }
+            if (current) current.blockLines.push(line);
+        }
+
+        finalizeCurrent();
+
+        return {
+            points: [],
+            signaling,
+            tech: 'Dual Signaling TXT',
+            customMetrics: [],
+            events: [],
+            callSessions: []
         };
     }
 };

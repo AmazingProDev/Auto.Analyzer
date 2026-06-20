@@ -2,7 +2,13 @@ class MapRenderer {
     constructor(elementId) {
         // PERFORMANCE: preferCanvas = true forces Leaflet to use Canvas renderer for Vectors
         // This makes rendering 10k-50k points buttery smooth compared to SVG.
-        this.map = L.map(elementId, { preferCanvas: true }).setView([33.5, -7.5], 6); // Default to Morocco view
+        this.map = L.map(elementId, {
+            preferCanvas: true,
+            zoomControl: false,
+            zoomSnap: 0.25,          // allow quarter-level zoom positions
+            zoomDelta: 0.5,          // each scroll tick / +- button moves 0.5 levels
+            wheelPxPerZoomLevel: 100 // pixels of scroll needed per full zoom level (default 60)
+        }).setView([33.5, -7.5], 6);
 
         // Base Maps
         const darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
@@ -22,18 +28,20 @@ class MapRenderer {
             maxZoom: 19
         });
 
-        const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+        const satelliteLayer = L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+            maxZoom: 20,
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            attribution: '&copy; Google'
         });
 
-        const googleHybridLayer = L.tileLayer('http://mt0.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}', {
-            attribution: 'Google',
+        const googleHybridLayer = L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
             maxZoom: 20,
-            subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            attribution: '&copy; Google'
         });
 
         // Set Default
-        osmLayer.addTo(this.map);
+        satelliteLayer.addTo(this.map);
 
         const baseMaps = {
             "Dark": darkLayer,
@@ -42,52 +50,87 @@ class MapRenderer {
             "Satellite": satelliteLayer,
             "Hybrid": googleHybridLayer
         };
+        this.baseMaps = baseMaps;
 
-        L.control.layers(baseMaps).addTo(this.map);
+        // Wire up the custom MAP dropdown from the header
+        const mapLayerSelect = document.getElementById('mapLayerSelect');
+        if (mapLayerSelect) {
+            mapLayerSelect.value = 'Satellite';
+            mapLayerSelect.addEventListener('change', (e) => {
+                const selected = e.target.value;
+                if (this.baseMaps[selected]) {
+                    // Remove all existing base maps
+                    Object.values(this.baseMaps).forEach(layer => {
+                        if (this.map.hasLayer(layer)) {
+                            this.map.removeLayer(layer);
+                        }
+                    });
+                    // Add selected
+                    this.baseMaps[selected].addTo(this.map);
+                }
+            });
+
+            // Keep dropdown in sync if user uses the standard Leaflet control
+            this.map.on('baselayerchange', (e) => {
+                mapLayerSelect.value = e.name;
+            });
+        }
 
         this.logLayers = {}; // Store layers by ID/Name
 
         // Site Labels Layer (separate for performance)
         this.siteLabelsLayer = L.layerGroup();
 
-        // Custom Pane for Connections (Lines) to ensure they are ON TOP of filled polygons
+        // Custom Pane for Connections (Lines)
         this.map.createPane('connectionsPane');
-        this.map.getPane('connectionsPane').style.zIndex = 800; // Above sites (650) and points
+        this.map.getPane('connectionsPane').style.zIndex = 800;
         this.map.getPane('connectionsPane').style.pointerEvents = 'none';
-
-        // Define Custom Renderers
         this.connectionsRenderer = L.canvas({ pane: 'connectionsPane' });
 
-        // CUSTOM PANE FOR SITES & LOG POINTS (Interactive Top Layer)
+        // CUSTOM PANE FOR SITES (sectors) — z=750, ABOVE all RF panes.
+        // SVG paths only fire on actual polygon geometry so empty space between
+        // sectors falls through. Being at z=750 guarantees sector clicks are
+        // never blocked by the RF canvas layers below.
         this.map.createPane('sitesPane');
-        this.map.getPane('sitesPane').style.zIndex = 650;
+        this.map.getPane('sitesPane').style.zIndex = 750;
         this.map.getPane('sitesPane').style.pointerEvents = 'auto';
         this.sitesRenderer = L.canvas({ pane: 'sitesPane', tolerance: 5 });
-        // SVG Renderer for Sites (Sectors) to allow click-through transparency
         this.sitesSvgRenderer = L.svg({ pane: 'sitesPane' });
 
-        // CUSTOM PANE FOR LABELS (Highest)
-        this.map.createPane('labelsPane');
-        this.map.getPane('labelsPane').style.zIndex = 700;
-        this.map.getPane('labelsPane').style.pointerEvents = 'none'; // Don't block clicks
+        // RF log points (RSRP, etc.) — z=660, below sectors (750).
+        this.map.createPane('logPointsPane');
+        this.map.getPane('logPointsPane').style.zIndex = 660;
+        this.map.getPane('logPointsPane').style.pointerEvents = 'auto';
+        this.logPointsRenderer = L.canvas({ pane: 'logPointsPane', tolerance: 5 });
 
-        // CUSTOM PANE FOR EVENTS (Above log points, below labels)
+        // CUSTOM PANE FOR LABELS — z=700, between dots and sites, no pointer events
+        this.map.createPane('labelsPane');
+        this.map.getPane('labelsPane').style.zIndex = 760;
+        this.map.getPane('labelsPane').style.pointerEvents = 'none';
+
+        // CUSTOM PANE FOR EVENTS — z=665
         this.map.createPane('eventsPane');
-        this.map.getPane('eventsPane').style.zIndex = 680;
+        this.map.getPane('eventsPane').style.zIndex = 665;
         this.map.getPane('eventsPane').style.pointerEvents = 'auto';
 
-        // CUSTOM PANE FOR SMARTCARE GRIDS (Polygons) - zIndex 640 (Below sitesPane 650)
+        // CUSTOM PANE FOR PILOT POLLUTION CIRCLES — z=670
+        this.map.createPane('pilotPollutionPane');
+        this.map.getPane('pilotPollutionPane').style.zIndex = 670;
+        this.map.getPane('pilotPollutionPane').style.pointerEvents = 'auto';
+
+        // CUSTOM PANE FOR SMARTCARE GRIDS — z=640
         this.map.createPane('smartCarePane');
         this.map.getPane('smartCarePane').style.zIndex = 640;
-        // Canvas renderer for this pane to allow efficient rendering of many polygons
         this.smartCareRenderer = L.canvas({ pane: 'smartCarePane', tolerance: 5 });
+
 
 
         this.connectionsLayer = L.layerGroup().addTo(this.map); // Layer for lines
         this.customDiscreteColors = {}; // User-overridden colors (ID -> Color)
         this.siteLayers = new Map(); // Store layers by ID: { id, name, sectors, visible, polygonLayer, labelLayer }
-        // We no longer use a single this.siteData array for rendering, but we might aggregate it for 'getServingCell' lookups
         this.siteIndex = null; // Composite index of all VISIBLE layers
+        this._undoStack = []; // each entry: [{layerId, idx, lat, lng, azimuth, cellName, cellId, pci, sc, freq}]
+        this._redoStack = [];
 
         // Optim: Only show labels on high zoom with debounce to prevent UI freeze
         let zoomTimeout;
@@ -235,11 +278,9 @@ class MapRenderer {
 
     updateLabelVisibility() {
         const zoom = this.map.getZoom();
+        const forced = !!(this.siteSettings && this.siteSettings.forceSiteNames);
 
-        // Threshold: Only show if zoom >= 14
-        // We no longer check Global Settings here because individual layers might have labels enabled.
-        // renderSites() determines IF labels are generated. This just controls Zoom LOD.
-        if (zoom >= 14) {
+        if (forced || zoom >= 14) {
             if (!this.map.hasLayer(this.siteLabelsLayer)) {
                 this.siteLabelsLayer.addTo(this.map);
             }
@@ -258,19 +299,8 @@ class MapRenderer {
         if (val === undefined || val === null || val === 'N/A' || val === '') return '#888';
 
         const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
-        if (rangeKey === 'discrete') {
-            return this.getDiscreteColor(val, metric);
-        }
-
-        const discreteMetrics = [
-            'cellId', 'cid', 'pci', 'sc', 'SC', 'Serving SC', 'rnc', 'RNC', 'Serving RNC', 'lac', 'LAC', 'Serving LAC', 'serving_cell_name', 'Cell ID',
-            'eNodeB Name', 'Cell Name', 'eNodeB ID-Cell ID', 'CellName', 'Site Name',
-            'RRC State', 'AS Event', 'HO Command', 'HO Completion', 'Active Set Size',
-            'RLF indication', 'UL sync loss (UE can’t reach NodeB)', 'DL sync loss (Interference / coverage)', 'T310', 'T312',
-            'rrc_rel_cause', 'cs_rel_cause', 'iucs_status',
-            'freq', 'Freq', 'earfcn', 'EARFCN', 'uarfcn', 'UARFCN', 'channel', 'Channel'
-        ];
-        if (discreteMetrics.includes(metric) || metric.toLowerCase().includes('name') || metric.toLowerCase().includes('id-cell')) {
+        const m = String(metric || '').toLowerCase();
+        if (rangeKey === 'discrete' || m.includes('band') || m.includes('freq') || m.includes('pci') || m.includes('cid')) {
             return this.getDiscreteColor(val, metric);
         }
 
@@ -279,10 +309,18 @@ class MapRenderer {
             if (rangeKey) {
                 const thresholds = window.themeConfig.thresholds[rangeKey];
                 if (thresholds) {
+                    const numVal = Number(val);
+                    if (!Number.isFinite(numVal)) return '#888';
                     for (const t of thresholds) {
-                        if (t.min !== undefined && val <= t.min) continue;
-                        if (t.max !== undefined && val > t.max) continue;
-                        return t.color;
+                        const lo = (t.min !== undefined && t.min !== null) ? Number(t.min) : -Infinity;
+                        const hi = (t.max !== undefined && t.max !== null) ? Number(t.max) : Infinity;
+                        if (numVal >= lo && numVal < hi) return t.color;
+                    }
+                    // Fallback: check if value matches the last band's upper bound (inclusive)
+                    if (thresholds.length) {
+                        const last = thresholds[thresholds.length - 1];
+                        const lastHi = (last.max !== undefined && last.max !== null) ? Number(last.max) : Infinity;
+                        if (numVal >= lastHi) return last.color;
                     }
                     return '#888';
                 }
@@ -298,6 +336,128 @@ class MapRenderer {
         const metricStr = String(metric || '');
         const metricLower = metricStr.toLowerCase();
         const metricNorm = metricLower.replace(/[^a-z0-9]/g, '');
+        const normalizeIntegerLabel = (raw) => {
+            if (raw === undefined || raw === null) return raw;
+            const txt = String(raw).trim();
+            if (!txt || txt.toUpperCase() === 'N/A') return raw;
+            const num = Number(txt.replace(/[^0-9.+-]/g, ''));
+            if (Number.isFinite(num)) {
+                if (Math.abs(num - Math.round(num)) < 1e-6) return String(Math.round(num));
+                return String(Number(num.toFixed(3)));
+            }
+            return txt;
+        };
+        const normalizeCellIdLabel = (raw, context = {}) => {
+            if (raw === undefined || raw === null) return raw;
+            const txt = String(raw).trim();
+            if (!txt || txt.toUpperCase() === 'N/A') return raw;
+
+            const techText = String(
+                context.tech ??
+                context.Tech ??
+                context.propertiesTech ??
+                context.rat ??
+                ''
+            ).trim().toUpperCase();
+            const contextRnc = Number(context.rnc ?? context.RNC ?? context.propertiesRnc);
+            const contextCid = Number(context.cid ?? context.CID ?? context.cellId ?? context.propertiesCid);
+
+            const normalizePart = (part) => {
+                const cleaned = String(part || '').trim();
+                const num = Number(cleaned);
+                if (Number.isFinite(num)) {
+                    if (Math.abs(num - Math.round(num)) < 1e-6) return String(Math.round(num));
+                    return String(num);
+                }
+                return cleaned;
+            };
+
+            const split = txt
+                .replace(/\s*-\s*/g, '/')
+                .replace(/\s*\\\s*/g, '/')
+                .replace(/\s+/g, '')
+                .split('/')
+                .filter(Boolean);
+
+            if (split.length >= 2) {
+                return `${normalizePart(split[0])}/${normalizePart(split[1])}`;
+            }
+
+            const wholeNum = Number(txt);
+            const looksUmts = techText === 'UMTS' || techText === '3G';
+            if (Number.isFinite(wholeNum) && wholeNum > 65535 && looksUmts) {
+                const decodedRnc = Math.floor(wholeNum / 65536);
+                const decodedCid = wholeNum % 65536;
+                if (Number.isFinite(contextRnc) && Number.isFinite(contextCid)) {
+                    return `${normalizePart(contextRnc)}/${normalizePart(contextCid)}`;
+                }
+                if (Number.isFinite(contextRnc) && decodedRnc === contextRnc) {
+                    return `${normalizePart(contextRnc)}/${normalizePart(decodedCid)}`;
+                }
+                return `${normalizePart(decodedRnc)}/${normalizePart(decodedCid)}`;
+            }
+
+            return normalizePart(txt);
+        };
+        const normalizeFreqLabel = (raw) => {
+            if (raw === undefined || raw === null) return raw;
+            const txt = String(raw).trim();
+            if (!txt || txt.toUpperCase() === 'N/A') return raw;
+
+            const num = Number(txt.replace(/[^0-9.+-]/g, ''));
+            if (Number.isFinite(num)) {
+                if (Math.abs(num - Math.round(num)) < 1e-6) return String(Math.round(num));
+                return String(Number(num.toFixed(3)));
+            }
+            return txt;
+        };
+        const normalizeBandLabel = (raw) => {
+            if (raw === undefined || raw === null) return raw;
+            const txt = String(raw).trim();
+            if (!txt || txt.toUpperCase() === 'N/A') return raw;
+
+            const bandByNumber = {
+                1: 'B1 (2100)',
+                2: 'B2 (1900)',
+                3: 'B3 (1800)',
+                7: 'B7 (2600)',
+                8: 'B8 (900)',
+                20: 'B20 (800)',
+                28: 'B28 (700)',
+                38: 'B38 (2600 TDD)',
+                40: 'B40 (2300)',
+                41: 'B41 (2500)'
+            };
+            const bandByFreq = {
+                700: 'B28 (700)',
+                800: 'B20 (800)',
+                900: 'B8 (900)',
+                1800: 'B3 (1800)',
+                1900: 'B2 (1900)',
+                2100: 'B1 (2100)',
+                2300: 'B40 (2300)',
+                2500: 'B41 (2500)',
+                2600: 'B7 (2600)'
+            };
+
+            const upper = txt.toUpperCase();
+            const bMatch = upper.match(/^B\s*(\d+)(?:\s*\(([^)]+)\))?$/);
+            if (bMatch) {
+                const bandNum = Number(bMatch[1]);
+                if (bandByNumber[bandNum]) return bandByNumber[bandNum];
+                return `B${bandNum}`;
+            }
+            const bandMatch = upper.match(/^BAND\s*(\d+)$/);
+            if (bandMatch) {
+                const bandNum = Number(bandMatch[1]);
+                if (bandByNumber[bandNum]) return bandByNumber[bandNum];
+                return `B${bandNum}`;
+            }
+            const num = Number(txt.replace(/[^0-9.]/g, ''));
+            if (Number.isFinite(num) && bandByFreq[num]) return bandByFreq[num];
+
+            return txt;
+        };
         const pickFirstDefined = (...vals) => {
             for (let i = 0; i < vals.length; i++) {
                 const v = vals[i];
@@ -325,12 +485,107 @@ class MapRenderer {
         if (metric === 'cellId' || metric === 'cid' || metric === 'Cell ID') {
             if (window.resolveSmartSite) {
                 const resolved = window.resolveSmartSite(p);
-                if (resolved && resolved.id) return resolved.id;
+                if (resolved && resolved.id) return normalizeCellIdLabel(resolved.id, {
+                    tech: p?.Tech ?? p?.properties?.Tech,
+                    rnc: p?.rnc ?? p?.properties?.RNC,
+                    cid: p?.cid ?? p?.properties?.CID ?? p?.cellId ?? p?.properties?.['Cell ID']
+                });
             }
             if (p.rnc !== undefined && p.cid !== undefined) {
-                return `${p.rnc}/${p.cid}`;
+                return normalizeCellIdLabel(`${p.rnc}/${p.cid}`, {
+                    tech: p?.Tech ?? p?.properties?.Tech,
+                    rnc: p?.rnc,
+                    cid: p?.cid
+                });
             }
-            return p.cellId || p.cid;
+            return normalizeCellIdLabel(p.cellId || p.cid, {
+                tech: p?.Tech ?? p?.properties?.Tech,
+                rnc: p?.rnc ?? p?.properties?.RNC,
+                cid: p?.cid ?? p?.properties?.CID ?? p?.cellId ?? p?.properties?.['Cell ID']
+            });
+        }
+        if (metric === 'Serving PCI') {
+            val = pickFirstDefined(
+                val,
+                p.pci,
+                p.sc,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.pci : undefined,
+                p.properties ? p.properties['Serving PCI'] : undefined
+            );
+        }
+        if (metric === 'Serving EARFCN') {
+            val = pickFirstDefined(
+                val,
+                p.earfcn,
+                p.freq,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.earfcn : undefined,
+                p.properties ? p.properties['Serving EARFCN'] : undefined
+            );
+        }
+        if (metric === 'Serving SINR') {
+            val = pickFirstDefined(
+                val,
+                p.sinr,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.sinr : undefined,
+                p.properties ? p.properties['Serving SINR'] : undefined,
+                p.properties ? p.properties['SINR'] : undefined
+            );
+        }
+        if (metric === 'Serving RSRP') {
+            val = pickFirstDefined(
+                val,
+                p['LTE Serving RSRP'],
+                p.rsrp,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.rsrp : undefined,
+                p.properties ? p.properties['LTE Serving RSRP'] : undefined,
+                p.properties ? p.properties['Serving RSRP'] : undefined,
+                p.level
+            );
+        }
+        if (metric === 'Serving RSRQ') {
+            val = pickFirstDefined(
+                val,
+                p['LTE Serving RSRQ'],
+                p.rsrq,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.rsrq : undefined,
+                p.properties ? p.properties['LTE Serving RSRQ'] : undefined,
+                p.properties ? p.properties['Serving RSRQ'] : undefined,
+                p.ecno
+            );
+        }
+        if (metric === 'Serving RSCP') {
+            val = pickFirstDefined(
+                val,
+                p['3G Serving RSCP'],
+                p.parsed && p.parsed.serving_3g ? p.parsed.serving_3g.rscp : undefined,
+                p.properties ? p.properties['3G Serving RSCP'] : undefined,
+                p.properties ? p.properties['Serving RSCP'] : undefined,
+                p.rscp,
+                p.level
+            );
+        }
+        if (metric === 'Serving EcNo') {
+            val = pickFirstDefined(
+                val,
+                p['3G Serving EcNo'],
+                p.parsed && p.parsed.serving_3g ? p.parsed.serving_3g.ecno : undefined,
+                p.properties ? p.properties['3G Serving EcNo'] : undefined,
+                p.properties ? p.properties['Serving EcNo'] : undefined,
+                p.ecno
+            );
+        }
+        if (metric === 'Serving Freq') {
+            val = pickFirstDefined(
+                val,
+                p['3G Serving Freq'],
+                p['LTE Serving EARFCN'],
+                p.parsed && p.parsed.serving_3g ? p.parsed.serving_3g.freq : undefined,
+                p.parsed && p.parsed.serving_lte ? p.parsed.serving_lte.earfcn : undefined,
+                p.properties ? p.properties['3G Serving Freq'] : undefined,
+                p.properties ? p.properties['LTE Serving EARFCN'] : undefined,
+                p.properties ? p.properties['Serving Freq'] : undefined,
+                p.freq
+            );
         }
 
         // 3. Radio Metrics Fallbacks
@@ -394,6 +649,42 @@ class MapRenderer {
             val = getObjectValueFlexible(p.properties);
         }
 
+        if (
+            metricNorm === 'cellid' ||
+            metricNorm === 'cid' ||
+            metricNorm === 'servingcellid'
+        ) {
+            val = normalizeCellIdLabel(val, {
+                tech: p?.Tech ?? p?.properties?.Tech,
+                rnc: p?.rnc ?? p?.properties?.RNC,
+                cid: p?.cid ?? p?.properties?.CID ?? p?.cellId ?? p?.properties?.['Cell ID']
+            });
+        }
+        if (
+            metricNorm === 'freq' ||
+            metricNorm === 'servingfreq' ||
+            metricNorm === 'earfcn' ||
+            metricNorm === 'servingearfcn' ||
+            metricNorm === 'uarfcn' ||
+            metricNorm === 'servinguarfcn' ||
+            metricNorm === 'arfcn' ||
+            metricNorm === 'servingarfcn' ||
+            metricNorm === 'channel'
+        ) {
+            val = normalizeFreqLabel(val);
+        }
+        if (
+            metricNorm === 'rnc' ||
+            metricNorm === 'servingrnc' ||
+            metricNorm === 'lac' ||
+            metricNorm === 'servinglac'
+        ) {
+            val = normalizeIntegerLabel(val);
+        }
+        if (metricNorm === 'band' || metricNorm === 'servingband') {
+            val = normalizeBandLabel(val);
+        }
+
         return val;
     }
 
@@ -433,6 +724,7 @@ class MapRenderer {
         if (sVal.startsWith('T310') || sVal.startsWith('T312')) return '#a855f7'; // Purple
 
         // Custom 12-color palette from user image
+        // Expanded 20-color palette for better unique value representation
         const palette = [
             '#FF0000', // red
             '#0000FF', // blue
@@ -444,8 +736,16 @@ class MapRenderer {
             '#808080', // gray
             '#FF00FF', // magenta
             '#6A0DAD', // purple
-            '#000000', // black
-            '#8B4513'  // brown
+            '#00CED1', // dark cyan
+            '#8B4513', // brown
+            '#1E90FF', // dodger blue
+            '#FFD700', // gold
+            '#7FFF00', // chartreuse
+            '#FF6347', // tomato
+            '#98FB98', // pale green
+            '#DDA0DD', // plum
+            '#F0E68C', // khaki
+            '#000000'  // black
         ];
 
         // Robust 53-bit hash for better dispersion of similar strings (like RNC/CID)
@@ -554,6 +854,7 @@ class MapRenderer {
 
         // ... logic continues ...
         const normalizeId = (v) => String(v == null ? '' : v).replace(/\s/g, '');
+        const normalizeName = (v) => String(v == null ? '' : v).trim().toLowerCase().replace(/[\s_-]+/g, '');
         const findByKeyPattern = (obj, predicate) => {
             if (!obj || typeof obj !== 'object') return undefined;
             const keys = Object.keys(obj);
@@ -585,7 +886,51 @@ class MapRenderer {
             const n = Number(v);
             return Number.isFinite(n) ? n : null;
         };
+        const pickPlausibleServingCandidate = (arr) => {
+            if (!Array.isArray(arr) || !arr.length) return null;
+            const plat = parseFiniteNumber(p && p.lat);
+            const plng = parseFiniteNumber(p && p.lng);
+            if (plat === null || plng === null) return arr[0];
+            const helper = window.siteMatchUtils;
+            if (helper && typeof helper.pickPlausibleSiteCandidate === 'function') {
+                return helper.pickPlausibleSiteCandidate(arr, {
+                    lat: plat,
+                    lng: plng,
+                    earfcn: measuredFreq,
+                    tech: p && (p.Tech || p.tech)
+                });
+            }
+            return arr.slice().sort((a, b) => {
+                const distA = Math.pow(Number(a.lat || 0) - plat, 2) + Math.pow(Number(a.lng || 0) - plng, 2);
+                const distB = Math.pow(Number(b.lat || 0) - plat, 2) + Math.pow(Number(b.lng || 0) - plng, 2);
+                return distA - distB;
+            })[0];
+        };
         const props = p.properties && typeof p.properties === 'object' ? p.properties : null;
+        const servingCellName = (() => {
+            const direct = [
+                p.serving_cell_name,
+                p.servingCellName,
+                p.parsed && p.parsed.serving ? p.parsed.serving.cellName : null,
+                p['Serving Cell Name'],
+                p['Serving Cell']
+            ];
+            for (const candidate of direct) {
+                if (candidate === undefined || candidate === null) continue;
+                const txt = String(candidate).trim();
+                if (txt && txt.toUpperCase() !== 'N/A' && txt.toUpperCase() !== 'UNKNOWN') return txt;
+            }
+            if (props) {
+                const fromProps = getValCI(props, 'Serving Cell Name')
+                    || getValCI(props, 'serving_cell_name')
+                    || getValCI(props, 'Serving Cell');
+                if (fromProps !== undefined && fromProps !== null) {
+                    const txt = String(fromProps).trim();
+                    if (txt && txt.toUpperCase() !== 'N/A' && txt.toUpperCase() !== 'UNKNOWN') return txt;
+                }
+            }
+            return null;
+        })();
         const measuredPci = (() => {
             const direct = [
                 p.sc,
@@ -849,6 +1194,30 @@ class MapRenderer {
             if (s && (!hasMeasuredRf || isRfCompatible(s))) return s;
         }
 
+        // 1b. Direct name matching from imported Serving Cell Name
+        if (servingCellName) {
+            const wanted = normalizeName(servingCellName);
+            const byName = siteData.filter((x) => {
+                const siteNames = [
+                    x.cellName,
+                    x.name,
+                    x.siteName,
+                    x.id,
+                    x.rawEnodebCellId
+                ].filter(Boolean).map(normalizeName).filter(Boolean);
+                return siteNames.includes(wanted);
+            });
+            if (byName.length) {
+                const compatible = byName.filter((x) => !hasMeasuredRf || isRfCompatible(x));
+                const pool = compatible.length ? compatible : byName;
+                const winner = pickPlausibleServingCandidate(pool);
+                if (winner) {
+                    p._cachedServing = winner;
+                    return winner;
+                }
+            }
+        }
+
         // 1. GSM Matching: BSIC + ARFCN (Freq) + LAC + PROXIMITY
         if (measuredBsic !== null && measuredFreq !== null && measuredLac !== null && p.lat && p.lng) {
             const nearbyRadius = 0.02;
@@ -1002,14 +1371,8 @@ class MapRenderer {
         const idsCollection = new Map(); // Accumulate IDs for Legend here
         let totalValidsForMetric = 0;
         const rangeKey = (window.getThresholdKey ? window.getThresholdKey(metric) : null);
-        const isIdentityMetric = (rangeKey === 'discrete' || metric === 'cellId' || metric === 'cid' || metric === 'Cell ID' ||
-            metric === 'RRC State' || metric === 'Active Set Size' || metric === 'AS Event' ||
-            metric === 'HO Command' || metric === 'HO Completion' ||
-            metric === 'sc' || metric === 'SC' || metric === 'Serving SC' ||
-            metric === 'rnc' || metric === 'RNC' || metric === 'Serving RNC' ||
-            metric === 'lac' || metric === 'LAC' || metric === 'Serving LAC' ||
-            metric === 'freq' || metric === 'Freq' || metric === 'earfcn' || metric === 'EARFCN' ||
-            metric === 'uarfcn' || metric === 'UARFCN' || metric === 'channel' || metric === 'Channel');
+        const isIdentityMetric = (rangeKey === 'discrete') || 
+                                 (metric.toLowerCase().includes('band') || metric.toLowerCase().includes('freq') || metric.toLowerCase().includes('pci') || metric.toLowerCase().includes('cid'));
         const thresholds = (rangeKey && window.themeConfig && window.themeConfig.thresholds)
             ? window.themeConfig.thresholds[rangeKey]
             : null;
@@ -1040,14 +1403,28 @@ class MapRenderer {
                 // Collect Stats for Thematic Metrics (RSRP, RSRQ, etc.)
                 // If it's not cellId/cid, it might be a thematic metric mapping to level or quality
                 if (!isIdentityMetric && thresholds && val !== undefined && val !== null) {
-                    // Find matching label
+                    // Find matching label — use [min, max) semantics matching getColor
+                    const numV = Number(val);
                     let matched = false;
-                    for (const t of thresholds) {
-                        if (t.min !== undefined && val <= t.min) continue;
-                        if (t.max !== undefined && val > t.max) continue;
-                        idsCollection.set(t.label, (idsCollection.get(t.label) || 0) + 1);
-                        matched = true;
-                        break;
+                    if (Number.isFinite(numV)) {
+                        for (const t of thresholds) {
+                            const lo = (t.min !== undefined && t.min !== null) ? Number(t.min) : -Infinity;
+                            const hi = (t.max !== undefined && t.max !== null) ? Number(t.max) : Infinity;
+                            if (numV >= lo && numV < hi) {
+                                idsCollection.set(t.label, (idsCollection.get(t.label) || 0) + 1);
+                                matched = true;
+                                break;
+                            }
+                        }
+                        // Fallback: value at or above last band's upper bound
+                        if (!matched && thresholds.length) {
+                            const last = thresholds[thresholds.length - 1];
+                            const lastHi = (last.max !== undefined && last.max !== null) ? Number(last.max) : Infinity;
+                            if (numV >= lastHi) {
+                                idsCollection.set(last.label, (idsCollection.get(last.label) || 0) + 1);
+                                matched = true;
+                            }
+                        }
                     }
                     if (matched) totalValidsForMetric++;
                 }
@@ -1103,17 +1480,34 @@ class MapRenderer {
                             weight: weight,
                             opacity: 1,
                             fillOpacity: isEvent ? 1 : 0.8,
-                            pane: 'sitesPane',
-                            renderer: this.sitesSvgRenderer,
+                            pane: 'logPointsPane',
+                            renderer: this.logPointsRenderer,
                             interactive: true
                         }).addTo(layerGroup);
                     }
 
+                    const emitPointClick = (detailName, e) => {
+                        window.dispatchEvent(new CustomEvent(detailName, {
+                            detail: {
+                                logId: id,
+                                point: p,
+                                clientX: e?.originalEvent?.clientX,
+                                clientY: e?.originalEvent?.clientY
+                            }
+                        }));
+                    };
                     layer.on('click', (e) => {
                         L.DomEvent.stopPropagation(e);
-                        window.dispatchEvent(new CustomEvent('map-point-clicked', {
-                            detail: { logId: id, point: p }
-                        }));
+                        emitPointClick('map-point-clicked', e);
+                    });
+                    layer.on('contextmenu', (e) => {
+                        L.DomEvent.stop(e);
+                        emitPointClick('map-point-contextmenu', e);
+                    });
+                    layer.on('mousedown', (e) => {
+                        if ((e?.originalEvent?.button ?? -1) !== 2) return;
+                        L.DomEvent.stop(e);
+                        emitPointClick('map-point-contextmenu', e);
                     });
                 }
             }
@@ -1161,6 +1555,8 @@ class MapRenderer {
 
                 // Signal that rendering and ID collection is complete
                 window.dispatchEvent(new CustomEvent('layer-metric-ready', { detail: { metric } }));
+                if (typeof window.updateLegend === 'function') window.updateLegend();
+                if (typeof window.updateDTLayersSidebar === 'function') window.updateDTLayersSidebar();
 
                 // Ensure sites are still on top and visible
                 if (window.refreshSites) window.refreshSites();
@@ -1453,8 +1849,34 @@ class MapRenderer {
 
             marker.on('click', (e) => {
                 L.DomEvent.stopPropagation(e);
+                const forcedMode = String(id || '').includes('__3g_call_failure')
+                    ? 'setupFailure'
+                    : (String(id || '').includes('__3g_dropcall') ? 'drop' : null);
+                const failureEventText = String(
+                    p?.event ||
+                    p?.message ||
+                    p?.type ||
+                    p?.properties?.Event ||
+                    p?.properties?.['Event Name'] ||
+                    p?.properties?.Message ||
+                    ''
+                ).toLowerCase();
+                if (
+                    p?.setupFailure === true ||
+                    p?.drop === true ||
+                    forcedMode === 'setupFailure' ||
+                    forcedMode === 'drop' ||
+                    failureEventText.includes('drop') ||
+                    failureEventText.includes('call fail') ||
+                    failureEventText.includes('setup failure') ||
+                    failureEventText.includes('caf')
+                ) {
+                    window.dispatchEvent(new CustomEvent('map-failure-clicked', {
+                        detail: { logId: id, point: p, source: 'event_icon', mode: forcedMode }
+                    }));
+                }
                 window.dispatchEvent(new CustomEvent('map-point-clicked', {
-                    detail: { logId: id, point: p, source: 'event_icon' }
+                    detail: { logId: id, point: p, source: 'event_icon', mode: forcedMode }
                 }));
             });
 
@@ -1469,6 +1891,112 @@ class MapRenderer {
         if (this.eventLayers && this.eventLayers[id]) {
             this.map.removeLayer(this.eventLayers[id]);
             delete this.eventLayers[id];
+        }
+    }
+
+    // ── Pilot Pollution event circles ─────────────────────────────────────────
+
+    drawPilotPollutionOverlay(layerId, events) {
+        if (!this.eventLayers) this.eventLayers = {};
+        if (this.eventLayers[layerId]) {
+            this.map.removeLayer(this.eventLayers[layerId]);
+            delete this.eventLayers[layerId];
+        }
+        if (!Array.isArray(events) || events.length === 0) return;
+
+        const SEV_COLOR = { High: '#ef4444', Medium: '#f97316', Low: '#facc15' };
+        const SEV_BORDER = { High: '#fca5a5', Medium: '#fdba74', Low: '#fde68a' };
+        const shortTime = (iso) => iso ? String(iso).replace(/^\d{4}-\d{2}-\d{2}T/, '').replace(/\.\d{3}Z$/, 'Z') : '—';
+        const fmtCoord = (v) => v != null ? Number(v).toFixed(5) : '—';
+
+        const group = L.layerGroup();
+
+        events.forEach((ev, idx) => {
+            const lat = ev.centerLat;
+            const lon = ev.centerLon;
+            if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) return;
+
+            const sev = String(ev.severity || 'Low');
+            const circleColor = SEV_COLOR[sev] || '#ef4444';
+            const borderColor = SEV_BORDER[sev] || '#fca5a5';
+
+            // Radius: half route length, clamped to [80, 400] m
+            const radius = Math.max(80, Math.min(400, (ev.routeLengthMeters || 200) / 2));
+
+            // Filled circle
+            const circle = L.circle([lat, lon], {
+                radius,
+                color: borderColor,
+                weight: 1.5,
+                fillColor: circleColor,
+                fillOpacity: 0.15,
+                opacity: 0.7,
+                pane: 'pilotPollutionPane',
+                interactive: true,
+            });
+
+            const evNum = idx + 1;
+            // Wrap in a transform div so the label floats above the circle center.
+            // iconSize:[0,0] + iconAnchor:[0,0] means the anchor point is at the
+            // top-left of a zero-size box; the inner div's translate(-50%,-100%)
+            // then centres horizontally and places the bottom edge at that point.
+            const labelHtml =
+                '<div style="' +
+                    'transform:translate(-50%,-100%);' +
+                    'margin-top:-8px;' +
+                    'display:inline-block;' +
+                    'background:rgba(10,14,26,0.88);' +
+                    'border:1px solid ' + borderColor + ';' +
+                    'border-radius:8px;' +
+                    'padding:6px 10px;' +
+                    'font-family:system-ui,sans-serif;' +
+                    'font-size:11px;' +
+                    'line-height:1.6;' +
+                    'color:#e2e8f0;' +
+                    'white-space:nowrap;' +
+                    'pointer-events:none;' +
+                    'box-shadow:0 3px 10px rgba(0,0,0,0.6);' +
+                '">' +
+                    '<div style="font-weight:700;color:' + borderColor + ';margin-bottom:1px;">Event ' + evNum + ' · EARFCN ' + (ev.carrier || '—') + '</div>' +
+                    '<div style="color:' + circleColor + ';font-weight:600;">' + sev + ' risk</div>' +
+                    '<div style="color:#94a3b8;font-size:10.5px;">⏱ ' + shortTime(ev.startTime) + ' → ' + shortTime(ev.endTime) + '</div>' +
+                    '<div style="color:#64748b;font-size:10px;">📍 ' + fmtCoord(lat) + ', ' + fmtCoord(lon) + '</div>' +
+                '</div>';
+
+            const labelIcon = L.divIcon({
+                className: '',
+                html: labelHtml,
+                iconSize: [0, 0],
+                iconAnchor: [0, 0],
+            });
+
+            const labelMarker = L.marker([lat, lon], {
+                icon: labelIcon,
+                interactive: false,
+                pane: 'pilotPollutionPane',
+                zIndexOffset: 100,
+            });
+
+            // Click on circle → re-open the analysis modal for this event
+            circle.on('click', (e) => {
+                L.DomEvent.stopPropagation(e);
+                window.dispatchEvent(new CustomEvent('pp-event-circle-clicked', {
+                    detail: { eventIndex: idx, event: ev },
+                }));
+            });
+
+            group.addLayer(circle);
+            group.addLayer(labelMarker);
+        });
+
+        group.addTo(this.map);
+        this.eventLayers[layerId] = group;
+    }
+
+    removePilotPollutionOverlay(layerId) {
+        if (this.eventLayers && this.eventLayers[layerId]) {
+            this.map.removeLayer(this.eventLayers[layerId]);
+            delete this.eventLayers[layerId];
         }
     }
 
@@ -1492,6 +2020,22 @@ class MapRenderer {
 
         this.rebuildSiteIndex();
         this.renderSites(fitBounds);
+    }
+
+    reorderSiteLayer(id, direction) {
+        if (!this.siteLayers.has(id)) return false;
+        const entries = Array.from(this.siteLayers.entries());
+        const idx = entries.findIndex(([layerId]) => layerId === id);
+        if (idx === -1) return false;
+        const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= entries.length) return false;
+        const tmp = entries[idx];
+        entries[idx] = entries[swapIdx];
+        entries[swapIdx] = tmp;
+        this.siteLayers = new Map(entries);
+        this.rebuildSiteIndex();
+        this.renderSites(false);
+        return true;
     }
 
     addOverlayLayer(id, points, metric) {
@@ -1535,7 +2079,66 @@ class MapRenderer {
             const marker = L.marker([p.lat, p.lng], { icon: flagIcon, zIndexOffset: 1000 })
                 .addTo(layerGroup);
 
-            marker.bindPopup(`<b>${metric}</b><br>${val}<br>Time: ${p.time}`);
+            const emitOverlayPoint = (detailName, e) => {
+                window.dispatchEvent(new CustomEvent(detailName, {
+                    detail: {
+                        logId: overlayId,
+                        point: p,
+                        clientX: e?.originalEvent?.clientX,
+                        clientY: e?.originalEvent?.clientY
+                    }
+                }));
+            };
+            const popupTitle = metric === 'cs_rel_cause'
+                ? 'CS Release Cause'
+                : metric === 'rrc_rel_cause'
+                    ? 'RRC Release Cause'
+                    : metric;
+            const popupMessage = p?.messageSpec || p?.message || p?.properties?.Message || p?.properties?.['Message Spec'] || 'Unknown';
+            const popupParsedCs = p?.cs_rel_cause || p?.properties?.['CS Release Cause'] || '-';
+            const popupButton = (metric === 'cs_rel_cause' || metric === 'rrc_rel_cause')
+                ? `<button onclick="window.openReleaseCausePayloadByMeta('${String((p && p.__sourceLogId) || id).replace(/'/g, "\\'")}', ${Number.isFinite(Number(p && (metric === 'cs_rel_cause' ? p.__csReleaseCauseIndex : p.__rrcReleaseCauseIndex))) ? Number(metric === 'cs_rel_cause' ? p.__csReleaseCauseIndex : p.__rrcReleaseCauseIndex) : -1}, '${metric === 'cs_rel_cause' ? 'cs' : 'rrc'}'); return false;" class="btn" style="margin-top:6px; padding:2px 8px; font-size:10px; background:#3b82f6;">Full decoded message</button>`
+                : '';
+            marker.bindPopup(
+                `<div style="min-width:210px;">` +
+                `<div style="font-weight:700; margin-bottom:4px;">${popupTitle}</div>` +
+                `<div><b>Message:</b> ${popupMessage}</div>` +
+                `${metric === 'cs_rel_cause' ? `<div><b>Parsed CS cause:</b> ${popupParsedCs}</div>` : ''}` +
+                `<div><b>Cause:</b> ${val}</div>` +
+                `<div><b>Time:</b> ${p.time || '-'}</div>` +
+                `${popupButton}` +
+                `</div>`
+            );
+            marker.on('click', (e) => {
+                L.DomEvent.stop(e);
+                emitOverlayPoint('map-point-clicked', e);
+            });
+            marker.on('contextmenu', (e) => {
+                L.DomEvent.stop(e);
+                emitOverlayPoint('map-point-contextmenu', e);
+            });
+            marker.on('mousedown', (e) => {
+                if ((e?.originalEvent?.button ?? -1) !== 2) return;
+                L.DomEvent.stop(e);
+                emitOverlayPoint('map-point-contextmenu', e);
+            });
+            marker.on('add', () => {
+                const markerEl = marker.getElement && marker.getElement();
+                if (!markerEl || markerEl.dataset.failureContextBound === 'true') return;
+                const domHandler = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+                    emitOverlayPoint('map-point-contextmenu', { originalEvent: ev });
+                    return false;
+                };
+                markerEl.dataset.failureContextBound = 'true';
+                markerEl.addEventListener('contextmenu', domHandler, true);
+                markerEl.addEventListener('mousedown', (ev) => {
+                    if ((ev.button ?? -1) !== 2) return;
+                    domHandler(ev);
+                }, true);
+            });
             count++;
         });
 
@@ -1584,6 +2187,51 @@ class MapRenderer {
         if (this.siteLayers.size > 0 || (this.siteData && this.siteData.length > 0)) {
             this.renderSites(false); // Do NOT fit bounds on settings update
         }
+    }
+
+    // ── Undo / Redo ─────────────────────────────────────────────────────────────
+
+    _sectorSnapshot(layerId, idx) {
+        const lyr = this.siteLayers.get(layerId);
+        const s   = lyr && lyr.sectors[idx];
+        if (!s) return null;
+        return { layerId, idx,
+            lat: s.lat, lng: s.lng, azimuth: s.azimuth,
+            cellName: s.cellName, cellId: s.cellId,
+            pci: s.pci, sc: s.sc, freq: s.freq };
+    }
+
+    pushUndo(snapshots) {
+        const valid = snapshots.filter(Boolean);
+        if (!valid.length) return;
+        this._undoStack.push(valid);
+        this._redoStack = [];
+        if (this._undoStack.length > 50) this._undoStack.shift();
+    }
+
+    _applySnapshots(snapshots) {
+        snapshots.forEach(({ layerId, idx, ...fields }) => {
+            const lyr = this.siteLayers.get(layerId);
+            if (lyr && lyr.sectors[idx]) Object.assign(lyr.sectors[idx], fields);
+        });
+        this.rebuildSiteIndex();
+        this.renderSites(false);
+    }
+
+    undo() {
+        if (!this._undoStack.length) return;
+        const before  = this._undoStack.pop();
+        const current = before.map(({ layerId, idx }) => this._sectorSnapshot(layerId, idx)).filter(Boolean);
+        this._redoStack.push(current);
+        this._applySnapshots(before);
+    }
+
+    redo() {
+        if (!this._redoStack.length) return;
+        const after   = this._redoStack.pop();
+        const current = after.map(({ layerId, idx }) => this._sectorSnapshot(layerId, idx)).filter(Boolean);
+        this._undoStack.push(current);
+        this._applySnapshots(after);
     }
 
     getSiteColor(s) {
@@ -1671,6 +2319,8 @@ class MapRenderer {
         const bounds = this.map.getBounds().pad(0.2); // Only draw what's visible (plus buffer)
 
         this.sitePolygons = {};
+        this._siteRotPolygons = new Map();
+        this._sitePolygonsByName = new Map();
         const renderedSiteLabels = new Set();
 
         // Loop through each layer to render with its specific settings
@@ -1697,29 +2347,176 @@ class MapRenderer {
 
             layer.sectors.forEach((s, index) => {
                 if (s.lat === undefined || s.lng === undefined || isNaN(s.lat) || isNaN(s.lng)) return;
+                // Group key: physical centre + azimuth so all techs at the same direction share one key.
+                // This is order-independent and works even when 2G/3G/4G store sectors in different order.
+                const _posKey   = `${s.lat.toFixed(5)}@@${s.lng.toFixed(5)}@@${Math.round(s.azimuth || 0)}`;
+                const isKmlSite = String(s.source || '').toLowerCase() === 'kml';
+                const kmlShape = String((effective && effective.markerShape) || s.markerShape || 'diamond').toLowerCase();
+                const azimuth = s.azimuth || 0;
                 // PERFORMANCE: Skip if outside visible area
                 if (!bounds.contains([s.lat, s.lng])) return;
 
+                const getPoint = (originLat, originLng, bearing, dist) => {
+                    const rad = Math.PI / 180;
+                    const latRad = originLat * rad;
+                    const bearRad = bearing * rad;
+                    const dy = Math.cos(bearRad) * dist;
+                    const dx = Math.sin(bearRad) * dist;
+                    const dLat = dy / 111111;
+                    const dLng = dx / (111111 * Math.cos(latRad));
+                    return [originLat + dLat, originLng + dLng];
+                };
+
+                const getOffsetPoint = (originLat, originLng, dx, dy) => {
+                    const rad = Math.PI / 180;
+                    const latRad = originLat * rad;
+                    const dLat = dy / 111111;
+                    const dLng = dx / (111111 * Math.cos(latRad));
+                    return [originLat + dLat, originLng + dLng];
+                };
+
+                const buildKmlShapeHtml = (shape, color) => {
+                    const base = 'width:16px;height:16px;background:' + color + ';border:2px solid rgba(255,255,255,0.95);box-shadow:0 2px 8px rgba(2,6,23,0.35);';
+                    if (shape === 'triangle') return `<div style="${base}clip-path:polygon(50% 0%, 100% 100%, 0% 100%);"></div>`;
+                    if (shape === 'square') return `<div style="${base}border-radius:3px;"></div>`;
+                    if (shape === 'pentagon') return `<div style="${base}clip-path:polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);"></div>`;
+                    if (shape === 'hexagon') return `<div style="${base}clip-path:polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);"></div>`;
+                    if (shape === 'octagon') return `<div style="${base}clip-path:polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%);"></div>`;
+                    if (shape === 'star') return `<div style="${base}clip-path:polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);"></div>`;
+                    if (shape === 'cross') return `<div style="${base}clip-path:polygon(35% 0%, 65% 0%, 65% 35%, 100% 35%, 100% 65%, 65% 65%, 65% 100%, 35% 100%, 35% 65%, 0% 65%, 0% 35%, 35% 35%);"></div>`;
+                    if (shape === 'circle') return `<div style="${base}border-radius:999px;"></div>`;
+                    return `<div style="${base}transform:rotate(45deg);border-radius:2px;"></div>`;
+                };
+
+                const buildKmlShapeLatLngs = (originLat, originLng, shape, sizeMeters) => {
+                    const n = (dx, dy) => getOffsetPoint(originLat, originLng, dx, dy);
+                    switch (shape) {
+                        case 'triangle':
+                            return [n(0, sizeMeters), n(sizeMeters * 0.9, -sizeMeters * 0.7), n(-sizeMeters * 0.9, -sizeMeters * 0.7)];
+                        case 'square':
+                            return [n(-sizeMeters, sizeMeters), n(sizeMeters, sizeMeters), n(sizeMeters, -sizeMeters), n(-sizeMeters, -sizeMeters)];
+                        case 'pentagon':
+                            return [0, 72, 144, 216, 288].map((angle) => getPoint(originLat, originLng, angle, sizeMeters));
+                        case 'hexagon':
+                            return [0, 60, 120, 180, 240, 300].map((angle) => getPoint(originLat, originLng, angle, sizeMeters));
+                        case 'octagon':
+                            return [0, 45, 90, 135, 180, 225, 270, 315].map((angle) => getPoint(originLat, originLng, angle, sizeMeters));
+                        case 'star': {
+                            const pts = [];
+                            for (let i = 0; i < 10; i++) {
+                                const angle = i * 36;
+                                const dist = i % 2 === 0 ? sizeMeters : sizeMeters * 0.45;
+                                pts.push(getPoint(originLat, originLng, angle, dist));
+                            }
+                            return pts;
+                        }
+                        case 'cross':
+                            return [
+                                n(-sizeMeters * 0.35, sizeMeters),
+                                n(sizeMeters * 0.35, sizeMeters),
+                                n(sizeMeters * 0.35, sizeMeters * 0.35),
+                                n(sizeMeters, sizeMeters * 0.35),
+                                n(sizeMeters, -sizeMeters * 0.35),
+                                n(sizeMeters * 0.35, -sizeMeters * 0.35),
+                                n(sizeMeters * 0.35, -sizeMeters),
+                                n(-sizeMeters * 0.35, -sizeMeters),
+                                n(-sizeMeters * 0.35, -sizeMeters * 0.35),
+                                n(-sizeMeters, -sizeMeters * 0.35),
+                                n(-sizeMeters, sizeMeters * 0.35),
+                                n(-sizeMeters * 0.35, sizeMeters * 0.35),
+                            ];
+                        case 'circle':
+                            return null;
+                        case 'diamond':
+                        default:
+                            return [n(0, sizeMeters), n(sizeMeters, 0), n(0, -sizeMeters), n(-sizeMeters, 0)];
+                    }
+                };
+
+                const bindSectorInteractions = (shapeLayer) => {
+                    if (!shapeLayer) return;
+                    shapeLayer.__sectorData = s;
+                    shapeLayer.__sectorAzimuth = azimuth;
+                    shapeLayer.__sectorRange = range;
+                    shapeLayer.__sectorBeamwidth = beam;
+                    shapeLayer.bindTooltip(`
+                        <strong>${s.name || 'Unknown Site'}</strong><br>
+                        Cell: ${s.cellId || '-'} &nbsp;|&nbsp; Az: ${azimuth}° &nbsp;|&nbsp; ${s.tech || '-'}
+                    `, { sticky: true, opacity: 0.9 });
+
+                    shapeLayer.on('contextmenu', (e) => {
+                        L.DomEvent.stopPropagation(e);
+                        let displayId = `${s.rnc}/${s.cid}`;
+                        if ((!s.rnc || s.rnc === 'undefined') && s.cellId && String(s.cellId).match(/[\-\/]/)) {
+                            const parts = String(s.cellId).split(/[\-\/]/);
+                            if (parts.length === 2) displayId = `${parts[0]}/${parts[1]}`;
+                        }
+                        shapeLayer.bindPopup(`
+                            <div style="font-family:sans-serif;font-size:13px;">
+                                <strong>${s.name || 'Unknown Site'}</strong><br>
+                                Cell: ${s.cellId || '-'}<br>
+                                Azimuth: ${azimuth}°<br>
+                                Tech: ${s.tech || '-'}<br>
+                                <span style="font-size:10px;color:#888;">(RNC/CID: ${displayId})</span><br>
+                                <button style="margin-top:5px;cursor:pointer;" onclick="window.editSector('${layer.id}', ${index})">Edit</button>
+                            </div>
+                        `, { autoPan: false }).openPopup();
+                    });
+
+                    shapeLayer.on('click', (e) => {
+                        console.log('[Spider] Sector click handler fired:', s.cellId || s.cellName || s.sc, 'dragJustEnded:', this._siteDragJustEnded);
+                        if (this._siteDragJustEnded) return;
+                        L.DomEvent.stopPropagation(e);
+                        this._dispatchSectorClicked(s, {
+                            azimuth: azimuth,
+                            range: range,
+                            beamwidth: beam,
+                        });
+                    });
+                };
+
                 // ... render logic ...
                 if (!showDetailedSectors) {
-                    // Draw simple dot at low zoom
-                    L.circleMarker([s.lat, s.lng], {
-                        radius: 3,
-                        color: this.getSiteColor(s), // Note: Dot color doesn't usually use override unless we want it to
-                        fillOpacity: 0.8,
-                        pane: 'sitesPane',
-                        interactive: true
-                    }).addTo(this.sitesLayer);
+                    let quickLayer;
+                    if (isKmlSite) {
+                        quickLayer = L.marker([s.lat, s.lng], {
+                            icon: L.divIcon({
+                                className: '',
+                                html: buildKmlShapeHtml(kmlShape, s.color || this.getSiteColor(s)),
+                                iconSize: [16, 16],
+                                iconAnchor: [8, 8]
+                            }),
+                            pane: 'sitesPane',
+                            interactive: true
+                        }).addTo(this.sitesLayer);
+                    } else {
+                        // Draw simple dot at low zoom
+                        quickLayer = L.circleMarker([s.lat, s.lng], {
+                            radius: 6,
+                            color: this.getSiteColor(s), // Note: Dot color doesn't usually use override unless we want it to
+                            weight: 1.5,
+                            fillOpacity: 0.8,
+                            pane: 'sitesPane',
+                            interactive: true
+                        }).addTo(this.sitesLayer);
+                    }
+                    bindSectorInteractions(quickLayer);
+                    this._registerSectorPolygonAliases(s, quickLayer);
                     return;
                 }
 
                 // SECTOR LOGIC
                 const center = [s.lat, s.lng];
                 let color;
-                let finalOpacity = opacity;
-                let finalFillOpacity = opacity; // User requested 100% opacity by default
-                let weight = 1;
+                let finalFillOpacity = opacity;
+                let weight = parseInt(effective.strokeWidth) || 1;
                 let radiusOffset = 0;
+
+                // Stroke settings (independent from fill)
+                const strokeColor = effective.strokeColor || '#ffffff';
+                const strokeOpacity = effective.strokeOpacity != null ? parseFloat(effective.strokeOpacity) : 0.8;
+                let finalStrokeColor = strokeColor;
+                let finalStrokeOpacity = strokeOpacity;
 
                 // 1. External Highlight (User Click) - Highest Priority
                 let currentRadius = range; // Base radius
@@ -1732,6 +2529,8 @@ class MapRenderer {
                     color = this.externalHighlight.color;
                     finalOpacity = 1;
                     finalFillOpacity = 0.8;
+                    finalStrokeColor = color;
+                    finalStrokeOpacity = 1;
                     weight = 4; // Thick border
                     radiusOffset = 10; // Make it larger
                 }
@@ -1741,6 +2540,8 @@ class MapRenderer {
                     color = '#555';
                     finalOpacity = 0.1;
                     finalFillOpacity = 0.1; // Faded out
+                    finalStrokeColor = '#555';
+                    finalStrokeOpacity = 0.1;
 
                     let idStr = String(s.cellId);
                     let rncCidStr = null;
@@ -1758,39 +2559,57 @@ class MapRenderer {
                         color = this.getDiscreteColor(rncCidStr || idStr);
                         finalOpacity = 1;
                         finalFillOpacity = 0.6;
-                        weight = 2;
+                        finalStrokeColor = strokeColor;
+                        finalStrokeOpacity = strokeOpacity;
+                        weight = Math.max(weight, 2);
                     }
                 } else {
-                    // STANDARD MODE - use overrideColor if present
-                    color = overrideColor || this.getSiteColor(s);
+                    // STANDARD MODE: explicit override → sector's own color → tech default
+                    color = overrideColor || s.color || this.getSiteColor(s);
                 }
 
                 s.currentRadius = range + radiusOffset; // PERSIST RADIUS FOR CONNECTIONS
 
                 // Calculations
-                const azimuth = s.azimuth || 0;
-                const getPoint = (originLat, originLng, bearing, dist) => {
-                    const rad = Math.PI / 180;
-                    const latRad = originLat * rad;
-                    const bearRad = bearing * rad;
-                    const dy = Math.cos(bearRad) * dist;
-                    const dx = Math.sin(bearRad) * dist;
-                    const dLat = dy / 111111;
-                    const dLng = dx / (111111 * Math.cos(latRad));
-                    return [originLat + dLat, originLng + dLng];
-                };
-
                 let polygon;
-                if (s.beam > 300) { // Omni
+                if (isKmlSite) {
+                    const glyphRadius = 20 + radiusOffset * 0.15;
+                    s.tipLat = s.lat;
+                    s.tipLng = s.lng;
+                    if (kmlShape === 'circle') {
+                        polygon = L.circle(center, {
+                            radius: glyphRadius,
+                            color: finalStrokeColor,
+                            weight: Math.max(weight, 1.5),
+                            fillColor: color,
+                            fillOpacity: Math.max(finalFillOpacity, 0.75),
+                            opacity: finalStrokeOpacity,
+                            pane: 'sitesPane',
+                            renderer: this.sitesSvgRenderer
+                        }).addTo(this.sitesLayer);
+                    } else {
+                        polygon = L.polygon(buildKmlShapeLatLngs(s.lat, s.lng, kmlShape, glyphRadius), {
+                            color: finalStrokeColor,
+                            weight: Math.max(weight, 1.5),
+                            fillColor: color,
+                            fillOpacity: Math.max(finalFillOpacity, 0.75),
+                            opacity: finalStrokeOpacity,
+                            className: 'sector-polygon',
+                            interactive: true,
+                            pane: 'sitesPane',
+                            renderer: this.sitesSvgRenderer
+                        }).addTo(this.sitesLayer);
+                    }
+                } else if (s.beam > 300) { // Omni
                     s.tipLat = s.lat;
                     s.tipLng = s.lng;
                     polygon = L.circle(center, {
                         radius: range + radiusOffset,
-                        color: color,
+                        color: finalStrokeColor,
                         weight: weight,
                         fillColor: color,
                         fillOpacity: finalFillOpacity,
-                        opacity: finalOpacity,
+                        opacity: finalStrokeOpacity,
                         pane: 'sitesPane',
                         renderer: this.sitesSvgRenderer
                     }).addTo(this.sitesLayer);
@@ -1802,11 +2621,11 @@ class MapRenderer {
                     const p2 = getPoint(s.lat, s.lng, azimuth + beam / 2, range + radiusOffset);
 
                     polygon = L.polygon([center, p1, p2], {
-                        color: color,
+                        color: finalStrokeColor,
                         weight: weight,
                         fillColor: color,
                         fillOpacity: finalFillOpacity,
-                        opacity: finalOpacity,
+                        opacity: finalStrokeOpacity,
                         className: 'sector-polygon',
                         interactive: true,
                         pane: 'sitesPane',
@@ -1814,19 +2633,31 @@ class MapRenderer {
                     }).addTo(this.sitesLayer);
                 }
 
-                if (s.cellId) {
-                    this.sitePolygons[s.cellId] = polygon;
-                }
-                // Enhance Indexing for Unique IDs
-                if (s.rawEnodebCellId) {
-                    this.sitePolygons[s.rawEnodebCellId] = polygon;
-                }
-                if (s.calculatedEci) {
-                    this.sitePolygons[s.calculatedEci] = polygon;
+                this._registerSectorPolygonAliases(s, polygon);
+
+                // Register polygon for azimuth-rotation grouping (by position index, not azimuth value)
+                // Each entry stores its own beam+totalR so 2G/3G/4G shapes are preserved on rotate
+                if (s.tipLat && s.tipLng) {
+                    if (!this._siteRotPolygons.has(_posKey)) {
+                        this._siteRotPolygons.set(_posKey, { entries: [], cLat: s.lat, cLng: s.lng });
+                    }
+                    this._siteRotPolygons.get(_posKey).entries.push({
+                        sector: s, polygon, totalR: range + radiusOffset, beam,
+                    });
                 }
 
+                // Register polygon for site-move grouping — keyed by centre lat/lng so all tech layers
+                // for the same physical site are always grouped together regardless of name differences.
+                const _siteCenter = `${s.lat.toFixed(5)}@@${s.lng.toFixed(5)}`;
+                if (!this._sitePolygonsByName.has(_siteCenter)) this._sitePolygonsByName.set(_siteCenter, []);
+                this._sitePolygonsByName.get(_siteCenter).push({
+                    polygon, s,
+                    totalR: range + radiusOffset, beam,
+                    isOmni: s.beam > 300,
+                });
+
                 // Labels
-                if (effective.showSiteNames) {
+                if (effective.showSiteNames || globalSettings.forceSiteNames) {
                     const siteName = s.siteName || s.name;
                     if (siteName && !renderedSiteLabels.has(siteName)) {
                         renderedSiteLabels.add(siteName);
@@ -1834,7 +2665,7 @@ class MapRenderer {
                             icon: L.divIcon({
                                 className: 'site-label',
                                 html: `<div style="background:rgba(0,0,0,0.4); color:#fff; font-size:10px; padding:2px 4px; border-radius:3px; white-space:nowrap; transform: translate(-50%, -50%); position: absolute; left: 0; top: 0;">${siteName}</div>`,
-                                iconSize: [0, 0] // Trick to make the div positioned at the coordinate origin
+                                iconSize: [0, 0]
                             }),
                             interactive: false,
                             pane: 'labelsPane'
@@ -1846,51 +2677,205 @@ class MapRenderer {
                     L.marker(tipMid, { icon: L.divIcon({ className: 'cell-label', html: `<div style="color:#ddd; font-size:9px; text-shadow:0 0 2px #000; white-space:nowrap;">${s.cellId || ''}</div>`, iconAnchor: [10, 0] }), interactive: false, pane: 'labelsPane' }).addTo(this.siteLabelsLayer);
                 }
 
-                // Popup
-                let displayId = `${s.rnc}/${s.cid}`;
+                // MOUSEDOWN: plain drag = move site | Shift+drag = rotate azimuth
+                polygon.on('mousedown', (e) => {
+                    if (e.originalEvent.button !== 0) return;
+                    L.DomEvent.stopPropagation(e);
 
-                // Fallback Display Logic: Parse cellId if RNC is missing
-                if ((!s.rnc || s.rnc === 'undefined') && s.cellId && String(s.cellId).match(/[\-\/]/)) {
-                    const parts = String(s.cellId).split(/[\-\/]/);
-                    if (parts.length === 2) displayId = `${parts[0]}/${parts[1]}`;
-                }
+                    if (e.originalEvent.shiftKey) {
+                        // ── ROTATION MODE (Shift+drag) ───────────────────────────────────────
+                        this.map.dragging.disable();
+                        const rg        = this._siteRotPolygons.get(_posKey);
+                        const cLat      = s.lat;
+                        const cLng      = s.lng;
+                        const labelR    = range + radiusOffset;
+                        const initialAz = Math.round(azimuth);
+                        let   currentAz = azimuth;
 
-                const content = `
-                <div style="font-family: sans-serif; font-size: 13px;">
-                    <strong>${s.name || 'Unknown Site'}</strong><br>
-                    Cell: ${s.cellId || '-'}<br>
-                    Azimuth: ${azimuth}°<br>
-                    Tech: ${s.tech || '-'}<br>
-                    <span style="font-size:10px; color:#888;">(RNC/CID: ${displayId})</span><br>
-                    <button style="margin-top:5px; cursor:pointer;" onclick="window.editSector('${layer.id}', ${index})">Edit</button>
-                </div>
-            `;
-                polygon.bindPopup(content);
-                polygon.on('click', () => {
-                    window.dispatchEvent(new CustomEvent('site-sector-clicked', {
-                        detail: {
-                            cellId: s.cellId,
-                            sc: s.sc || s.pci,
-                            lac: s.lac,
-                            freq: s.freq,
-                            lat: s.lat,
-                            lng: s.lng,
-                            azimuth: azimuth,
-                            rnc: s.rnc,
-                            cid: s.cid,
-                            range: range,
-                            beamwidth: beam
-                        }
-                    }));
+                        // Capture before-state for undo (all techs at this site centre + azimuth)
+                        const _rotSnap = [];
+                        this.siteLayers.forEach((lyr, layerId) => {
+                            if (!lyr.sectors) return;
+                            lyr.sectors.forEach((sec, idx) => {
+                                if (sec.lat === cLat && sec.lng === cLng && Math.round(sec.azimuth) === initialAz)
+                                    _rotSnap.push(this._sectorSnapshot(layerId, idx));
+                            });
+                        });
+
+                        const _azHtml = (az) =>
+                            `<div style="display:inline-block;background:rgba(15,15,25,0.92);color:#fde68a;` +
+                            `font-size:13px;font-weight:700;padding:4px 10px;border-radius:8px;` +
+                            `white-space:nowrap;border:1px solid rgba(253,230,138,0.4);` +
+                            `box-shadow:0 2px 8px rgba(0,0,0,0.6);letter-spacing:0.04em;` +
+                            `pointer-events:none;transform:translate(-50%,-130%);`+
+                            `position:absolute;left:0;top:0;">${az}°</div>`;
+
+                        if (this._azLabel) this.map.removeLayer(this._azLabel);
+                        this._azLabel = L.marker(getPoint(cLat, cLng, currentAz, labelR * 0.55), {
+                            icon: L.divIcon({ className: '', html: _azHtml(currentAz), iconSize: [0, 0] }),
+                            interactive: false, pane: 'labelsPane',
+                        }).addTo(this.map);
+
+                        if (this._azDirLine) this.map.removeLayer(this._azDirLine);
+                        this._azDirLine = L.polyline(
+                            [[cLat, cLng], getPoint(cLat, cLng, currentAz, 500)],
+                            { color: '#ef4444', weight: 2.5, dashArray: '8,5', opacity: 0.9, interactive: false, pane: 'labelsPane' }
+                        ).addTo(this.map);
+
+                        const onRotMove = (ev) => {
+                            const pt     = this.map.mouseEventToContainerPoint(ev);
+                            const latlng = this.map.containerPointToLatLng(pt);
+                            const dlat   = latlng.lat - cLat;
+                            const dlng   = (latlng.lng - cLng) * Math.cos(cLat * Math.PI / 180);
+                            currentAz    = Math.round((Math.atan2(dlng, dlat) * 180 / Math.PI + 360) % 360);
+
+                            if (this._azLabel) {
+                                this._azLabel.setLatLng(getPoint(cLat, cLng, currentAz, labelR * 0.55));
+                                this._azLabel.setIcon(L.divIcon({ className: '', html: _azHtml(currentAz), iconSize: [0, 0] }));
+                            }
+                            if (this._azDirLine) {
+                                this._azDirLine.setLatLngs([[cLat, cLng], getPoint(cLat, cLng, currentAz, 500)]);
+                            }
+                            // Rotate every tech's polygon using its OWN beam/range so shapes stay correct
+                            if (rg) {
+                                rg.entries.forEach(({ sector: sec, polygon: poly, totalR: entryR, beam: entryBw }) => {
+                                    sec.azimuth = currentAz;
+                                    const p1 = getPoint(cLat, cLng, currentAz - entryBw / 2, entryR);
+                                    const p2 = getPoint(cLat, cLng, currentAz + entryBw / 2, entryR);
+                                    poly.setLatLngs([[cLat, cLng], p1, p2]);
+                                });
+                            }
+                        };
+
+                        const onRotUp = () => {
+                            document.removeEventListener('mousemove', onRotMove);
+                            document.removeEventListener('mouseup', onRotUp);
+                            if (this._azLabel) { this.map.removeLayer(this._azLabel); this._azLabel = null; }
+                            if (this._azDirLine) { this.map.removeLayer(this._azDirLine); this._azDirLine = null; }
+                            this.map.dragging.enable();
+                            // Apply final azimuth to off-screen sectors (on-screen already updated by onRotMove)
+                            this.siteLayers.forEach(lyr => {
+                                if (!lyr.sectors) return;
+                                lyr.sectors.forEach(sec => {
+                                    if (sec.lat === cLat && sec.lng === cLng && Math.round(sec.azimuth) === initialAz)
+                                        sec.azimuth = currentAz;
+                                });
+                            });
+                            if (currentAz !== azimuth) this.pushUndo(_rotSnap);
+                            this._siteDragJustEnded = true;
+                            setTimeout(() => { this._siteDragJustEnded = false; }, 60);
+                            this.renderSites(false);
+                        };
+
+                        document.addEventListener('mousemove', onRotMove);
+                        document.addEventListener('mouseup', onRotUp);
+
+                    } else {
+                        // ── MOVE MODE (plain drag) ───────────────────────────────────────────
+                        const dragSiteName = s.siteName || s.name || String(s.cellId || '');
+                        const origLat      = s.lat;
+                        const origLng      = s.lng;
+                        const origSiteKey  = `${origLat.toFixed(5)}@@${origLng.toFixed(5)}`;
+
+                        // Capture before-state for undo (all techs sharing this site centre)
+                        const _moveSnap = [];
+                        this.siteLayers.forEach((lyr, layerId) => {
+                            if (!lyr.sectors) return;
+                            lyr.sectors.forEach((sec, idx) => {
+                                if (sec.lat === origLat && sec.lng === origLng)
+                                    _moveSnap.push(this._sectorSnapshot(layerId, idx));
+                            });
+                        });
+
+                        this._siteDragState = {
+                            startX: e.originalEvent.clientX,
+                            startY: e.originalEvent.clientY,
+                            dragging: false,
+                            currentLat: origLat,
+                            currentLng: origLng,
+                        };
+
+                        const onMove = (ev) => {
+                            const ds = this._siteDragState;
+                            if (!ds) return;
+                            const dx = ev.clientX - ds.startX;
+                            const dy = ev.clientY - ds.startY;
+                            if (!ds.dragging && Math.sqrt(dx * dx + dy * dy) > 6) {
+                                ds.dragging = true;
+                                this.map.dragging.disable();
+                                this.map.getContainer().style.cursor = 'grabbing';
+                            }
+                            if (ds.dragging) {
+                                const pt     = this.map.mouseEventToContainerPoint(ev);
+                                const latlng = this.map.containerPointToLatLng(pt);
+                                ds.currentLat = latlng.lat;
+                                ds.currentLng = latlng.lng;
+                                if (!this._dragMarker) {
+                                    this._dragMarker = L.marker([latlng.lat, latlng.lng], {
+                                        icon: L.divIcon({
+                                            className: 'site-drag-pin',
+                                            html: `<div>${dragSiteName}</div>`,
+                                            iconSize: [0, 0],
+                                        }),
+                                        interactive: false,
+                                        pane: 'labelsPane',
+                                    }).addTo(this.map);
+                                } else {
+                                    this._dragMarker.setLatLng([latlng.lat, latlng.lng]);
+                                }
+                                // Move all tech polygons visually — keyed by original site centre
+                                const siteEntries = this._sitePolygonsByName.get(origSiteKey);
+                                if (siteEntries) {
+                                    siteEntries.forEach(({ polygon: poly, s: sec, totalR, beam: bw, isOmni }) => {
+                                        if (isOmni) {
+                                            poly.setLatLng([latlng.lat, latlng.lng]);
+                                        } else {
+                                            const az = sec.azimuth || 0;
+                                            const q1 = getPoint(latlng.lat, latlng.lng, az - bw / 2, totalR);
+                                            const q2 = getPoint(latlng.lat, latlng.lng, az + bw / 2, totalR);
+                                            poly.setLatLngs([[latlng.lat, latlng.lng], q1, q2]);
+                                        }
+                                    });
+                                }
+                            }
+                        };
+
+                        const onUp = () => {
+                            document.removeEventListener('mousemove', onMove);
+                            document.removeEventListener('mouseup', onUp);
+                            const ds = this._siteDragState;
+                            const wasDragging = ds && ds.dragging;
+                            this._siteDragState = null;
+                            if (this._dragMarker) { this.map.removeLayer(this._dragMarker); this._dragMarker = null; }
+                            if (wasDragging) {
+                                this._siteDragJustEnded = true;
+                                setTimeout(() => { this._siteDragJustEnded = false; }, 60);
+                                this.pushUndo(_moveSnap);
+                                // Update all sectors sharing the original centre (all techs, on-screen + off-screen)
+                                this.siteLayers.forEach(lyr => {
+                                    if (!lyr.sectors) return;
+                                    lyr.sectors.forEach(sec => {
+                                        if (sec.lat === origLat && sec.lng === origLng) {
+                                            sec.lat = ds.currentLat;
+                                            sec.lng = ds.currentLng;
+                                        }
+                                    });
+                                });
+                                this.rebuildSiteIndex();
+                                this.renderSites(false);
+                                this.map.dragging.enable();
+                                this.map.getContainer().style.cursor = '';
+                            }
+                        };
+
+                        document.addEventListener('mousemove', onMove);
+                        document.addEventListener('mouseup', onUp);
+                    }
                 });
 
-                if (s.cellId) {
-                    this.sitePolygons[s.cellId] = polygon;
-                }
-                // Enhance Indexing for Unique IDs
-                if (s.rawEnodebCellId) {
-                    this.sitePolygons[s.rawEnodebCellId] = polygon;
-                }
+                bindSectorInteractions(polygon);
+
+                this._registerSectorPolygonAliases(s, polygon);
             });
         });
 
@@ -1898,6 +2883,197 @@ class MapRenderer {
         this.updateLabelVisibility();
 
 
+    }
+
+    _normalizeSitePolygonKey(v) {
+        return String(v == null ? '' : v).replace(/\s/g, '');
+    }
+
+    _registerSitePolygonAlias(key, polygon) {
+        if (!polygon || key === undefined || key === null) return;
+        const raw = String(key).trim();
+        if (!raw) return;
+        this.sitePolygons[raw] = polygon;
+        const normalized = this._normalizeSitePolygonKey(raw);
+        if (normalized) this.sitePolygons[normalized] = polygon;
+        const lowered = normalized.toLowerCase();
+        if (lowered) this.sitePolygons[lowered] = polygon;
+        if (raw.includes('/')) {
+            this.sitePolygons[raw.replace(/\//g, '-')] = polygon;
+            this.sitePolygons[normalized.replace(/\//g, '-')] = polygon;
+            this.sitePolygons[lowered.replace(/\//g, '-')] = polygon;
+        }
+        if (raw.includes('-')) {
+            this.sitePolygons[raw.replace(/-/g, '/')] = polygon;
+            this.sitePolygons[normalized.replace(/-/g, '/')] = polygon;
+            this.sitePolygons[lowered.replace(/-/g, '/')] = polygon;
+        }
+    }
+
+    _registerSectorPolygonAliases(sector, polygon) {
+        if (!sector || !polygon) return;
+        this._registerSitePolygonAlias(sector.cellId, polygon);
+        this._registerSitePolygonAlias(sector.rawEnodebCellId, polygon);
+        this._registerSitePolygonAlias(sector.calculatedEci, polygon);
+        this._registerSitePolygonAlias(sector.cellName, polygon);
+        this._registerSitePolygonAlias(sector.name, polygon);
+        this._registerSitePolygonAlias(sector.siteName, polygon);
+        if (sector.rnc != null && sector.cid != null) {
+            this._registerSitePolygonAlias(`${sector.rnc}/${sector.cid}`, polygon);
+            this._registerSitePolygonAlias(`${sector.rnc}-${sector.cid}`, polygon);
+        }
+    }
+
+    _getSitePolygon(cellId) {
+        if (!cellId || !this.sitePolygons) return null;
+        const raw = String(cellId).trim();
+        const keys = [
+            raw,
+            this._normalizeSitePolygonKey(raw),
+            this._normalizeSitePolygonKey(raw).toLowerCase(),
+            raw.replace(/\//g, '-'),
+            raw.replace(/-/g, '/'),
+            this._normalizeSitePolygonKey(raw.replace(/\//g, '-')),
+            this._normalizeSitePolygonKey(raw.replace(/-/g, '/')),
+            this._normalizeSitePolygonKey(raw.replace(/\//g, '-')).toLowerCase(),
+            this._normalizeSitePolygonKey(raw.replace(/-/g, '/')).toLowerCase(),
+        ].filter(Boolean);
+        for (const key of keys) {
+            if (this.sitePolygons[key]) return this.sitePolygons[key];
+        }
+        const site = (() => {
+            if (!this.siteIndex) return null;
+            const byId = this.siteIndex.byId;
+            for (const key of keys) {
+                if (byId && byId.has(key)) return byId.get(key);
+            }
+            if (!Array.isArray(this.siteIndex.all)) return null;
+            const wanted = raw.toLowerCase();
+            return this.siteIndex.all.find((s) => {
+                const candidates = [
+                    s && s.cellId,
+                    s && s.rawEnodebCellId,
+                    s && s.cellName,
+                    s && s.name,
+                    s && s.siteName,
+                ].filter(Boolean).map((v) => String(v).trim().toLowerCase());
+                return candidates.includes(wanted);
+            }) || null;
+        })();
+        if (!site) return null;
+        this._registerSectorPolygonAliases(site, this.sitePolygons[site.cellId] || this.sitePolygons[site.rawEnodebCellId] || this.sitePolygons[site.calculatedEci] || null);
+        const siteKeys = [
+            site.cellId,
+            site.rawEnodebCellId,
+            site.calculatedEci,
+            site.cellName,
+            site.name,
+            site.siteName,
+            site.rnc != null && site.cid != null ? `${site.rnc}/${site.cid}` : null,
+            site.rnc != null && site.cid != null ? `${site.rnc}-${site.cid}` : null,
+        ].filter(Boolean);
+        for (const key of siteKeys) {
+            const polygon = this.sitePolygons[key] || this.sitePolygons[this._normalizeSitePolygonKey(key)] || this.sitePolygons[this._normalizeSitePolygonKey(key).toLowerCase()];
+            if (polygon) return polygon;
+        }
+        return null;
+    }
+
+    setMeasurementInteractivity(enabled) {
+        const setLayerInteractivity = (layer) => {
+            if (!layer) return;
+            if (layer.options) layer.options.interactive = !!enabled;
+            if (typeof layer.off === 'function' && !enabled && typeof layer.closePopup === 'function') {
+                try { layer.closePopup(); } catch (_) {}
+            }
+            const el = typeof layer.getElement === 'function' ? layer.getElement() : null;
+            if (el && el.style) {
+                el.style.pointerEvents = enabled ? '' : 'none';
+            }
+            if (layer._path && layer._path.style) {
+                layer._path.style.pointerEvents = enabled ? '' : 'none';
+            }
+        };
+        const applyGroup = (groupMap) => {
+            if (!groupMap) return;
+            Object.values(groupMap).forEach((group) => {
+                if (!group || typeof group.eachLayer !== 'function') return;
+                group.eachLayer((layer) => setLayerInteractivity(layer));
+            });
+        };
+        applyGroup(this.logLayers);
+        applyGroup(this.eventLayers);
+    }
+
+    _dispatchSectorClicked(sector, overrides = {}) {
+        if (!sector) return false;
+        window.dispatchEvent(new CustomEvent('site-sector-clicked', {
+            detail: {
+                cellId: sector.cellId,
+                cellName: sector.cellName || sector.name || null,
+                rawEnodebCellId: sector.rawEnodebCellId,
+                calculatedEci: sector.calculatedEci,
+                siteName: sector.siteName || sector.name || sector.cellName,
+                sc: sector.sc || sector.pci,
+                pci: sector.pci || sector.sc,
+                lac: sector.lac,
+                tac: sector.tac,
+                freq: sector.freq,
+                lat: sector.lat,
+                lng: sector.lng,
+                azimuth: overrides.azimuth != null ? overrides.azimuth : sector.azimuth,
+                rnc: sector.rnc,
+                cid: sector.cid,
+                range: overrides.range != null ? overrides.range : (sector.currentRadius || sector.range || 100),
+                beamwidth: overrides.beamwidth != null ? overrides.beamwidth : sector.beam,
+            }
+        }));
+        return true;
+    }
+
+    dispatchSectorClickForMapClick(latlng, maxPixelDistance = 18) {
+        const result = { handled: false, foundSector: false, sector: null };
+        if (!this.map || !this.sitesLayer || !latlng) return result;
+        const layerPoint = this.map.latLngToLayerPoint(latlng);
+        const clickPt = this.map.latLngToContainerPoint(latlng);
+        let nearest = null;
+        let nearestDist2 = Infinity;
+
+        this.sitesLayer.eachLayer((layer) => {
+            if (!layer || !layer.__sectorData) return;
+            if (typeof layer._containsPoint === 'function') {
+                try {
+                    if (layer._containsPoint(layerPoint)) {
+                        nearest = layer;
+                        nearestDist2 = 0;
+                        return;
+                    }
+                } catch (_) {}
+            }
+            if (nearestDist2 === 0) return;
+            const s = layer.__sectorData;
+            const lat = Number(s && s.lat);
+            const lng = Number(s && s.lng);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+            const pt = this.map.latLngToContainerPoint([lat, lng]);
+            const dx = pt.x - clickPt.x;
+            const dy = pt.y - clickPt.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 <= maxPixelDistance * maxPixelDistance && d2 < nearestDist2) {
+                nearest = layer;
+                nearestDist2 = d2;
+            }
+        });
+
+        if (!nearest || !nearest.__sectorData) return result;
+        result.foundSector = true;
+        result.sector = nearest.__sectorData;
+        result.handled = this._dispatchSectorClicked(nearest.__sectorData, {
+            azimuth: nearest.__sectorAzimuth,
+            range: nearest.__sectorRange,
+            beamwidth: nearest.__sectorBeamwidth,
+        });
+        return result;
     }
 
     highlightCell(cellId) {
@@ -1910,7 +3086,7 @@ class MapRenderer {
             this.currentHighlight = null;
         }
 
-        const polygon = this.sitePolygons[cellId];
+        const polygon = this._getSitePolygon(cellId);
         if (polygon) {
             // Save original style (approximate or just hardcoded default if easier)
             // But checking current options is safer
@@ -1962,7 +3138,7 @@ class MapRenderer {
         if (!cellId) return;
 
         // 1. Try finding existing polygon (rendered)
-        const polygon = this.sitePolygons[cellId];
+        const polygon = this._getSitePolygon(cellId);
         if (polygon) {
             const center = polygon.getBounds().getCenter();
 
@@ -2009,9 +3185,24 @@ class MapRenderer {
 
 
     drawConnections(startPt, targets) {
+        // Store for refresh after renderSites updates sector tip positions
+        this._lastConnectionStartPt = startPt || null;
+        this._lastConnectionTargets = (targets && targets.length) ? targets.slice() : [];
         // Clear previous connections
         this.connectionsLayer.clearLayers();
         if (!startPt || !targets || targets.length === 0) return;
+        const maxNeighborLines = Number.isFinite(Number(window.__pointDetailsVisibleNeighborLineCount))
+            ? Math.max(0, Math.min(7, Math.round(Number(window.__pointDetailsVisibleNeighborLineCount))))
+            : 7;
+        let visibleNeighborCount = 0;
+        const visibleTargets = targets.filter((t) => {
+            const role = String((t && t.connectionRole) || '').toLowerCase();
+            if (role !== 'neighbor' && role !== 'detected') return true;
+            if (visibleNeighborCount >= maxNeighborLines) return false;
+            visibleNeighborCount += 1;
+            return true;
+        });
+        if (visibleTargets.length === 0) return;
         const toFiniteNumber = (v) => {
             if (v === undefined || v === null || v === '') return null;
             if (typeof v === 'number') return Number.isFinite(v) ? v : null;
@@ -2046,7 +3237,7 @@ class MapRenderer {
             return null;
         };
 
-        targets.forEach(t => {
+        visibleTargets.forEach(t => {
             let baseLat = toFiniteNumber(t.lat);
             let baseLng = toFiniteNumber(t.lng);
             if (baseLat === null || baseLng === null) {
@@ -2118,24 +3309,64 @@ class MapRenderer {
         // Clear previous connections
         this.connectionsLayer.clearLayers();
         if (!segments || segments.length === 0) return;
-
-        // Use Canvas renderer for performance if many lines?
-        // Polyline by default uses the map renderer (preferCanvas was set in constructor)
-
-        segments.forEach(seg => {
-            L.polyline([seg.from, seg.to], {
-                color: seg.color || '#3b82f6',
-                weight: 1,
-                opacity: 0.6,
+        const grouped = new Map();
+        segments.forEach((seg) => {
+            if (!seg || !Array.isArray(seg.from) || !Array.isArray(seg.to)) return;
+            const color = seg.color || '#3b82f6';
+            const weight = Number.isFinite(Number(seg.weight)) ? Number(seg.weight) : 1;
+            const opacity = Number.isFinite(Number(seg.opacity)) ? Number(seg.opacity) : 0.6;
+            const dash = seg.dashArray || '';
+            const key = `${color}__${weight}__${opacity}__${dash}`;
+            if (!grouped.has(key)) {
+                grouped.set(key, {
+                    color,
+                    weight,
+                    opacity,
+                    dashArray: dash,
+                    lines: [],
+                });
+            }
+            grouped.get(key).lines.push([seg.from, seg.to]);
+        });
+        grouped.forEach((group) => {
+            if (!group.lines.length) return;
+            const opts = {
+                color: group.color,
+                weight: group.weight,
+                opacity: group.opacity,
                 pane: 'connectionsPane',
-                renderer: this.connectionsRenderer, // Force to Connections Canvas
+                renderer: this.connectionsRenderer,
                 interactive: false
-            }).addTo(this.connectionsLayer);
+            };
+            if (group.dashArray) opts.dashArray = group.dashArray;
+            L.polyline(group.lines, opts).addTo(this.connectionsLayer);
         });
     }
 
     clearConnections() {
         this.connectionsLayer.clearLayers();
+        this._lastConnectionStartPt = null;
+        this._lastConnectionTargets = [];
+    }
+
+    refreshConnections() {
+        const startPt = this._lastConnectionStartPt;
+        const targets = this._lastConnectionTargets;
+        if (!startPt || !targets || !targets.length) return;
+        const normalizeId = (v) => String(v == null ? '' : v).replace(/\s/g, '');
+        const refreshed = targets.map(t => {
+            if (!t.cellId) return t;
+            const raw = String(t.cellId);
+            const keys = [raw, raw.replace(/\//g, '-'), raw.replace(/-/g, '/')].map(normalizeId);
+            for (const k of keys) {
+                const s = this.siteIndex && this.siteIndex.byId && this.siteIndex.byId.get(k);
+                if (s && s.tipLat != null && s.tipLng != null) {
+                    return { ...t, tipLat: s.tipLat, tipLng: s.tipLng };
+                }
+            }
+            return t;
+        });
+        this.drawConnections(startPt, refreshed);
     }
 
 
@@ -2990,10 +4221,12 @@ ${geometry}
     toggleSmoothing(enable) {
         // Apply Blur to sitesPane (Shared Canvas)
         // Note: This blurs both Grids and Sites, but ensures Interactivity works in Sharp mode.
-        const pane = this.map.getPane('sitesPane');
-        if (pane) {
+        const panes = [this.map.getPane('sitesPane'), this.map.getPane('logPointsPane')].filter(Boolean);
+        panes.forEach((pane) => {
             pane.style.transition = 'filter 0.3s ease';
             pane.style.filter = enable ? 'blur(8px)' : 'none';
+        });
+        if (panes.length) {
             console.log(`[MapRenderer] Grid Interpolation (Smoothing) ${enable ? 'ENABLED' : 'DISABLED'}`);
         }
 

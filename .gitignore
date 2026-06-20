@@ -26,3 +26,31 @@ backend-cache/
 
 # Local exports
 logs/Export Nemo/
+
+# Virtualenvs (regenerable via pip)
+.venv/
+venv/
+env/
+los_backend/.venv/
+
+# Runtime / generated artifacts
+outputs/
+tmp/
+*.log
+.optim_analyzer.db
+*.sqlite3
+*.sqlite
+.pytest_cache/
+
+# Large data blobs (keep locally; use LFS/external if they must be versioned)
+bdd_sectors.json
+bdd_sectors.json.gz
+
+# Built app bundle
+Optim Analyzer.app/
+*.app/
+
+# Local / tooling state
+.codex/
+.claude/settings.local.json
+docs/superpowers/

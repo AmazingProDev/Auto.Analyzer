@@ -4,13 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Optim Analyzer Pro - Nemo Visualizer</title>
+    <title>EMA Solution</title>
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/2.2.1/chartjs-plugin-annotation.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
@@ -18,9 +18,11 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
     <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
-    <link rel="stylesheet" href="style.css?v=32">
+    <link rel="stylesheet" href="style.css?v=47">
     <link rel="stylesheet" href="grid_styles.css?v=2">
     <link rel="stylesheet" href="additional_styles.css?v=3">
+    <link rel="stylesheet" href="local_ai_styles.css?v=2">
+    <link rel="stylesheet" href="los_pollution_styles.css?v=1">
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <style>
         /* Emergency Styles to force visibility */
@@ -47,42 +49,135 @@
         main {
             display: flex !important;
         }
+
+        @keyframes signalingRowFlash {
+            0% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 rgba(96,165,250,0); }
+            25% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 2px rgba(96,165,250,0.95); }
+            100% { box-shadow: inset 3px 0 0 currentColor, 0 0 0 rgba(96,165,250,0); }
+        }
+
+        .signaling-row-flash {
+            animation: signalingRowFlash 1.1s ease-out;
+        }
+
+        /* TRP Sidebar Tech Badges */
+        .trp-tech-badge {
+            font-size: 9px;
+            padding: 1px 5px;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: 700;
+            margin-left: 4px;
+            vertical-align: middle;
+            text-transform: none;
+            display: inline-block;
+            line-height: 1.2;
+        }
+        .trp-tech-badge-nr { background: #7c3aed; }
+        .trp-tech-badge-lte { background: #0ea5e9; }
     </style>
+    <!-- MapLibre GL JS for LOS map -->
+    <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet">
+    <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+    <link rel="stylesheet" href="los_styles.css">
 </head>
 
 <body>
     <div id="app">
         <!-- Main Application Header -->
         <header id="mainHeader" class="main-header">
-            <div class="logo">Optim Analyzer Pro</div>
+            <div class="logo">EMA Solution</div>
             <div class="header-map-actions">
                 <!-- Hidden Inputs -->
                 <input type="file" id="fileInput" accept=".nmf, .nmfs, .csv, .txt, .xlsx, .xls, .trp"
-                    class="hidden-input" aria-label="Import Log File">
-                <input type="file" id="siteInput" accept=".xlsx, .xls, .csv" class="hidden-input"
+                    class="hidden-input" aria-label="Import Log File (Nemo, TRP, CSV/XLSX)">
+                <input type="file" id="siteInput" accept=".xlsx, .xls, .csv, .kml" class="hidden-input"
                     aria-label="Import Site Data">
                 <input type="file" id="trpImportInput" accept=".trp" class="hidden-input"
                     aria-label="Import TRP Run">
                 <input type="file" id="shpInput" accept=".shp, .zip, .dbf, .shx, .prj, .xlsx, .xls" multiple
                     class="hidden-input" aria-label="Import Shapefile or SmartCare Data">
+                <input type="file" id="workspaceInput" accept=".txt" class="hidden-input"
+                    aria-label="Open Workspace File">
+                <input type="file" id="benchmarkInput" accept=".xlsx,.xls" class="hidden-input"
+                    aria-label="Import Benchmark Workbook">
+                <input type="file" id="benchmarkNemoInput" accept=".txt,.csv,.tsv" class="hidden-input" multiple
+                    aria-label="Import Nemo TXT Benchmark Files">
+                <input type="file" id="benchmarkOptimInput" accept=".txt" class="hidden-input" multiple
+                    aria-label="Generate Benchmark-Optim XLSX from Nemo TXT Files">
+                <input type="file" id="benchmarkMycomInput" class="hidden-input"
+                    aria-label="Import Mycom Hourly Export CSV">
+                <input type="file" id="statisticsMycomInput" accept=".txt,.csv,.xlsx" class="hidden-input"
+                    aria-label="Import Mycom Statistics Export">
 
-                <!-- Action Buttons -->
-                <button id="importBtn" class="btn header-btn" title="Import Logs, Sites, or SmartCare data">📂
-                    Import</button>
-                <button id="importTrpBtn" class="btn header-btn" title="Import TRP and decode KPIs/events">📥 Import TRP</button>
-                <button id="exportKmlBtn" class="btn header-btn" title="Export current view to KML">🌍 Export</button>
-                <button id="spiderSmartCareBtn" class="btn header-btn" title="Draw spider lines for SmartCare grid">🕸️
-                    Spider</button>
-                <button id="btnSmoothEdges" class="btn header-btn" title="Toggle Smooth Edges (Heatmap View)">💧
-                    Smooth</button>
-                <button id="btnZones" class="btn header-btn" title="Toggle Administrative Boundaries">🗺️ Zones</button>
-                <button id="btnAddSector" class="btn header-btn" onclick="window.openAddSectorModal()"
-                    title="Add Site Manually">📍 Add Site</button>
-                <button id="siteSettingsBtn" class="btn header-btn" title="Site Display Settings">⚙️ Sites</button>
-                <button id="themeSettingsBtn" class="btn header-btn" title="Thematic Analysis Settings">🎨
-                    Theme</button>
-                <button id="btnLteHoAnalysis" class="btn header-btn" title="Run LTE intra-frequency HO analysis">🔁 LTE HO</button>
-                <button id="btnLteInterFreqHoAnalysis" class="btn header-btn" title="Run LTE inter-frequency HO analysis">📶 LTE IFHO</button>
+                <!-- ===== Menu Bar ===== -->
+                <div class="menu-bar">
+                    <!-- FILE menu -->
+                    <div class="menu-dropdown" data-menu="file">
+                        <button class="menu-trigger" type="button">File</button>
+                        <div class="menu-panel">
+                            <!-- Import submenu -->
+                            <div class="menu-submenu-wrap">
+                                <button id="importBtn" class="menu-item has-submenu" type="button">📂 Import<span class="submenu-arrow">›</span></button>
+                                <div class="menu-submenu">
+                                    <button class="menu-item" data-import="nemo">📂 Nemo (.nmf)</button>
+                                    <button class="menu-item" data-import="tems">📥 TEMS (.trp)</button>
+                                    <button class="menu-item" data-import="other">📄 Other (.csv/.xlsx)</button>
+                                    <div class="menu-divider"></div>
+                                    <button class="menu-item" data-import="sites">📡 Sites</button>
+                                    <button class="menu-item" data-import="smartcare">🧠 SmartCare</button>
+                                    <button class="menu-item" data-import="nemo_lte">📶 Nemo LTE / NR Export</button>
+                                    <div class="menu-divider"></div>
+                                    <button class="menu-item" data-import="benchmark">📊 Benchmark</button>
+                                    <button class="menu-item" data-import="benchmark_nemo">📈 Benchmark Nemo TXT</button>
+                                    <button class="menu-item" data-import="benchmark_optim">📊 Benchmark-Optim</button>
+                                    <button class="menu-item" data-import="geodata">🗺️ GeoData</button>
+                                </div>
+                            </div>
+                            <button id="exportKmlBtn" class="menu-item" title="Export current view to KML">🌍 Export KML</button>
+                            <button id="workspaceBtn" class="menu-item" title="Save or open a workspace">🗂️ Workspace</button>
+                            <div class="menu-divider"></div>
+                            <button id="btnAddSector" class="menu-item" onclick="window.openAddSiteQuickModal()" title="Add Site Manually">📍 Add Site</button>
+                        </div>
+                    </div>
+
+                    <!-- TOOLS menu -->
+                    <div class="menu-dropdown" data-menu="tools">
+                        <button class="menu-trigger" type="button">Tools</button>
+                        <div class="menu-panel">
+                            <button id="spiderSmartCareBtn" class="menu-item" title="Click to cycle: Spider (ID match) → Geo (beam footprint) → Select (freehand draw) → OFF">🕸️ Spider</button>
+                            <button id="polygonFilterBtn" class="menu-item" title="Draw a polygon — only points inside stay visible, legend updates accordingly">🔷 Filter</button>
+                            <button id="polygonBoundaryBtn" class="menu-item" title="Show / hide the filter polygon boundary" style="display:none">👁️ Polygon</button>
+                            <div class="menu-divider"></div>
+                            <button id="los-open-btn" class="menu-item" title="Line-of-Sight Simulator (ATOLL geodata)">📡 LOS</button>
+                            <button id="btnLocalAiAnalysis" class="menu-item" title="Run local Gemma 4 analysis on a text logfile">🤖 Local AI</button>
+                            <div class="menu-divider"></div>
+                            <button id="btnSmoothEdges" class="menu-item hidden-element" title="Toggle Smooth Edges (Heatmap View)">💧 Smooth</button>
+                            <button id="btnZones" class="menu-item hidden-element" title="Toggle Administrative Boundaries">🗺️ Zones</button>
+                            <button id="siteSettingsBtn" class="menu-item hidden-element" title="Site Display Settings">⚙️ Sites</button>
+                        </div>
+                    </div>
+
+                    <!-- ANALYSIS menu -->
+                    <div class="menu-dropdown" data-menu="analysis">
+                        <button class="menu-trigger" type="button">Analysis</button>
+                        <div class="menu-panel">
+                            <button id="benchmarkAnalysisBtn" class="menu-item" title="Load and analyze 5G benchmark points">📊 Benchmark</button>
+                            <button id="statisticsAnalysisBtn" class="menu-item" title="Analyze Mycom hourly statistics">📈 Statistics</button>
+                            <div class="menu-divider"></div>
+                            <button id="themeSettingsBtn" class="menu-item" title="Thematic Analysis Settings">🎨 Theme</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Map Layer -->
+                <select id="mapLayerSelect" class="header-select" title="Choose Map Layer">
+                    <option value="Streets" selected>Streets</option>
+                    <option value="Satellite">Satellite</option>
+                    <option value="Hybrid">Hybrid</option>
+                    <option value="Dark">Dark</option>
+                    <option value="Light">Light</option>
+                </select>
             </div>
             <div class="controls">
                 <div class="search-container">
@@ -157,7 +252,7 @@
 
                 <div class="setting-item">
                     <label class="setting-label" for="rangeSiteDist">Range (m): <span id="valRange">100</span></label>
-                    <input type="range" id="rangeSiteDist" min="50" max="1000" step="5" value="100"
+                    <input type="range" id="rangeSiteDist" min="10" max="1000" step="5" value="100"
                         class="setting-input" aria-label="Site Range">
                 </div>
 
@@ -175,10 +270,43 @@
                 </div>
 
                 <div class="setting-item">
+                    <label class="setting-label">Border</label>
+                    <div class="site-color-picker-container">
+                        <input type="color" id="pickerStrokeColor" value="#ffffff" class="site-color-picker" aria-label="Border Color">
+                        <span class="setting-label" style="margin-left:8px;font-size:11px;">Color</span>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeStrokeWidth">Border Width: <span id="valStrokeWidth">1</span>px</label>
+                    <input type="range" id="rangeStrokeWidth" min="0" max="6" step="0.5" value="1" class="setting-input" aria-label="Border Width">
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="rangeStrokeOpacity">Border Opacity: <span id="valStrokeOpacity">0.8</span></label>
+                    <input type="range" id="rangeStrokeOpacity" min="0" max="1" step="0.05" value="0.8" class="setting-input" aria-label="Border Opacity">
+                </div>
+
+                <div class="setting-item">
                     <label class="setting-label" for="siteColorBy">Color By</label>
                     <select id="siteColorBy" class="setting-input site-color-mode" aria-label="Site Color Mode">
                         <option value="tech">Technology</option>
                         <option value="identity">Cell Identity (RNC/CID)</option>
+                    </select>
+                </div>
+
+                <div class="setting-item">
+                    <label class="setting-label" for="siteMarkerShape">KML Site Shape</label>
+                    <select id="siteMarkerShape" class="setting-input site-color-mode" aria-label="KML Site Shape">
+                        <option value="diamond">Diamond</option>
+                        <option value="square">Square</option>
+                        <option value="triangle">Triangle</option>
+                        <option value="pentagon">Pentagon</option>
+                        <option value="hexagon">Hexagon</option>
+                        <option value="octagon">Octagon</option>
+                        <option value="star">Star</option>
+                        <option value="cross">Cross</option>
+                        <option value="circle">Circle</option>
                     </select>
                 </div>
 
@@ -244,6 +372,11 @@
             <div id="logs-sidebar" class="logs-sidebar-flex">
                 <div class="sidebar-resizer sidebar-resizer-right" data-target="logs-sidebar" aria-hidden="true"></div>
                 <h3>Loaded Logs</h3>
+                <div id="logsSearchContainer" class="logs-search-container">
+                    <span class="logs-search-icon">&#9906;</span>
+                    <input id="logsSearchInput" class="logs-search-input" type="text" placeholder="Search metrics / events…" oninput="window.filterLogsList(this.value)" autocomplete="off" spellcheck="false">
+                    <button id="logsSearchClear" class="logs-search-clear" onclick="window.filterLogsList(''); document.getElementById('logsSearchInput').value='';" title="Clear search">&#x2715;</button>
+                </div>
                 <div id="logsList" class="logs-list-container">
                     <div class="empty-state">No logs loaded</div>
                 </div>
@@ -254,7 +387,470 @@
             </div>
 
             <div id="center-pane" class="center-pane">
-                <div id="map" class="map-container" ondrop="window.drop(event)" ondragover="window.allowDrop(event)">
+                <div id="pairedSignalingHost" style="display:none;"></div>
+                <div id="pairedVerticalResizer" style="display:none;" aria-hidden="true"></div>
+                <div class="map-container" style="position: relative; flex: 1; display: flex; flex-direction: column;">
+                    <div id="map" style="flex: 1; width: 100%; height: 100%; z-index: 1;" ondrop="window.drop(event)" ondragover="window.allowDrop(event)">
+                    </div>
+                    <div id="bdd-tech-legend" style="display:none; position: absolute; top: 10px; right: 10px; z-index: 1000;">
+                        <div class="bdd-legend-header">
+                            <span id="bddLegendDragHandle" class="bdd-drag-icon" title="Drag to move">&#8285;</span>
+                            <span class="bdd-legend-title-text" contenteditable="true" spellcheck="false">BDD Sectors</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="2G">
+                            <label class="bdd-legend-color-wrap" title="Change 2G color">
+                                <span class="bdd-legend-dot" style="background:#3b82f6;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#3b82f6" data-tech="2G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="2G" title="Click to toggle 2G site names">2G &mdash; GSM</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="3G">
+                            <label class="bdd-legend-color-wrap" title="Change 3G color">
+                                <span class="bdd-legend-dot" style="background:#f59e0b;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#f59e0b" data-tech="3G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="3G" title="Click to toggle 3G site names">3G &mdash; UMTS</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="4G">
+                            <label class="bdd-legend-color-wrap" title="Change 4G color">
+                                <span class="bdd-legend-dot" style="background:#ef4444;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#ef4444" data-tech="4G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="4G" title="Click to toggle 4G site names">4G &mdash; LTE</span>
+                        </div>
+                        <div class="bdd-legend-row" data-tech="5G">
+                            <label class="bdd-legend-color-wrap" title="Change 5G color">
+                                <span class="bdd-legend-dot" style="background:#8b5cf6;"></span>
+                                <input type="color" class="bdd-legend-color-input" value="#8b5cf6" data-tech="5G">
+                            </label>
+                            <span class="bdd-legend-label" data-tech="5G" title="Click to toggle 5G site names">5G &mdash; NR</span>
+                        </div>
+                    </div>
+                </div>
+                <section id="benchmarkPanel" class="benchmark-panel" aria-label="5G benchmark analysis panel">
+                    <div id="benchmarkPanelHeader" class="benchmark-panel-header">
+                        <div>
+                            <h3 data-i18n="panelTitle">5G Benchmark Analysis</h3>
+                            <p data-i18n="panelSubtitle">IAM vs Orange vs INWI throughput comparison</p>
+                        </div>
+                        <div class="benchmark-panel-header-actions">
+                            <button id="benchmarkChooseFileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" data-i18n="btnChooseFile">Choose File</button>
+                            <button id="benchmarkNemoImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary" data-i18n="btnImportNemo">Import Nemo TXT</button>
+                            <button id="benchmarkMycomImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import Mycom</button>
+                            <button id="benchmarkReloadBtn" type="button" class="benchmark-toolbar-btn" data-i18n="btnReload">Reload</button>
+                            <button id="benchmarkLangToggle" type="button" class="benchmark-lang-toggle" title="Passer en français">FR</button>
+                            <button id="benchmarkMinimizeBtn" type="button" class="benchmark-minimize-btn" aria-label="Minimize benchmark panel" title="Minimize">&#8211;</button>
+                            <button id="benchmarkCloseBtn" type="button" class="benchmark-close-btn" aria-label="Close benchmark panel">&times;</button>
+                        </div>
+                    </div>
+                    <!-- resize handles -->
+                    <div class="benchmark-resize-handle benchmark-resize-e" data-dir="e"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-s" data-dir="s"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-se" data-dir="se"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-w" data-dir="w"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-sw" data-dir="sw"></div>
+                    <div class="benchmark-panel-body">
+                        <div id="benchmarkStatus" class="benchmark-status">No benchmark loaded.</div>
+                        <div class="benchmark-filter-grid benchmark-filter-grid--two">
+                            <label class="benchmark-filter-field">
+                                <span>DR</span>
+                                <select id="benchmarkDrFilter" class="form-control">
+                                    <option value="">All DR</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span>Ville</span>
+                                <select id="benchmarkVilleFilter" class="form-control">
+                                    <option value="">All villes</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="benchmark-filter-grid benchmark-filter-grid--three">
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--iam">IAM Rank</span>
+                                <select id="benchmarkIamRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--orange">Orange Rank</span>
+                                <select id="benchmarkOrangeRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                            <label class="benchmark-filter-field">
+                                <span class="benchmark-rank-badge benchmark-rank-badge--inwi">INWI Rank</span>
+                                <select id="benchmarkInwiRankFilter" class="form-control">
+                                    <option value="">All ranks</option>
+                                    <option value="1">Rank 1</option>
+                                    <option value="2">Rank 2</option>
+                                    <option value="3">Rank 3</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="benchmark-panel-tools">
+                            <label class="benchmark-checkbox">
+                                <input type="checkbox" id="benchmarkMappedOnly" checked>
+                                <span>Map only points with coordinates</span>
+                            </label>
+                            <button id="benchmarkResetFiltersBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Reset Filters</button>
+                        </div>
+                        <div id="benchmarkSummary" class="benchmark-summary-chart-card">
+                            <div class="benchmark-summary-chart-title">DL Throughput Ranking</div>
+                            <div class="benchmark-summary-chart-wrap">
+                                <canvas id="benchmarkSummaryChart"></canvas>
+                            </div>
+                            <div id="benchmarkSummaryNote" class="benchmark-summary-chart-note"></div>
+                        </div>
+                        <div class="benchmark-legend">
+                            <span class="benchmark-legend-chip benchmark-legend-chip-iam">IAM</span>
+                            <span class="benchmark-legend-chip benchmark-legend-chip-orange">Orange</span>
+                            <span class="benchmark-legend-chip benchmark-legend-chip-inwi">INWI</span>
+                        </div>
+                        <section id="benchmarkNemoSection" class="benchmark-nemo-section">
+                            <div class="benchmark-nemo-section-header">
+                                <div>
+                                    <h4>Nemo TXT Benchmark Analysis</h4>
+                                    <p id="benchmarkNemoMeta">No Nemo TXT benchmark loaded.</p>
+                                    <div id="benchmarkNemoDtScope" class="benchmark-nemo-dt-scope" hidden>
+                                        <span class="benchmark-nemo-dt-scope-label" data-i18n="dtScopeLabel">Analysis scope:</span>
+                                        <button type="button" id="benchmarkNemoDtScopePrev" class="benchmark-nemo-dt-nav" aria-label="Previous DT">◀</button>
+                                        <select id="benchmarkNemoDtScopeSelect" class="benchmark-nemo-dt-select"></select>
+                                        <button type="button" id="benchmarkNemoDtScopeNext" class="benchmark-nemo-dt-nav" aria-label="Next DT">▶</button>
+                                        <span id="benchmarkNemoDtScopeStatus" class="benchmark-nemo-dt-pos"></span>
+                                    </div>
+                                    <div id="benchmarkNemoWindowScope" class="benchmark-nemo-dt-scope" hidden>
+                                        <span class="benchmark-nemo-dt-scope-label" data-i18n="windowScopeLabel">Window filter:</span>
+                                        <select id="benchmarkNemoWindowScopeSelect" class="benchmark-nemo-dt-select"></select>
+                                        <span id="benchmarkNemoWindowScopeStatus" class="benchmark-nemo-dt-pos"></span>
+                                    </div>
+                                    <div id="benchmarkNemoModeControls" class="benchmark-nemo-mode-controls" hidden>
+                                        <button id="benchmarkNemoExpressBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Express analysis</button>
+                                        <button id="benchmarkNemoDetailedBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Detailled analysis</button>
+                                        <button id="benchmarkNemoEmaBtn" type="button" class="benchmark-nemo-mode-btn benchmark-nemo-mode-btn--ema" aria-pressed="false">EMA Analysis</button>
+                                    </div>
+                                    <div id="benchmarkNemoModePrompt" class="benchmark-nemo-mode-prompt" hidden>Import completed. Choose an analysis mode to display the benchmark.</div>
+                                    <div id="benchmarkNemoRankingCard" class="benchmark-nemo-card" style="margin-top:12px;">
+                                        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                                            <div class="benchmark-nemo-card-title" style="margin:0;">DL Ranking</div>
+                                            <div id="benchmarkNemoRankingMetricToggle" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                                        </div>
+                                        <div class="benchmark-nemo-chart-wrap">
+                                            <canvas id="benchmarkNemoRankingChart"></canvas>
+                                        </div>
+                                        <div id="benchmarkNemoRankingNote" class="benchmark-nemo-chart-note"></div>
+                                    </div>
+                            <div id="benchmarkNemoIamServingCells" class="benchmark-nemo-serving-cells" style="display:none;"></div>
+                            <div id="benchmarkNemoOrangeServingCells" class="benchmark-nemo-serving-cells" style="display:none; margin-top: 10px;"></div>
+                            <div id="benchmarkNemoInwiServingCells" class="benchmark-nemo-serving-cells" style="display:none; margin-top: 10px;"></div>
+                                </div>
+                            </div>
+                            <div id="benchmarkNemoScorecardCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Executive scorecard</div>
+                                <div style="color:#64748b;font-size:11px;margin-bottom:10px">Per-operator winner by dimension (this DT). n=1 drive test — directional, not statistically significant.</div>
+                                <div id="benchmarkNemoScorecardBody"></div>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="throughput" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">Throughput &amp; Capacity</button>
+                                <div class="bn-section-body">
+                                    <!-- DL Throughput Timeline — first visible content after title -->
+                                    <div id="benchmarkNemoDlTimelineCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                                            <div class="benchmark-nemo-card-title" id="benchmarkNemoDlTimelineTitle" style="margin:0;border-bottom:none;padding-bottom:0">DL Throughput Timeline</div>
+                                            <div id="benchmarkNemoDlMetricToggle" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+                                        </div>
+                                        <div style="height:280px;position:relative">
+                                            <canvas id="benchmarkNemoDlTimelineChart"></canvas>
+                                        </div>
+                                        <div id="benchmarkNemoDlTimelineStats" style="margin-top:11px;padding-top:10px;border-top:1px solid var(--bn-divider);display:flex;flex-wrap:wrap;gap:4px 20px;align-items:center"></div>
+                                        <div id="benchmarkNemoSlowStartNote" class="benchmark-nemo-callout" hidden></div>
+                                        <div id="benchmarkNemoDlMarkerLegend" style="display:none;border-top:1px solid var(--bn-divider);margin-top:8px;padding-top:6px"></div>
+                                        <div id="benchmarkNemoDlLayerGap" style="margin-top:10px"></div>
+                                    </div>
+
+                                    <!-- Startup latency: connect (DAA->DAC) + request (DAC->DREQ) = delay to start download -->
+                                    <div id="benchmarkNemoStartupLatencyCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Startup latency — delay to download start (per operator)</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:12px">Delay from session start to download request (download session Event IDs) = <span style="color:#06b6d4">connect</span> (DAA→DAC) + <span style="color:#818cf8">request</span> (DAC→DREQ). Shorter is better.</div>
+                                        <div style="height:170px;position:relative">
+                                            <canvas id="benchmarkNemoStartupLatencyChart"></canvas>
+                                        </div>
+                                    </div>
+
+                                    <!-- Upload throughput (HTTP uplink session statistics) -->
+                                    <div id="benchmarkNemoUploadCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Upload throughput (per operator)</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:12px">HTTP upload session — application UL throughput (Bytes UL × 8 / transfer time). Higher is better.</div>
+                                        <div style="height:180px;position:relative">
+                                            <canvas id="benchmarkNemoUploadChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="reliability" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">Latency &amp; Reliability</button>
+                                <div class="bn-section-body">
+                                    <!-- Latency & reliability (transfer status per operator) -->
+                                    <div id="benchmarkNemoReliabilityCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 8px 0">Latency &amp; reliability (per operator)</div>
+                                        <div id="benchmarkNemoReliabilityBody"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bn-section" data-bn-section="rf" style="display:none">
+                                <button type="button" class="bn-section-header" aria-expanded="true">RF Diagnosis</button>
+                                <div class="bn-section-body">
+                                    <!-- Authoritative RF & layer split, scoped to the download session by Nemo -->
+                                    <div id="benchmarkNemoAuthRfCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Download-session RF &amp; layer split</div>
+                                        <div style="color:#64748b;font-size:11px;margin-bottom:10px">RF/PHY averaged over the download session window (DAA→DAD), and the per-second vs byte-based throughput cross-check.</div>
+                                        <div id="benchmarkNemoAuthRfBody"></div>
+                                    </div>
+
+                                    <!-- DL Throughput Layer Analysis (App -> MAC -> PHY) -->
+                                    <div id="benchmarkNemoLayerAnalysis" class="benchmark-nemo-card" style="display:none;margin-bottom:16px;overflow:hidden"></div>
+                                </div>
+                            </div>
+
+
+                            <!-- Root cause banner -->
+                            <div id="benchmarkNemoSummary" class="benchmark-nemo-summary"></div>
+
+                            <!-- 1. Distribution charts under DL timeline -->
+                            <div class="benchmark-nemo-grid" id="benchmarkNemoKeyChartsGrid">
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secPdschModulation">PDSCH Modulation & Spectral Efficiency</div>
+                                    <div id="benchmarkNemoModulationCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoModulationPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secBandExposure">NR Band Exposure Analysis</div>
+                                    <div id="benchmarkNemoBandCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoBandPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secCaScells">Carrier Aggregation / SCells Analysis</div>
+                                    <div id="benchmarkNemoCaCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoCaPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title" data-i18n="secMimoRank">MIMO Rank Analysis</div>
+                                    <div id="benchmarkNemoMimoCharts" class="benchmark-nemo-mini-pies"></div>
+                                    <div id="benchmarkNemoMimoPieNote" class="benchmark-nemo-chart-note"></div>
+                                </div>
+                            </div>
+
+                            <!-- 1b. Professional Executive Summary -->
+                            <div id="benchmarkNemoProfExecSummary" class="benchmark-nemo-card" style="display:none;"></div>
+
+                            <!-- 1c. EMA KPI Table -->
+                            <div id="benchmarkNemoEmaPanel" class="benchmark-nemo-card" style="display:none;"></div>
+
+                            <!-- 2. Executive Conclusion -->
+                            <div id="benchmarkNemoExecutiveConclusion" class="benchmark-nemo-card"></div>
+
+                            <!-- 3. Operators table -->
+                            <div id="benchmarkNemoOperatorsCard" class="benchmark-nemo-table-card">
+                                <div class="benchmark-nemo-card-title">Operators</div>
+                                <div class="benchmark-nemo-table-wrap">
+                                    <table class="benchmark-config-table benchmark-nemo-table">
+                                        <thead>
+                                            <tr>
+                                                <th data-i18n="thRank">Rank</th>
+                                                <th data-i18n="thOperator">Operator</th>
+                                                <th data-i18n="th5gStatus">5G Status</th>
+                                                <th data-i18n="thAvgDl">Avg DL</th>
+                                                <th data-i18n="thAvgDlAppRate">Avg DL (App. rate DL)</th>
+                                                <th data-i18n="thMedianDl">Median DL</th>
+                                                <th data-i18n="thTests">Tests</th>
+                                                <th data-i18n="thSuccess">Success</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="benchmarkNemoOperatorsBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 3b. Data transfer per DT (download/upload completion) -->
+                            <div id="benchmarkNemoTransfersCard" class="benchmark-nemo-table-card">
+                                <div class="benchmark-nemo-card-title" data-i18n="thTransfersTitle">Data transfer per DT (download / upload completion)</div>
+                                <div id="benchmarkNemoTransfersSummary" class="benchmark-nemo-transfers-summary"></div>
+                                <div id="benchmarkNemoTransfersControls" class="benchmark-nemo-transfers-controls">
+                                    <button type="button" id="benchmarkNemoTransfersPrev" class="benchmark-nemo-dt-nav" aria-label="Previous DT">◀</button>
+                                    <select id="benchmarkNemoTransfersSelect" class="benchmark-nemo-dt-select"></select>
+                                    <button type="button" id="benchmarkNemoTransfersNext" class="benchmark-nemo-dt-nav" aria-label="Next DT">▶</button>
+                                    <span id="benchmarkNemoTransfersPos" class="benchmark-nemo-dt-pos"></span>
+                                </div>
+                                <div class="benchmark-nemo-table-wrap">
+                                    <table class="benchmark-config-table benchmark-nemo-table">
+                                        <thead>
+                                            <tr>
+                                                <th data-i18n="thOperator">Operator</th>
+                                                <th data-i18n="thMeasurementBj">Measurement (BJ)</th>
+                                                <th data-i18n="thDirection">Direction</th>
+                                                <th data-i18n="thTarget">Target</th>
+                                                <th data-i18n="thTransferred">Transferred</th>
+                                                <th data-i18n="thCompletion">Completion %</th>
+                                                <th data-i18n="thStatus">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="benchmarkNemoTransfersBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 4. NR Band Exposure -->
+                            <div id="benchmarkNemoBandExposure" class="benchmark-nemo-table-card"></div>
+
+                            <!-- Remaining analysis sections -->
+                            <div id="benchmarkNemoRankingInterpretation" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoTechnologyStatus" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoMycomContext" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoDiagnosis" class="benchmark-nemo-diagnosis"></div>
+                            <div id="benchmarkNemoDeep" class="benchmark-nemo-deep" style="display:none;"></div>
+                            <div id="benchmarkNemoBest5gComparator" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoWeaknessChain" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoRfExclusion" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoSchedulerPrb" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoPdschModulation" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoCaScells" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoMimoRank" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoBlerRetx" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoTransportGap" class="benchmark-nemo-table-card"></div>
+                            <div id="benchmarkNemoRecommendations" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoRulesApplied" class="benchmark-nemo-card"></div>
+                            <div id="benchmarkNemoQaChecklist" class="benchmark-nemo-table-card"></div>
+
+                            <!-- Missing KPI — collapsible -->
+                            <div id="benchmarkNemoMissingKpiWrap" class="benchmark-nemo-collapsible">
+                                <button class="benchmark-nemo-collapse-toggle" id="benchmarkNemoMissingKpiToggle" aria-expanded="false">
+                                    <span class="benchmark-nemo-collapse-icon">▶</span>
+                                    Missing KPI / Export Quality
+                                </button>
+                                <div id="benchmarkNemoMissingKpi" class="benchmark-nemo-table-card benchmark-nemo-collapse-body" hidden></div>
+                            </div>
+
+                            <!-- Extra charts grid -->
+                            <div class="benchmark-nemo-grid" id="benchmarkNemoChartsGrid">
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">DL Throughput Ranking (Avg vs Median)</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoAvgVsMedianChart"></canvas>
+                                    </div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">RF Comparison — 5G Operators</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoRfChart"></canvas>
+                                    </div>
+                                </div>
+                                <div class="benchmark-nemo-card">
+                                    <div class="benchmark-nemo-card-title">Root Cause Score</div>
+                                    <div class="benchmark-nemo-chart-wrap">
+                                        <canvas id="benchmarkNemoRootCauseChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                </section>
+                <section id="statisticsPanel" class="benchmark-panel statistics-panel" aria-label="Mycom statistics analysis panel">
+                    <div id="statisticsPanelHeader" class="benchmark-panel-header">
+                        <div>
+                            <h3>Statistic Analysis</h3>
+                            <p>Mycom hourly export anomaly detection and cell/site investigation</p>
+                        </div>
+                        <div class="benchmark-panel-header-actions">
+                            <button id="statisticsImportBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import Mycom</button>
+                            <button id="statisticsReloadBtn" type="button" class="benchmark-toolbar-btn">Reload</button>
+                            <button id="statisticsCloseBtn" type="button" class="benchmark-close-btn" aria-label="Close statistics panel">&times;</button>
+                        </div>
+                    </div>
+                    <div class="benchmark-resize-handle benchmark-resize-e" data-dir="e"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-s" data-dir="s"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-se" data-dir="se"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-w" data-dir="w"></div>
+                    <div class="benchmark-resize-handle benchmark-resize-sw" data-dir="sw"></div>
+                    <div class="benchmark-panel-body">
+                        <div id="statisticsStatus" class="benchmark-status">No Mycom statistics export loaded.</div>
+                        <div id="statisticsThresholdsCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Anomaly Thresholds</div>
+                            <div id="statisticsThresholdsGrid" class="benchmark-mycom-threshold-grid"></div>
+                        </div>
+                        <div id="statisticsSummaryCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Global Anomaly Summary</div>
+                            <div id="statisticsSummaryChips" class="benchmark-mycom-context-chips"></div>
+                            <div class="benchmark-panel-tools" style="margin-top:12px;">
+                                <label class="benchmark-filter-field" style="min-width:260px;">
+                                    <span>Anomaly filter</span>
+                                    <select id="statisticsAnomalyFilter" class="form-control">
+                                        <option value="">All anomalies</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div id="statisticsSummaryTable" class="benchmark-nemo-table-wrap" style="margin-top:12px;"></div>
+                        </div>
+                        <div id="statisticsChartsCard" class="benchmark-nemo-grid">
+                            <div class="benchmark-nemo-card">
+                                <div class="benchmark-nemo-card-title">Anomaly Distribution</div>
+                                <div class="benchmark-nemo-chart-wrap">
+                                    <canvas id="statisticsAnomalyChart"></canvas>
+                                </div>
+                                <div id="statisticsAnomalyChartNote" class="benchmark-nemo-chart-note"></div>
+                            </div>
+                            <div class="benchmark-nemo-card">
+                                <div class="benchmark-nemo-card-title">Hourly KPI Evolution</div>
+                                <div class="benchmark-nemo-chart-wrap">
+                                    <canvas id="statisticsHourlyChart"></canvas>
+                                </div>
+                                <div id="statisticsHourlyChartNote" class="benchmark-nemo-chart-note"></div>
+                            </div>
+                        </div>
+                        <div id="statisticsTopCellsCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Most Affected Cells</div>
+                            <div id="statisticsTopCellsTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                        <div id="statisticsSearchCard" class="benchmark-nemo-card">
+                            <div class="benchmark-nemo-card-title">Cell / Site Investigation</div>
+                            <div class="benchmark-panel-tools" style="margin-top:8px;">
+                                <label class="benchmark-filter-field" style="flex:1; min-width:280px;">
+                                    <span>Cell or site name</span>
+                                    <input id="statisticsQueryInput" type="text" class="form-control" placeholder="Type a cell name, gNB key, or site name">
+                                </label>
+                                <button id="statisticsQueryBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Run analysis</button>
+                                <button id="statisticsQueryClearBtn" type="button" class="benchmark-toolbar-btn">Clear</button>
+                            </div>
+                            <div id="statisticsSearchSummary" class="benchmark-nemo-diagnosis-text" style="margin-top:12px;"></div>
+                        </div>
+                        <div id="statisticsMatchedCellsCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Matched Cells / Site Members</div>
+                            <div id="statisticsMatchedCellsTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                        <div id="statisticsCellHoursCard" class="benchmark-nemo-table-card">
+                            <div class="benchmark-nemo-card-title">Hourly Detail</div>
+                            <div id="statisticsCellHoursTable" class="benchmark-nemo-table-wrap"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <div id="sitePlacementBanner" style="display:none;" class="site-placement-banner">
+                    Click on map to place <strong id="placementSiteNameLabel"></strong>
+                    <span class="site-placement-esc">— Esc to cancel</span>
+                </div>
+                <div id="pairedHorizontalResizer" style="display:none;" aria-hidden="true"></div>
+                <div id="pairedBottomRightHost" style="display:none;">
+                    <div id="pairedPointDetailsHost" style="display:none;"></div>
+                    <div id="pairedBottomStackResizer" style="display:none;" aria-hidden="true"></div>
+                    <div id="pairedLayersHost" style="display:none;"></div>
                 </div>
 
 
@@ -299,41 +895,52 @@
     <!-- Signaling Modal -->
     <!-- Signaling Modal -->
     <div id="signalingModal" class="modal">
-        <div class="modal-content signaling-modal-content">
-            <div class="modal-header signaling-modal-header">
-                <div class="signaling-header-left">
+        <div class="modal-content signaling-modal-content" style="display:flex; flex-direction:column; overflow:hidden;">
+            <div class="modal-header signaling-modal-header" id="signalingModalHeader" style="flex:0 0 auto; position:sticky; top:0; z-index:3; background:#1f2937; cursor:grab;">
+                <div class="signaling-header-left" style="display:flex; align-items:center; gap:20px;">
                     <h3 id="signalingModalTitle" class="signaling-modal-title">Signaling Data</h3>
-                    <select id="signalingFilter" onchange="filterSignaling()" class="signaling-filter"
-                        aria-label="Signaling Type Filter">
-                        <option value="ALL">All Types</option>
-                        <option value="RRC">RRC Only</option>
-                        <option value="L3">L3 Only</option>
-                    </select>
+                    <div style="display:flex; align-items:center; gap:15px;">
+                        <input id="signalingSearch" type="text" oninput="filterSignaling()" placeholder="Search message or full decoded text"
+                            class="signaling-filter" aria-label="Signaling Search" style="min-width:320px;" />
+                        <label style="display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:12px; cursor:pointer; user-select:none;">
+                            <input type="checkbox" id="signalingSyncMap" checked style="cursor:pointer;" />
+                            Sync to Map
+                        </label>
+                    </div>
                 </div>
                 <span class="close signaling-close" onclick="closeSignalingModal()">&times;</span>
             </div>
-            <div class="modal-body signaling-modal-body">
-                <table class="data-table signaling-table">
-                    <thead class="signaling-thead">
-                        <tr>
-                            <th class="th-padding">Time
-                            </th>
-                            <th class="th-padding">Type
-                            </th>
-                            <th class="th-padding">
-                                Direction</th>
-                            <th class="th-padding">Message
-                            </th>
-                            <th class="th-padding">Release Cause
-                            </th>
-                            <th class="th-padding">Details
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody id="signalingTableBody">
-                        <!-- Data rows -->
-                    </tbody>
-                </table>
+            <div id="signalingLinkedSummary" style="padding:6px 18px 0 18px; color:#cbd5e1; font-size:12px;">
+                Select a signaling row to inspect the linked map point.
+            </div>
+            <div id="signalingBody" class="modal-body signaling-modal-body" style="display:flex; flex-direction:column; gap:0; align-items:stretch; flex:1 1 auto; min-height:0; height:auto; overflow:hidden;">
+                <div id="signalingTopPane" style="flex:0 0 58%; min-width:0; min-height:180px; display:flex; flex-direction:column; overflow:auto; padding-right:0;">
+                    <table class="data-table signaling-table">
+                        <thead class="signaling-thead">
+                            <tr>
+                                <th class="th-padding">Time
+                                </th>
+                                <th class="th-padding">Type
+                                </th>
+                                <th class="th-padding">
+                                    Direction</th>
+                                <th class="th-padding">Message
+                                </th>
+                                <th class="th-padding">Flow
+                                </th>
+                                <th class="th-padding">Details</th>
+                                <th class="th-padding" style="width:60px; text-align:center;">Map</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signalingTableBody">
+                            <!-- Data rows -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="signalingSplitResizer" style="flex:0 0 8px; height:8px; cursor:ns-resize; background:linear-gradient(180deg, rgba(51,65,85,0.15) 0%, rgba(100,116,139,0.45) 50%, rgba(51,65,85,0.15) 100%); border-top:1px solid rgba(148,163,184,0.18); border-bottom:1px solid rgba(148,163,184,0.18);"></div>
+                <div id="signalingSplitDetail" style="flex:1 1 auto; width:auto; min-width:0; max-width:none; min-height:140px; border-top:1px solid rgba(148,163,184,0.18); padding:10px 0 0 0; overflow:auto; align-self:stretch;">
+                    <div id="signalingSelectionSummary" style="color:#94a3b8; font-size:12px; padding-top:8px;">Select a signaling row to inspect the decoded message.</div>
+                </div>
             </div>
         </div>
     </div>
@@ -404,6 +1011,9 @@
 
     <!-- SmartCare Sidebar (Right Side) -->
     <aside id="smartcare-sidebar">
+        <div id="smartcareFloatingHeader" class="smartcare-floating-header">
+            <span>Layers</span>
+        </div>
         <div class="sidebar-resizer sidebar-resizer-left" data-target="smartcare-sidebar" aria-hidden="true"></div>
         <div class="sidebar-header">
             <h3>DT Layers</h3>
@@ -414,6 +1024,26 @@
 
         <div class="sidebar-header">
             <h3>Site Layers</h3>
+        </div>
+        <div class="global-range-bar">
+            <div class="global-range-label">
+                <span>Range (all)</span>
+                <span id="globalRangeVal">100</span><span>m</span>
+            </div>
+            <input type="range" id="globalRangeSlider" min="10" max="2000" step="10" value="100" class="global-range-input">
+        </div>
+        <div class="bdd-update-bar">
+            <span id="bddStatusText" class="bdd-status-text">BDD: not loaded</span>
+            <label class="bdd-update-btn" title="Import a new BDD xlsx file">
+                Update BDD
+                <input type="file" id="bddUpdateInput" accept=".xlsx,.xls" style="display:none;">
+            </label>
+            <button type="button" class="bdd-update-btn bdd-export-btn" onclick="window.exportAllSites('csv')" title="Export all sites as CSV">⬇ CSV</button>
+            <button type="button" class="bdd-update-btn bdd-export-btn" onclick="window.exportAllSites('xlsx')" title="Export all sites as XLSX">⬇ XLSX</button>
+        </div>
+        <div class="site-search-wrap">
+            <input type="text" id="siteSearchInput" class="site-search-input" placeholder="🔍 Search site…" autocomplete="off">
+            <div id="siteSearchDropdown" class="site-search-dropdown" style="display:none;"></div>
         </div>
         <div id="sites-layer-list">
             <!-- Site Layers added dynamically -->
@@ -429,10 +1059,11 @@
         </div>
     </aside>
 
-    <script src="map_renderer.js?v=81"></script>
+    <script src="site_match_utils.js?v=1"></script>
+    <script src="map_renderer.js?v=98"></script>
     <script src="analyze_stats.js?v=2"></script>
-    <script src="metric_registry.js?v=2"></script>
-    <script src="parser.js?v=75"></script>
+    <script src="metric_registry.js?v=7"></script>
+    <script src="parser.js?v=85"></script>
     <script src="lte_ho_analysis.js?v=6"></script>
     <!-- KML Export Choice Modal -->
     <!-- KML Export Choice Modal -->
@@ -467,15 +1098,22 @@
                     <button id="btnImportSites" class="btn">Sites (Excel/CSV)</button>
                     <button id="btnImportSmartCare" class="btn">SmartCare Data</button>
                     <button id="btnImportLog" class="btn">Log File (NMF/CSV)</button>
+                    <button id="btnImportNemoLTE" class="btn">Nemo LTE / NR Export</button>
                 </div>
+                <input type="file" id="nemoLteFileInput" multiple accept=".txt" style="display:none">
             </div>
         </div>
     </div>
 
     <!-- Scripts -->
-    <script src="theme_config.js"></script>
-    <script src="app.js?v=v405"></script>
-    <script src="trp_import_ui.js?v=28"></script>
+    <script src="benchmark_nemo_ranking_state.js?v=1"></script>
+    <script src="benchmark_nemo_scorecard_state.js?v=2"></script>
+    <script src="benchmark_nemo_ui_state.js?v=1"></script>
+    <script src="theme_v2.js?v=v595"></script>
+    <script src="window_manager.js?v=1"></script>
+    <script src="app.js?v=v629"></script>
+    <script src="local_ai_ui.js?v=6"></script>
+    <script src="trp_import_ui.js?v=37"></script>
     <!-- User Point Modal -->
     <div id="userPointModal" class="modal">
         <div class="modal-content user-point-modal-content">
@@ -506,6 +1144,82 @@
         </div>
     </div>
     <!-- Site Editor Modal (Draggable) -->
+    <!-- Quick-place: enter site name then click map -->
+    <div id="addSiteQuickModal" class="modal">
+        <div class="modal-content glass-modal-content quick-place-modal" id="addSiteQuickContent">
+            <div class="modal-header glass-modal-header" id="addSiteQuickHeader">
+                <h3>📍 Add Site</h3>
+                <span class="close" onclick="document.getElementById('addSiteQuickModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <div class="form-group">
+                    <label for="quickSiteName">Site Name</label>
+                    <input type="text" id="quickSiteName" class="form-control" placeholder="e.g. SITE_001">
+                </div>
+                <p class="form-hint">Creates 3 sectors (0°, 120°, 240°) for 2G, 3G and 4G at the clicked location.</p>
+                <div class="editor-footer" style="margin-top:14px;">
+                    <button class="btn" onclick="document.getElementById('addSiteQuickModal').style.display='none'">Cancel</button>
+                    <button class="btn btn-green" onclick="window.startSitePlacement()">Place on Map →</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Comprehensive site editor (manual table + xlsx/csv import) -->
+    <div id="customSiteEditorModal" class="modal">
+        <div class="modal-content glass-modal-content site-editor-size" id="customSiteEditorContent">
+            <div class="modal-header glass-modal-header" id="customSiteEditorHeader">
+                <h3 id="customSiteEditorTitle">Edit Site</h3>
+                <span class="close" onclick="document.getElementById('customSiteEditorModal').style.display='none'">&times;</span>
+            </div>
+            <div class="modal-body glass-modal-body">
+                <div class="site-edit-tabs">
+                    <button class="site-edit-tab active" id="tabManual" onclick="window.showSiteEditTab('manual')">Manual</button>
+                    <button class="site-edit-tab" id="tabImport" onclick="window.showSiteEditTab('import')">Import xlsx / csv</button>
+                </div>
+
+                <div id="siteEditManualPane">
+                    <div class="site-edit-table-wrap">
+                        <table class="site-edit-table">
+                            <thead>
+                                <tr>
+                                    <th rowspan="2">Sector</th>
+                                    <th rowspan="2">Az&nbsp;(°)</th>
+                                    <th colspan="4" class="se-tech-head se-th-2g">2G</th>
+                                    <th colspan="4" class="se-tech-head se-th-3g">3G</th>
+                                    <th colspan="4" class="se-tech-head se-th-4g">4G</th>
+                                </tr>
+                                <tr>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                    <th>Cell Name</th><th>Cell ID</th><th>PCI/SC</th><th>Freq</th>
+                                </tr>
+                            </thead>
+                            <tbody id="siteEditTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="siteEditImportPane" style="display:none;">
+                    <p class="form-hint" style="margin-bottom:10px;">
+                        Supported columns (case-insensitive):
+                        <code>tech, azimuth, cell_name, cell_id, pci, sc, freq</code>
+                    </p>
+                    <div class="form-group">
+                        <label for="siteImportFile">xlsx / csv file</label>
+                        <input type="file" id="siteImportFile" accept=".csv,.xlsx,.xls,.kml" class="form-control">
+                    </div>
+                    <div id="siteImportPreview"></div>
+                </div>
+
+                <div class="editor-footer" style="margin-top:14px;">
+                    <button class="btn" onclick="document.getElementById('customSiteEditorModal').style.display='none'">Close</button>
+                    <button class="btn btn-green" onclick="window.saveCustomSite()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="siteEditorModal" class="modal">
         <!-- Added .site-editor-size to strictly keep it wider -->
         <div class="modal-content glass-modal-content site-editor-size">
@@ -586,7 +1300,252 @@
                 </div>
             </div>
         </div>
+        </div>
     </div>
+
+    <!-- Import Progress Modal -->
+    <div id="importProgressModal" class="progress-modal">
+        <div class="progress-modal-content">
+            <div class="progress-glow-orb progress-glow-orb-a"></div>
+            <div class="progress-glow-orb progress-glow-orb-b"></div>
+            <div class="modal-header progress-modal-header">
+                <div class="progress-header-copy">
+                    <div class="progress-eyebrow">Upload in progress</div>
+                    <h3 id="progressTitle">Importing Data...</h3>
+                    <div class="progress-file-row">
+                        <div id="progressFileName" class="progress-file-name">Waiting for file…</div>
+                        <div id="progressFileType" class="progress-file-type-badge">FILE</div>
+                    </div>
+                </div>
+                <div id="progressStage" class="progress-stage-pill">Preparing</div>
+            </div>
+            <div class="modal-body progress-modal-body">
+                <div class="progress-hero">
+                    <div id="progressHeroIcon" class="progress-hero-icon">⬆</div>
+                    <div class="progress-hero-copy">
+                        <div class="progress-hero-title">Processing your file</div>
+                        <div id="progressDetail" class="progress-detail">Initializing parser...</div>
+                    </div>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-sheen"></div>
+                    <div id="importProgressBar" class="progress-bar-fill"></div>
+                </div>
+                <div class="progress-meta-row">
+                    <div id="progressText" class="progress-percentage">0%</div>
+                    <div class="progress-meta-caption">Please keep this window open</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="localAiModal" class="local-ai-modal-overlay" style="display:none;">
+        <div class="local-ai-modal">
+            <div class="local-ai-modal-header">
+                <div>
+                    <div class="local-ai-eyebrow">Local telecom AI</div>
+                    <h3 id="localAiModalTitle">Local AI Analysis</h3>
+                    <div class="local-ai-subtitle" id="localAiModalSubtitle">All logfile data stays on your Mac and is sent only to your local AI server.</div>
+                </div>
+                <button id="localAiCloseBtn" class="local-ai-close-btn" aria-label="Close Local AI panel">&times;</button>
+            </div>
+            <div class="local-ai-modal-body">
+                <div class="local-ai-control-panel">
+                    <div class="local-ai-status-grid">
+                        <div class="local-ai-status-card">
+                            <div class="local-ai-status-label" id="localAiBackendLabel">Local AI</div>
+                            <div id="localAiHealthBadge" class="local-ai-status-badge is-pending">Checking…</div>
+                            <div id="localAiHealthText" class="local-ai-status-text">Waiting for health check.</div>
+                        </div>
+                        <div class="local-ai-status-card">
+                            <div class="local-ai-status-label">Configured Model</div>
+                            <div id="localAiModelBadge" class="local-ai-status-badge is-pending">Checking…</div>
+                            <div id="localAiModelText" class="local-ai-status-text">Waiting for model check.</div>
+                        </div>
+                    </div>
+                    <form id="localAiUploadForm" class="local-ai-upload-form">
+                        <label class="local-ai-file-label" for="localAiFileInput">Plain-text logfile</label>
+                        <input type="file" id="localAiFileInput" accept=".txt,.log,.nmf,.csv" class="local-ai-file-input" hidden>
+                        <div id="localAiSelectedFile" class="local-ai-selected-file">No file selected. You can also analyze the log already loaded in the app.</div>
+                        <div class="local-ai-source-help">Direct upload supports plain-text files. For imported `.xlsx` logs, use the loaded-log button below.</div>
+                        <div class="local-ai-form-actions">
+                            <button type="button" id="localAiChooseFileBtn" class="btn header-btn">Choose File</button>
+                            <button type="button" id="localAiUseLoadedBtn" class="btn header-btn">Use Loaded Log</button>
+                            <button type="button" id="localAiRefreshBtn" class="btn header-btn">Refresh Status</button>
+                            <button type="submit" id="localAiAnalyzeBtn" class="btn header-btn local-ai-run-btn" disabled>Analyze Locally</button>
+                        </div>
+                    </form>
+                    <div class="local-ai-progress-block">
+                        <div class="local-ai-progress-topline">
+                            <div id="localAiProgressText">Idle</div>
+                            <div id="localAiProgressValue">0%</div>
+                        </div>
+                        <div class="local-ai-progress-bar">
+                            <div id="localAiProgressBar" class="local-ai-progress-fill"></div>
+                        </div>
+                        <div id="localAiErrorBox" class="local-ai-error-box" hidden></div>
+                    </div>
+                </div>
+                <div id="localAiResults" class="local-ai-results-panel">
+                    <div class="local-ai-results-empty">
+                        Upload a logfile to get chunk-level telecom troubleshooting with local Gemma 4 analysis.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+<!-- LOS Simulator panel — button is in the header toolbar -->
+<div id="los-panel">
+  <div id="los-panel-header">
+    📡 Line-of-Sight Simulator
+    <div style="display:flex;gap:4px;align-items:center">
+      <button id="los-panel-collapse" title="Hide/show controls" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:13px;padding:2px 5px;line-height:1">▲</button>
+      <button id="los-panel-close" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- TOP PANE: fields + actions + results (resizable) -->
+  <div id="los-top-pane">
+    <div id="los-instructions">
+      <strong>Step 1</strong> — click <em>Set Observer</em>, then click the map.<br>
+      <strong>Step 2</strong> — click <em>Set Target</em>, then click the map.
+    </div>
+
+    <div class="los-field-group">
+      <div class="los-field-row">
+        <label>Selected observer AGL (m)</label>
+        <input type="number" id="los-obs-agl" value="25" min="0" max="500" step="0.5">
+      </div>
+      <div class="los-field-row">
+        <label>Selected observer</label>
+        <span class="los-coord-display" id="los-obs-coord">— click map —</span>
+      </div>
+      <div class="los-field-row">
+        <label>Target AGL (m)</label>
+        <input type="number" id="los-tgt-agl" value="1.5" min="0" max="500" step="0.5">
+      </div>
+      <div class="los-field-row">
+        <label>Target pos</label>
+        <span class="los-coord-display" id="los-tgt-coord">— click map —</span>
+      </div>
+      <div class="los-field-row">
+        <label>Frequency (MHz)</label>
+        <input type="number" id="los-freq" value="1800" min="400" max="4000" step="1">
+      </div>
+      <div class="los-field-row">
+        <label>Sample spacing (m)</label>
+        <input type="number" id="los-spacing" value="2" min="0.5" max="50" step="0.5">
+      </div>
+      <div class="los-field-row" style="align-items:flex-start">
+        <label>Terrain sample</label>
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:0;flex:1;">
+          <span class="los-coord-display" id="los-sample-coord">— click Inspect, then map —</span>
+          <span class="los-coord-display" id="los-sample-value" style="white-space:normal;line-height:1.35;">Ground: —</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="los-actions">
+      <button class="los-btn los-btn--secondary" id="los-btn-sample">🧭 Inspect</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-sample-line">📈 Inspect Line</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-observer">📍 Add Observer</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-clear-observers">🗑 Clear Obs</button>
+      <button class="los-btn los-btn--secondary" id="los-btn-target">🎯 Target</button>
+      <button class="los-btn los-btn--primary"   id="los-btn-compute">Compute LOS</button>
+      <button class="los-btn los-btn--viewshed"  id="los-btn-viewshed" title="Radial visibility sweep from observer">👁 Viewshed</button>
+      <div class="los-spinner" id="los-spinner"></div>
+    </div>
+
+    <div id="los-observers-wrap" style="padding:8px 14px 6px;border-top:1px solid rgba(30,58,95,0.55);">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-size:11px;font-weight:700;letter-spacing:0.08em;color:#93c5fd;text-transform:uppercase;">Observers</span>
+        <span id="los-observers-summary" style="font-size:11px;color:#94a3b8;">No observers yet</span>
+      </div>
+      <div id="los-observers-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+
+    <!-- Viewshed options (shown when viewshed is active) -->
+    <div id="los-viewshed-opts" style="display:none">
+      <div class="los-field-group" style="border-top:1px solid #1e3a5f;padding:6px 14px;">
+        <div class="los-field-row">
+          <label>Max radius (m)</label>
+          <input type="number" id="los-vs-radius" value="1000" min="100" max="5000" step="100">
+        </div>
+        <div class="los-field-row">
+          <label>Az step (°)</label>
+          <input type="number" id="los-vs-az" value="2" min="0.5" max="10" step="0.5">
+        </div>
+      </div>
+    </div>
+
+    <div id="los-result">
+      <div id="los-badge"></div>
+      <div class="los-stat-grid" id="los-stats"></div>
+    </div>
+  </div>
+
+  <!-- MAP OVERLAY TOGGLES (control what's shown on the main map) -->
+  <div id="los-layer-bar">
+    <button id="los-btn-compute-bar" class="los-layer-btn los-layer-btn--compute" title="Compute Line of Sight">⚡ Calc LOS</button>
+    <span class="los-layer-sep"></span>
+    <span style="font-size:10px;color:#64748b;align-self:center;margin-right:2px">Map:</span>
+    <button class="los-layer-btn los-layer-btn--active" id="los-toggle-buildings"  title="Toggle buildings on main map">🏢 Bldgs</button>
+    <button class="los-layer-btn los-layer-btn--active" id="los-toggle-vegetation" title="Toggle vegetation on main map">🌳 Veg</button>
+    <button class="los-layer-btn"                       id="los-toggle-viewshed"   title="Toggle viewshed layer" style="display:none">👁 Viewshed</button>
+    <button class="los-layer-btn los-layer-btn--clear"  id="los-btn-clear-viewshed" title="Remove viewshed" style="display:none">✕ Clear</button>
+  </div>
+
+  <!-- CUSTOM OBSTACLES SECTION -->
+  <div id="los-obs-section">
+    <div id="los-obs-header">
+      <span class="los-obs-section-label">Custom Obstacles</span>
+      <div style="display:flex;gap:4px">
+        <button id="los-obs-draw-btn"   class="los-layer-btn" title="Draw obstacle polygon on map">✏️ Draw</button>
+        <button id="los-obs-import-btn" class="los-layer-btn" title="Import from GeoJSON file">📂</button>
+        <button id="los-obs-export-btn" class="los-layer-btn" title="Export as GeoJSON">💾</button>
+      </div>
+    </div>
+    <div id="los-obs-instructions"></div>
+    <!-- Property form (shown after drawing a polygon) -->
+    <div id="los-obs-form" style="display:none">
+      <div class="los-obs-form-row">
+        <label>Name</label>
+        <input type="text" id="los-obs-form-name" placeholder="e.g. Building A">
+      </div>
+      <div class="los-obs-form-row">
+        <label>Type</label>
+        <select id="los-obs-form-type">
+          <option value="building">Building</option>
+          <option value="vegetation">Vegetation</option>
+        </select>
+      </div>
+      <div class="los-obs-form-row">
+        <label>Height AGL (m)</label>
+        <input type="number" id="los-obs-form-height" value="10" min="0.5" max="500" step="0.5">
+      </div>
+      <div class="los-obs-form-btns">
+        <button id="los-obs-form-confirm" class="los-obs-confirm">✓ Add</button>
+        <button id="los-obs-form-cancel"  class="los-obs-cancel">Cancel</button>
+      </div>
+    </div>
+    <!-- Obstacle list -->
+    <div id="los-obs-list"></div>
+  </div>
+
+  <!-- RESIZE HANDLE: between obstacles and profile -->
+  <div class="los-section-handle" title="Drag to resize elevation profile"></div>
+
+  <!-- PROFILE PANE -->
+  <div id="los-profile-wrap" style="display:none">
+    <div id="los-profile-title">Elevation Profile</div>
+    <canvas id="los-profile-canvas" style="width:100%;height:100%;display:block;"></canvas>
+  </div>
+</div>
+
+<script src="los_api.js"></script>
+<script src="los_pollution.js?v=1"></script>
+<script src="los_profile_chart.js"></script>
+<script src="los_obstacles.js"></script>
+<script src="los_ui.js"></script>
 </body>
 
 </html>

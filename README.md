@@ -1,5 +1,145 @@
 # Optim Analyzer
 
+## Local AI Log Analysis With LM Studio
+
+The app now supports a fully local telecom logfile analysis workflow backed by LM Studio using the OpenAI-compatible API.
+
+### Current architecture
+
+- Frontend: static SPA served from `index.html` + `app.js`
+- Backend: `server.py` using Python `SimpleHTTPRequestHandler`
+- Local AI UI: `🤖 Local AI` header action opens a dedicated upload and results modal
+- Local AI backend endpoints:
+  - `GET /api/local-ai/health`
+  - `GET /api/local-ai/model-check`
+  - `POST /api/local-ai/analyze-log`
+
+### What the local AI pipeline does
+
+1. Uploads a plain-text logfile to the backend only
+2. Stores the upload temporarily on disk
+3. Normalizes line endings
+4. Splits the logfile by detected session, then UE/IMSI, otherwise fixed-size overlapping windows
+5. Extracts lightweight metadata per chunk:
+   - start/end timestamps
+   - suspected RAT
+   - IMSI / UE / cell / bearer / cause code identifiers
+6. Sends one chunk at a time to LM Studio using model `gemma-4-e4b-it`
+7. Recovers gracefully if the model returns malformed JSON
+8. Aggregates chunk results into one final troubleshooting report
+
+### Required env vars
+
+Copy `.env.example` and set at least:
+
+```bash
+OPTIM_LM_STUDIO_BASE_URL=http://localhost:1234/v1
+OPTIM_LM_STUDIO_MODEL=gemma-4-e4b-it
+OPTIM_LOCAL_AI_TIMEOUT_SEC=120
+OPTIM_LOCAL_AI_MAX_RETRIES=2
+OPTIM_LOCAL_AI_MAX_UPLOAD_MB=25
+OPTIM_LOCAL_AI_CHUNK_LINES=160
+OPTIM_LOCAL_AI_CHUNK_OVERLAP=30
+```
+
+### Start LM Studio server
+
+1. Open LM Studio on your Mac.
+2. Load model `gemma-4-e4b-it`.
+3. Start the local server and confirm it is serving the OpenAI-compatible API on:
+
+```text
+http://localhost:1234/v1
+```
+
+### Run locally
+
+1. Start the backend:
+
+```bash
+python3 server.py
+```
+
+2. Open the app at [http://localhost:8000](http://localhost:8000)
+3. Click `🤖 Local AI`
+4. Upload a plain-text logfile such as `.txt`, `.log`, `.nmf`, or `.csv`
+
+### Example curl request
+
+```bash
+curl -X POST http://localhost:8000/api/local-ai/analyze-log \
+  -F "file=@/absolute/path/sample.log"
+```
+
+### Example response shape
+
+```json
+{
+  "status": "success",
+  "requestId": "req-abc123def456",
+  "file": {
+    "name": "sample.log",
+    "sizeBytes": 48123,
+    "encoding": "utf-8-sig",
+    "temporaryPath": null
+  },
+  "preprocessing": {
+    "lineCount": 812,
+    "segmentationStrategy": "session",
+    "detectedRat": "4G",
+    "identifiersFound": {
+      "session": ["sess-44"],
+      "imsi": ["001010123456789"],
+      "ue": ["UE-19"],
+      "cell": ["101"],
+      "bearer": ["5"],
+      "cause_codes": ["15"]
+    },
+    "chunkCount": 5
+  },
+  "report": {
+    "overall_summary": "Repeated attach reject patterns were detected across multiple chunks.",
+    "detected_rat": "4G",
+    "likely_causes": [
+      {
+        "cause": "Core-side reject during attach.",
+        "count": 3,
+        "severity": 3,
+        "top_confidence": "high",
+        "score": 24
+      }
+    ],
+    "anomalies": ["Repeated reject cause 15"],
+    "recommended_next_checks": ["Inspect MME/NAS reject mapping"],
+    "chunk_summaries": []
+  }
+}
+```
+
+### Troubleshooting
+
+`LM Studio not running`
+- `GET /api/local-ai/health` will return `ok: false`
+- Start the LM Studio local server and refresh the Local AI modal status
+
+`Model not loaded`
+- `GET /api/local-ai/model-check` will return `ok: false`
+- Load `gemma-4-e4b-it` in LM Studio, then refresh status
+
+`Malformed JSON from model`
+- The backend tries to recover fenced or embedded JSON
+- If recovery fails, it returns a low-confidence structured fallback and records the limitation in the report
+
+`Slow local inference`
+- Increase `OPTIM_LOCAL_AI_TIMEOUT_SEC`
+- Reduce `OPTIM_LOCAL_AI_CHUNK_LINES`
+- Keep only one active analysis running if your Mac is resource constrained
+
+`Privacy`
+- Logfile chunks are sent only from the backend to your local LM Studio server
+- The browser never calls LM Studio directly
+- The server logs request IDs, chunk counts, timings, and backend errors, but not full logfile contents
+
 ## Importing TRP
 
 The app now supports server-side `.trp` import with persisted run history.

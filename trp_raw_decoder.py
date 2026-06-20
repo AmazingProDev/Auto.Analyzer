@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 
 MAX_FRAME_SCAN = 2_000_000
 MAX_RECORD_LEN = 262144
+_ARRAY_SEGMENT_RE = re.compile(r"\[(\d+)\]")
 
 
 def utc_iso_from_epoch_seconds(epoch_s):
@@ -199,80 +200,102 @@ def parse_track_xml(path):
     return points
 
 
+_DECL_EVENT_KEYWORDS = ('event', 'call', 'ims', 'sip', 'rtp', 'state', 'signaling',
+                        'message', 'rrc', 'nas', 'layer3', 'l3', 'errc', 'nrrc')
+
+
 def parse_lookup_tables(buf):
+    # CDF format: sequence of [varint length][protobuf record].
+    # Each record: field 1 = table name, field 2 (repeated) = enum entries.
+    # Each enum entry sub-message: field 1 = string name.  Values are 0-indexed by position.
     out = {}
-    for _, wire, payload in iter_fields(buf, max_fields=300000):
-        if wire != 2:
-            continue
+    pos = 0
+    while pos < len(buf):
+        ln, p = read_varint(buf, pos)
+        if ln is None or p <= pos or ln <= 0:
+            break
+        rec = buf[p:p + ln]
+        pos = p + ln
+
         table_name = None
-        table = {}
-        for _, w2, v2 in iter_fields(payload, max_fields=500):
-            if w2 == 2:
-                s = try_decode_text(v2)
-                if s and table_name is None and len(s) < 120:
+        entries = {}
+        entry_idx = 0
+
+        for f, w, v in iter_fields(rec, max_fields=500):
+            if f == 1 and w == 2 and table_name is None:
+                s = try_decode_text(v)
+                if s and len(s) < 120:
                     table_name = s
-                # nested enum entries
-                if v2:
-                    enum_val = None
-                    enum_name = None
-                    for _, w3, v3 in iter_fields(v2, max_fields=50):
-                        if w3 == 0 and enum_val is None and isinstance(v3, int):
-                            enum_val = int(v3)
-                        elif w3 == 2 and enum_name is None:
-                            s3 = try_decode_text(v3)
-                            if s3:
-                                enum_name = s3
-                    if enum_val is not None and enum_name:
-                        table[enum_val] = enum_name
-        if table_name and table:
-            out[table_name] = table
+            elif f == 2 and w == 2 and table_name is not None:
+                entry_name = None
+                for f2, w2, v2 in iter_fields(v, max_fields=20):
+                    if f2 == 1 and w2 == 2:
+                        s2 = try_decode_text(v2)
+                        if s2:
+                            entry_name = s2
+                        break
+                if entry_name is not None:
+                    entries[entry_idx] = entry_name
+                    entry_idx += 1
+
+        if table_name and entries:
+            out[table_name] = entries
     return out
+
+
+def _parse_one_decl_record(rec):
+    """Return (name, metric_id, lookup) from a single CDF declaration protobuf record."""
+    name = None
+    metric_id = None
+    lookup = None
+    for f, w, v in iter_fields(rec, max_fields=500):
+        if f == 1 and w == 2 and name is None:
+            s = try_decode_text(v)
+            if s and '.' in s and len(s) < 220:
+                name = s
+        elif f == 2 and w == 0 and isinstance(v, int) and metric_id is None and v > 0:
+            metric_id = int(v)
+        elif f == 5 and w == 2 and lookup is None:
+            # Type-descriptor sub-message: field 6 = lookup table name
+            for f2, w2, v2 in iter_fields(v, max_fields=20):
+                if f2 == 6 and w2 == 2:
+                    s2 = try_decode_text(v2)
+                    if s2 and len(s2) < 100:
+                        lookup = s2
+                    break
+    return (name, metric_id, lookup) if (name and metric_id) else None
 
 
 def parse_declarations(buf):
     metric_map = {}
     unknown_records = []
-    # try record-wise parse first
-    for _, wire, payload in iter_fields(buf, max_fields=400000):
-        if wire != 2:
-            continue
-        name = None
-        metric_id = None
-        dtype = 'unknown'
-        lookup = None
-        strings = []
-        ints = []
-        for f2, w2, v2 in iter_fields(payload, max_fields=500):
-            if w2 == 2:
-                s = try_decode_text(v2)
-                if s:
-                    strings.append(s)
-            elif w2 == 0 and isinstance(v2, int):
-                ints.append(int(v2))
-        for s in strings:
-            if '.' in s and len(s) < 220:
-                name = s
-                break
-        if name:
-            for iv in ints:
-                if iv > 0:
-                    metric_id = iv
-                    break
-        if name and metric_id:
-            metric_map[int(metric_id)] = {
+
+    # Primary path: CDF length-prefixed record stream.
+    # Each record is a protobuf sub-message: field 1=name, field 2=global_id, field 5=type_descriptor.
+    # The type-descriptor's field 6 carries the lookup-table name for enum metrics.
+    pos = 0
+    while pos < len(buf):
+        ln, p = read_varint(buf, pos)
+        if ln is None or p <= pos or ln <= 0:
+            break
+        rec = buf[p:p + ln]
+        pos = p + ln
+        result = _parse_one_decl_record(rec)
+        if result:
+            name, metric_id, lookup = result
+            metric_map[metric_id] = {
                 'name': name,
-                'dtype': dtype,
+                'dtype': 'unknown',
                 'lookup': lookup,
-                'kind': 'event' if any(x in name.lower() for x in ('event', 'call', 'ims', 'sip', 'rtp', 'state')) else 'metric'
+                'kind': 'event' if any(x in name.lower() for x in _DECL_EVENT_KEYWORDS) else 'metric'
             }
-        elif payload and len(payload) <= 512:
-            unknown_records.append(payload[:64].hex())
+        elif rec and len(rec) <= 512:
+            unknown_records.append(rec[:64].hex())
 
-    if metric_map:
-        return metric_map, unknown_records
-
-    # fallback regex extraction
-    seen = set()
+    # Supplemental regex scan: catches nested sub-declarations embedded in field 6 blobs
+    # (complex message types carry child metric declarations inline).
+    # Only adds metrics not already found by the primary parse; lookup is unavailable here.
+    seen = set(metric_map.keys())
     for m in re.finditer(rb'([A-Za-z][A-Za-z0-9_.\[\]\-]{4,180})\x10', buf):
         raw_name = m.group(1)
         if b'.' not in raw_name:
@@ -282,19 +305,81 @@ def parse_declarations(buf):
         except Exception:
             name = raw_name.decode('latin1', errors='ignore')
         name = (name or '').strip().strip('\x00')
-        if not name or name in seen:
+        if not name:
             continue
         mid, _ = read_varint(buf, m.end())
-        if not isinstance(mid, int) or mid <= 0:
+        if not isinstance(mid, int) or mid <= 0 or mid in seen:
             continue
-        metric_map[int(mid)] = {
+        seen.add(mid)
+        metric_map[mid] = {
             'name': name,
             'dtype': 'unknown',
             'lookup': None,
-            'kind': 'event' if any(x in name.lower() for x in ('event', 'call', 'ims', 'sip', 'rtp', 'state')) else 'metric'
+            'kind': 'event' if any(x in name.lower() for x in _DECL_EVENT_KEYWORDS) else 'metric'
         }
-        seen.add(name)
-    return metric_map, unknown_records
+    return _expand_array_metric_map(metric_map), unknown_records
+
+
+def _array_dims_from_name(name):
+    dims = []
+    for token in _ARRAY_SEGMENT_RE.findall(str(name or '')):
+        try:
+            size = int(token)
+        except Exception:
+            return []
+        if size <= 0:
+            return []
+        dims.append(size)
+    return dims
+
+
+def _flattened_array_name(name, offset, dims):
+    if not dims:
+        return str(name or '')
+    rem = int(max(0, offset))
+    coords = [0] * len(dims)
+    for i in range(len(dims) - 1, -1, -1):
+        size = max(1, int(dims[i]))
+        coords[i] = rem % size
+        rem //= size
+    coord_iter = iter(coords)
+    return _ARRAY_SEGMENT_RE.sub(lambda _: f"[{next(coord_iter)}]", str(name or ''), count=len(dims))
+
+
+def _expand_array_metric_map(metric_map):
+    expanded = dict(metric_map or {})
+    for metric_id, meta in sorted((metric_map or {}).items(), key=lambda kv: int(kv[0])):
+        if not isinstance(meta, dict):
+            continue
+        name = str(meta.get('name') or '').strip()
+        if not name:
+            continue
+        dims = _array_dims_from_name(name)
+        if not dims:
+            continue
+        total = 1
+        for size in dims:
+            total *= int(size)
+            if total > 100000:
+                total = 0
+                break
+        if total <= 1:
+            continue
+        base_id = int(metric_id)
+        for offset in range(total):
+            actual_id = base_id + offset
+            if actual_id in expanded and actual_id != base_id:
+                continue
+            row = dict(meta)
+            row['declared_name'] = name
+            row['expanded_name'] = _flattened_array_name(name, offset, dims)
+            row['base_metric_id'] = base_id
+            row['array_index'] = offset
+            row['idx'] = offset
+            row['array_dims'] = list(dims)
+            row['array_count'] = total
+            expanded[actual_id] = row
+    return expanded
 
 
 # Compatibility aliases for importer variants expecting *_cdf names.
@@ -909,6 +994,10 @@ def decode_cdf_data_variant(extracted_root, metric_map, lookups, base_time_iso=N
                 s = try_decode_text(v)
                 if s is not None:
                     value_str = s
+                elif v:
+                    # Preserve binary blobs (e.g. Message.3Gpp.Layer3Message payloads)
+                    # as latin1 so _parse_layer3_blob can round-trip them back to bytes.
+                    value_str = v.decode("latin1", errors="replace")
 
         if metric_id is None:
             for _, vv in varints:
@@ -974,6 +1063,10 @@ def decode_cdf_data_variant(extracted_root, metric_map, lookups, base_time_iso=N
                     name = meta.get('name') or f'Metric.{metric_id}'
                     dtype = meta.get('dtype') or 'unknown'
                     lookup_name = meta.get('lookup')
+                    declared_name = meta.get('declared_name') or name
+                    expanded_name = meta.get('expanded_name')
+                    base_metric_id = meta.get('base_metric_id')
+                    sample_idx = meta.get('idx')
                     mapped_str = value_str
                     if mapped_str is None and value_num is not None and lookup_name and lookup_name in lookups:
                         mapped = lookups[lookup_name].get(int(value_num))
@@ -984,10 +1077,14 @@ def decode_cdf_data_variant(extracted_root, metric_map, lookups, base_time_iso=N
                         'time': ts_iso,
                         'metric_id': int(metric_id),
                         'name': name,
+                        'declared_name': declared_name,
+                        'expanded_name': expanded_name,
+                        'base_metric_id': int(base_metric_id) if isinstance(base_metric_id, int) else None,
                         'value_num': value_num,
                         'value_str': mapped_str,
                         'dtype': dtype,
-                        'lookup': lookup_name
+                        'lookup': lookup_name,
+                        'idx': int(sample_idx) if isinstance(sample_idx, int) else None,
                     })
 
                     lname = name.lower()
@@ -1020,3 +1117,571 @@ def decode_cdf_data_variant(extracted_root, metric_map, lookups, base_time_iso=N
             'warnings': warnings
         }
     }
+
+
+# .NET DateTime tick epoch (Jan 1, 0001) relative to Unix epoch (Jan 1, 1970), in 100-ns intervals.
+_DOTNET_EPOCH_OFFSET_100NS = 621_355_968_000_000_000
+
+
+def extract_ch7_pcap(extracted_root):
+    """Extract IP packets from the ch7 IPSniffer channel and return (pcap_bytes, error_str).
+
+    The channel stream has a 40-byte TEMS header per packet, carrying a .NET DateTime tick
+    timestamp (little-endian uint64, 100-ns resolution, offset from 0001-01-01 UTC).
+    The Ethernet frame follows immediately at offset 40.  Packet boundaries are derived
+    from the IPv4/IPv6 total-length field — no fixed-size framing needed.
+    """
+    import struct as _struct
+
+    providers_root = os.path.join(extracted_root, 'trp', 'providers')
+    ch7_path = None
+    for root, _, files in os.walk(providers_root):
+        if 'channel.log' in files and os.path.basename(os.path.dirname(root)) == 'ch7':
+            ch7_path = os.path.join(root, 'channel.log')
+            break
+    # Broader fallback: any channel directory named ch7
+    if ch7_path is None:
+        for root, dirs, files in os.walk(providers_root):
+            if 'channel.log' in files and 'ch7' in os.path.relpath(root, providers_root):
+                ch7_path = os.path.join(root, 'channel.log')
+                break
+    if ch7_path is None or not os.path.exists(ch7_path):
+        return None, 'ch7 IPSniffer channel not found in this TRP file'
+
+    try:
+        with open(ch7_path, 'rb') as fh:
+            raw = fh.read()
+        dec = decode_maybe_compressed(raw)
+        buf = dec.get('dataBuf') or b''
+    except Exception as exc:
+        return None, f'ch7 read/decompress failed: {exc}'
+
+    if not buf:
+        return None, 'ch7 channel is empty'
+
+    _TEMS_HDR = 40
+    _ETH_HDR = 14
+
+    # libpcap global header: magic, ver_major, ver_minor, thiszone, sigfigs, snaplen, network
+    out = bytearray(_struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+    packet_count = 0
+    off = 0
+
+    while off + _TEMS_HDR + _ETH_HDR < len(buf):
+        # Decode .NET DateTime tick timestamp from TEMS header bytes 0-7
+        raw_tick = _struct.unpack_from('<Q', buf, off)[0]
+        unix_100ns = raw_tick - _DOTNET_EPOCH_OFFSET_100NS
+        if unix_100ns < 0:
+            unix_100ns = 0
+        ts_sec = unix_100ns // 10_000_000
+        ts_usec = (unix_100ns % 10_000_000) // 10
+
+        eth_off = off + _TEMS_HDR
+        ethertype = _struct.unpack_from('>H', buf, eth_off + 12)[0]
+
+        if ethertype == 0x0800:        # IPv4
+            if eth_off + 18 > len(buf):
+                break
+            ip_total = _struct.unpack_from('>H', buf, eth_off + 16)[0]
+            frame_len = _ETH_HDR + ip_total
+        elif ethertype == 0x86DD:      # IPv6
+            if eth_off + 22 > len(buf):
+                break
+            ip_payload = _struct.unpack_from('>H', buf, eth_off + 18)[0]
+            frame_len = _ETH_HDR + 40 + ip_payload
+        else:
+            break
+
+        if eth_off + frame_len > len(buf):
+            break
+
+        eth_frame = buf[eth_off:eth_off + frame_len]
+        # libpcap per-packet header: ts_sec, ts_usec, incl_len, orig_len
+        out += _struct.pack('<IIII', ts_sec, ts_usec, len(eth_frame), len(eth_frame))
+        out += eth_frame
+        packet_count += 1
+        off += _TEMS_HDR + frame_len
+
+    if packet_count == 0:
+        return None, 'no IPv4/IPv6 packets found in ch7'
+
+    return bytes(out), None
+
+
+# ---------------------------------------------------------------------------
+# ch1 NAS EMM/ESM event extractor
+# ---------------------------------------------------------------------------
+
+_NAS_DIAG_LOG_CODES = frozenset({0xB0E2, 0xB0E3, 0xB0E5, 0xB0EC, 0xB0ED, 0xB0EE})
+_NAS_DIAG_QCOM_HDR = 4   # Qualcomm prefix bytes before raw NAS PDU (confirmed)
+_NAS_TEMS_CH1_HDR  = 20  # TEMS ch1 record header: <Q H I I H> = 8+2+4+4+2
+
+# Codes where direction is known from the log code itself
+_NAS_CODE_DIR = {0xB0E2: 'DL', 0xB0E3: 'UL'}
+
+
+_NAS_LABEL_FIXUPS = {
+    'Act Default EPS Bearer Ctxt Request': 'Activate Default Bearer Request',
+    'Act Default EPS Bearer Ctxt Accept':  'Activate Default Bearer Accept',
+    'Act Default EPS Bearer Ctxt Reject':  'Activate Default Bearer Reject',
+    'Act Dedi EPS Bearer Ctxt Request':    'Activate Dedicated Bearer Request',
+    'Act Dedi EPS Bearer Ctxt Accept':     'Activate Dedicated Bearer Accept',
+    'Act Dedi EPS Bearer Ctxt Reject':     'Activate Dedicated Bearer Reject',
+    'Deact EPS Bearer Ctxt Request':       'Deactivate Bearer Request',
+    'Deact EPS Bearer Ctxt Accept':        'Deactivate Bearer Accept',
+    'Modify EPS Bearer Ctxt Request':      'Modify Bearer Request',
+    'Modify EPS Bearer Ctxt Accept':       'Modify Bearer Accept',
+    'Modify EPS Bearer Ctxt Reject':       'Modify Bearer Reject',
+    'PDN Connectivity Request':            'PDN Connect Request',
+    'PDN Connectivity Reject':             'PDN Connect Reject',
+    'PDN Disconnect Request':              'PDN Disconnect Request',
+}
+
+
+def _nas_cls_to_label(cls_name):
+    """'EMMAttachRequest' → 'NAS: EMM Attach Request'"""
+    import re as _re
+    if cls_name.startswith('EMM'):
+        prefix, body = 'EMM', cls_name[3:]
+    elif cls_name.startswith('ESM'):
+        prefix, body = 'ESM', cls_name[3:]
+    else:
+        prefix, body = '', cls_name
+    spaced = _re.sub(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ', body)
+    spaced = _NAS_LABEL_FIXUPS.get(spaced, spaced)
+    return f'NAS: {prefix} {spaced}'.strip() if prefix else f'NAS: {spaced}'.strip()
+
+
+def _extract_esm_apn_ip(val, out):
+    """Walk a pycrate ESM get_val() list and pull APN + IP into out dict."""
+    import socket as _socket
+    if not isinstance(val, (list, tuple)):
+        return
+    for ie in val[1:]:   # skip [EBI, PD, PTI, MT] header element
+        if not isinstance(ie, (list, tuple)) or len(ie) < 2:
+            continue
+        ie_val = ie[1]
+        # APN: list of [label_len, label_bytes] — stop at MNC/MCC/GPRS operator labels
+        if isinstance(ie_val, list) and ie_val and isinstance(ie_val[0], (list, tuple)):
+            labels = []
+            for lbl in ie_val:
+                if not (isinstance(lbl, (list, tuple)) and len(lbl) == 2 and isinstance(lbl[1], bytes)):
+                    continue
+                s = lbl[1].decode('ascii', errors='replace').strip()
+                if s.upper() in ('GPRS',) or s.upper().startswith('MNC') or s.upper().startswith('MCC'):
+                    break
+                if s:
+                    labels.append(s)
+            if labels and 'APN' not in out:
+                candidate = '.'.join(labels)
+                if 2 < len(candidate) < 100:
+                    out['APN'] = candidate
+        # PDN Address: somewhere in a sub-list there will be a 4- or 16-byte IP
+        elif isinstance(ie_val, (list, tuple)):
+            for item in ie_val:
+                if isinstance(item, bytes) and len(item) == 4 and 'IP' not in out:
+                    try:
+                        out['IP'] = _socket.inet_ntoa(item)
+                    except Exception:
+                        pass
+                elif isinstance(item, bytes) and len(item) == 16 and 'IP' not in out:
+                    try:
+                        out['IP'] = _socket.inet_ntop(_socket.AF_INET6, item)
+                    except Exception:
+                        pass
+
+
+def extract_ch1_nas_events(extracted_root):
+    """Parse the ch1 Qualcomm DIAG stream and return NAS EMM/ESM events.
+
+    Returns (events_list, error_str).
+    events_list entries are dicts compatible with the run's event list:
+      { 'time': ISO-str, 'event_name': str, 'params': [],
+        'params_map': {...}, 'source': 'nas_ch1' }
+    error_str is non-None only when the whole channel is unavailable.
+    Individual undecoded packets are silently skipped.
+    """
+    import struct as _struct
+    import datetime as _dt
+    import warnings as _warn
+
+    # ---- locate ch1 channel.log (same pattern as extract_ch7_pcap) ----------
+    providers_root = os.path.join(extracted_root, 'trp', 'providers')
+    ch1_path = None
+    for root, _, files in os.walk(providers_root):
+        if 'channel.log' in files and os.path.basename(os.path.dirname(root)) == 'ch1':
+            ch1_path = os.path.join(root, 'channel.log')
+            break
+    if ch1_path is None:
+        for root, _, files in os.walk(providers_root):
+            if 'channel.log' in files and 'ch1' in os.path.relpath(root, providers_root):
+                ch1_path = os.path.join(root, 'channel.log')
+                break
+    if not ch1_path or not os.path.exists(ch1_path):
+        return [], 'ch1 channel not found'
+
+    try:
+        with open(ch1_path, 'rb') as fh:
+            raw = fh.read()
+        dec = decode_maybe_compressed(raw)
+        buf = dec.get('dataBuf') or b''
+    except Exception as exc:
+        return [], f'ch1 read/decompress failed: {exc}'
+
+    if not buf:
+        return [], 'ch1 channel is empty'
+
+    # ---- load pycrate NAS decoders (optional — degrade gracefully) ----------
+    try:
+        with _warn.catch_warnings():
+            _warn.simplefilter('ignore')
+            from pycrate_mobile.NASLTE import (
+                EMMTypeMTClasses, EMMTypeMOClasses, ESMTypeClasses,
+            )
+        _has_pycrate = True
+    except ImportError:
+        EMMTypeMTClasses = EMMTypeMOClasses = ESMTypeClasses = {}
+        _has_pycrate = False
+
+    # .NET Windows tick → ISO-8601 UTC
+    _WIN_EPOCH = _dt.datetime(1, 1, 1, tzinfo=_dt.timezone.utc)
+
+    def _tick_iso(ticks):
+        try:
+            return (_WIN_EPOCH + _dt.timedelta(microseconds=ticks / 10)).isoformat()
+        except Exception:
+            return ''
+
+    # ---- walk TEMS ch1 records ----------------------------------------------
+    events = []
+    off = 0
+    n = len(buf)
+
+    while off + _NAS_TEMS_CH1_HDR <= n:
+        ticks, _m1, _m2, _m3, payload_len = _struct.unpack_from('<QHIIH', buf, off)
+        pstart = off + _NAS_TEMS_CH1_HDR
+        pend   = pstart + payload_len
+        if pend > n:
+            off += 1
+            continue
+        payload = buf[pstart:pend]
+        off = pend
+
+        # ---- Qualcomm DIAG LOG_F envelope check ----------------------------
+        if len(payload) < 26:
+            continue
+        if payload[0:2] != b'\x00\x02':
+            continue
+        if payload[10] != 0x10:
+            continue
+        log_code = _struct.unpack_from('<H', payload, 16)[0]
+        if log_code not in _NAS_DIAG_LOG_CODES:
+            continue
+
+        body = payload[26:]
+        if len(body) <= _NAS_DIAG_QCOM_HDR:
+            continue
+        nas_pdu = body[_NAS_DIAG_QCOM_HDR:]
+        if len(nas_pdu) < 2:
+            continue
+
+        # ---- decode NAS PDU ------------------------------------------------
+        pd  = nas_pdu[0] & 0x0F
+        t   = _tick_iso(ticks)
+        dir_hint = _NAS_CODE_DIR.get(log_code, '')
+
+        if pd == 0x07:    # EMM
+            mt  = nas_pdu[1]
+            cls = (EMMTypeMTClasses.get(mt) or EMMTypeMOClasses.get(mt)) if _has_pycrate else None
+            if cls is None:
+                continue
+            label = _nas_cls_to_label(cls.__name__)
+            pm = {'direction': dir_hint} if dir_hint else {}
+            try:
+                msg = cls()
+                msg.from_bytes(nas_pdu)
+            except Exception:
+                pass   # label is still valid; IE details just won't be available
+            events.append({
+                'time': t, 'event_name': label,
+                'params': [], 'params_map': pm, 'source': 'nas_ch1',
+            })
+
+        elif pd == 0x02:  # ESM
+            ebi = (nas_pdu[0] >> 4) & 0x0F
+            mt  = nas_pdu[2] if len(nas_pdu) > 2 else 0
+            cls = ESMTypeClasses.get(mt) if _has_pycrate else None
+            if cls is None:
+                continue
+            label = _nas_cls_to_label(cls.__name__)
+            pm = {'EPS Bearer': str(ebi)}
+            if dir_hint:
+                pm['direction'] = dir_hint
+            # For Activate Default Bearer Request, extract APN + IP
+            if _has_pycrate and 'ActDefault' in cls.__name__ and 'Request' in cls.__name__:
+                try:
+                    msg = cls()
+                    msg.from_bytes(nas_pdu)
+                    _extract_esm_apn_ip(msg.get_val(), pm)
+                except Exception:
+                    pass
+            events.append({
+                'time': t, 'event_name': label,
+                'params': [], 'params_map': pm, 'source': 'nas_ch1',
+            })
+
+    return events, None
+
+
+# ---------------------------------------------------------------------------
+# ch1 RRC (B0C0 LTE_RRC_OTA_PACKET) event extractor
+# ---------------------------------------------------------------------------
+
+_RRC_B0C0_LOG_CODE = 0xB0C0
+
+# Confirmed B0C0 body layout (payload[26:]):
+#   bytes[0:4]   = 0x1b101010 (constant Qualcomm version marker)
+#   bytes[4]     = 0x60 (constant channel indicator)
+#   bytes[5]     = direction  (0 = DL/BCCH, 1 = UL)
+#   bytes[6:8]   = PCI uint16le
+#   bytes[8:12]  = EARFCN uint32le
+#   bytes[12:16] = modem timestamp uint32le
+#   bytes[16:20] = PDU length N uint32be
+#   bytes[20]    = 0x00 pad byte
+#   bytes[21:21+N] = RRC PDU (UPER encoded)
+
+_RRC_MIN_BODY = 22   # minimum meaningful body length
+
+# UL messages to emit in the event timeline
+_RRC_UL_KEEP = frozenset({
+    'rrcConnectionRequest',
+    'rrcConnectionSetupComplete',
+    'rrcConnectionReconfigurationComplete',
+    'rrcConnectionReestablishmentRequest',
+    'rrcConnectionReestablishmentComplete',
+    'rrcConnectionReleaseComplete',
+    'securityModeComplete',
+    'securityModeFailure',
+    'measurementReport',
+    'ueCapabilityInformation',
+    'ulInformationTransfer',
+    'scgFailureInformation-r12',
+    'failureInformation-r15',
+    'wlanConnectionStatusReport-r13',
+})
+
+# Clean label map (camelCase RRC message → display name)
+_RRC_LABEL_MAP = {
+    'rrcConnectionRequest':                 'RRC: Connection Request',
+    'rrcConnectionSetupComplete':           'RRC: Connection Setup Complete',
+    'rrcConnectionReconfigurationComplete': 'RRC: Reconfiguration Complete',
+    'rrcConnectionReestablishmentRequest':  'RRC: Reestablishment Request',
+    'rrcConnectionReestablishmentComplete': 'RRC: Reestablishment Complete',
+    'rrcConnectionReleaseComplete':         'RRC: Release Complete',
+    'securityModeComplete':                 'RRC: Security Mode Complete',
+    'securityModeFailure':                  'RRC: Security Mode Failure',
+    'measurementReport':                    'RRC: Measurement Report',
+    'ueCapabilityInformation':              'RRC: UE Capability Information',
+    'ulInformationTransfer':                'RRC: UL Info Transfer',
+    'scgFailureInformation-r12':            'RRC: SCG Failure',
+    'failureInformation-r15':               'RRC: Failure Information',
+    'wlanConnectionStatusReport-r13':       'RRC: WLAN Status Report',
+}
+
+
+def _rrc_pycrate_msg_name(val):
+    """Extract the innermost choice name from a pycrate decoded SEQUENCE value."""
+    if not isinstance(val, dict):
+        return None
+    msg = val.get('message')
+    if not isinstance(msg, tuple) or len(msg) < 2:
+        return None
+    inner = msg[1]                      # e.g. ('c1', ('ueCapabilityInformation', {...}))
+    if isinstance(inner, tuple) and len(inner) >= 2:
+        deeper = inner[1]               # e.g. ('ueCapabilityInformation', {...})
+        if isinstance(deeper, tuple) and len(deeper) >= 1:
+            return deeper[0]
+        return inner[0]
+    if isinstance(inner, tuple) and len(inner) == 1:
+        return inner[0]
+    return None
+
+
+def extract_ch1_rrc_events(extracted_root):
+    """Parse ch1 Qualcomm DIAG B0C0 (LTE_RRC_OTA_PACKET) packets and return RRC events.
+
+    Returns (events_list, error_str).
+    Only UL messages in _RRC_UL_KEEP are emitted as events.
+    DL bodies are decoded as BCCH-DL-SCH; SIB1 cell identity / TAC is extracted
+    and returned as a single 'RRC: Cell Info' event per unique (PCI, EARFCN).
+    """
+    import struct as _struct
+    import datetime as _dt
+    import warnings as _warn
+
+    # ---- locate ch1 (same walk as NAS extractor) ----------------------------
+    providers_root = os.path.join(extracted_root, 'trp', 'providers')
+    ch1_path = None
+    for root, _, files in os.walk(providers_root):
+        if 'channel.log' in files and os.path.basename(os.path.dirname(root)) == 'ch1':
+            ch1_path = os.path.join(root, 'channel.log')
+            break
+    if ch1_path is None:
+        for root, _, files in os.walk(providers_root):
+            if 'channel.log' in files and 'ch1' in os.path.relpath(root, providers_root):
+                ch1_path = os.path.join(root, 'channel.log')
+                break
+    if not ch1_path or not os.path.exists(ch1_path):
+        return [], 'ch1 channel not found'
+
+    try:
+        with open(ch1_path, 'rb') as fh:
+            raw = fh.read()
+        dec = decode_maybe_compressed(raw)
+        buf = dec.get('dataBuf') or b''
+    except Exception as exc:
+        return [], f'ch1 read/decompress failed: {exc}'
+
+    if not buf:
+        return [], 'ch1 channel is empty'
+
+    # ---- load pycrate EUTRA RRC (optional) ----------------------------------
+    _UlDcch = _UlCcch = _BcchDlSch = None
+    try:
+        with _warn.catch_warnings():
+            _warn.simplefilter('ignore')
+            from pycrate_asn1dir import RRCLTE as _RRCLTE
+            _eutra = _RRCLTE.EUTRA_RRC_Definitions()
+            _UlDcch    = _eutra.UL_DCCH_Message
+            _UlCcch    = _eutra.UL_CCCH_Message
+            _BcchDlSch = _eutra.BCCH_DL_SCH_Message
+    except Exception:
+        pass
+
+    if _UlDcch is None:
+        return [], 'pycrate RRCLTE not available'
+
+    # .NET Windows tick → ISO-8601 UTC (same helper as NAS extractor)
+    _WIN_EPOCH = _dt.datetime(1, 1, 1, tzinfo=_dt.timezone.utc)
+
+    def _tick_iso(ticks):
+        try:
+            return (_WIN_EPOCH + _dt.timedelta(microseconds=ticks / 10)).isoformat()
+        except Exception:
+            return ''
+
+    # ---- walk TEMS ch1 records ----------------------------------------------
+    events = []
+    cell_info_seen = {}   # (pci, earfcn) → True, to avoid duplicate cell events
+    off = 0
+    n   = len(buf)
+
+    while off + _NAS_TEMS_CH1_HDR <= n:
+        ticks, _m1, _m2, _m3, payload_len = _struct.unpack_from('<QHIIH', buf, off)
+        pstart = off + _NAS_TEMS_CH1_HDR
+        pend   = pstart + payload_len
+        if pend > n:
+            off += 1
+            continue
+        payload = buf[pstart:pend]
+        off = pend
+
+        # ---- Qualcomm DIAG LOG_F envelope check ----------------------------
+        if len(payload) < 26:
+            continue
+        if payload[0:2] != b'\x00\x02':
+            continue
+        if payload[10] != 0x10:
+            continue
+        log_code = _struct.unpack_from('<H', payload, 16)[0]
+        if log_code != _RRC_B0C0_LOG_CODE:
+            continue
+
+        body = payload[26:]
+        if len(body) < _RRC_MIN_BODY:
+            continue
+
+        # ---- parse confirmed B0C0 header ------------------------------------
+        direction = body[5]
+        pci       = _struct.unpack_from('<H', body, 6)[0]
+        earfcn    = _struct.unpack_from('<I', body, 8)[0]
+        pdu_len   = _struct.unpack_from('>I', body, 16)[0]
+        if body[20] != 0x00:
+            continue           # unexpected pad byte — skip
+        if 21 + pdu_len > len(body) or pdu_len == 0:
+            continue
+        pdu = body[21:21 + pdu_len]
+
+        t = _tick_iso(ticks)
+
+        if direction == 1:
+            # ---- UL: try UL-DCCH then UL-CCCH ------------------------------
+            msg_name = None
+            pm = {'PCI': str(pci), 'EARFCN': str(earfcn), 'direction': 'UL'}
+            for decoder in (_UlDcch, _UlCcch):
+                try:
+                    decoder.from_uper(pdu)
+                    val = decoder.get_val()
+                    msg_name = _rrc_pycrate_msg_name(val)
+                    break
+                except Exception:
+                    pass
+            if not msg_name:
+                continue
+            if msg_name not in _RRC_UL_KEEP:
+                continue
+            label = _RRC_LABEL_MAP.get(msg_name, f'RRC: {msg_name}')
+            events.append({
+                'time': t, 'event_name': label,
+                'params': [], 'params_map': pm, 'source': 'rrc_b0c0',
+            })
+
+        else:
+            # ---- DL: decode as BCCH-DL-SCH, extract SIB1 cell info ---------
+            key = (pci, earfcn)
+            if key in cell_info_seen:
+                continue       # already emitted a cell-info event for this cell
+            try:
+                _BcchDlSch.from_uper(pdu)
+                val = _BcchDlSch.get_val()
+                inner_name = _rrc_pycrate_msg_name(val)
+                if inner_name != 'systemInformationBlockType1':
+                    continue
+                # Walk val to extract cell identity fields
+                sib1 = val.get('message', (None, None))[1]   # ('c1', ('sib1', {...}))
+                if isinstance(sib1, tuple) and len(sib1) >= 2:
+                    sib1 = sib1[1]    # {'cellAccessRelatedInfo': {...}, ...}
+                if not isinstance(sib1, dict):
+                    continue
+                car = sib1.get('cellAccessRelatedInfo', {})
+                tac_bits = car.get('trackingAreaCode')
+                cell_id_bits = car.get('cellIdentity')
+                plmn_list = car.get('plmn-IdentityList', [])
+                pm = {'PCI': str(pci), 'EARFCN': str(earfcn)}
+                if isinstance(tac_bits, tuple) and len(tac_bits) >= 1:
+                    tac_val = tac_bits[0]
+                    pm['TAC'] = f'0x{tac_val:04X}' if isinstance(tac_val, int) else str(tac_val)
+                if isinstance(cell_id_bits, tuple) and len(cell_id_bits) >= 1:
+                    cid = cell_id_bits[0]
+                    if isinstance(cid, int):
+                        enb_id   = (cid >> 8) & 0xFFFFF
+                        local_cid = cid & 0xFF
+                        pm['eNB ID']  = str(enb_id)
+                        pm['Cell ID'] = str(local_cid)
+                for plmn in plmn_list[:1]:
+                    if not isinstance(plmn, dict):
+                        continue
+                    pid = plmn.get('plmn-Identity', {})
+                    mcc = pid.get('mcc', [])
+                    mnc = pid.get('mnc', [])
+                    if mcc and mnc:
+                        pm['PLMN'] = ''.join(str(d) for d in mcc) + '-' + ''.join(str(d) for d in mnc)
+                cell_info_seen[key] = True
+                events.append({
+                    'time': t, 'event_name': 'RRC: Cell Info (SIB1)',
+                    'params': [], 'params_map': pm, 'source': 'rrc_b0c0',
+                })
+            except Exception:
+                pass
+
+    return events, None
