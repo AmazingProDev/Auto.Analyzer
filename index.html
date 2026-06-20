@@ -533,6 +533,7 @@
                                     <div id="benchmarkNemoModeControls" class="benchmark-nemo-mode-controls" hidden>
                                         <button id="benchmarkNemoExpressBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Express analysis</button>
                                         <button id="benchmarkNemoDetailedBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Detailled analysis</button>
+                                        <button id="benchmarkNemoMacroBtn" type="button" class="benchmark-nemo-mode-btn" aria-pressed="false">Macro</button>
                                         <button id="benchmarkNemoEmaBtn" type="button" class="benchmark-nemo-mode-btn benchmark-nemo-mode-btn--ema" aria-pressed="false">EMA Analysis</button>
                                     </div>
                                     <div id="benchmarkNemoModePrompt" class="benchmark-nemo-mode-prompt" hidden>Import completed. Choose an analysis mode to display the benchmark.</div>
@@ -555,6 +556,37 @@
                                 <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Executive scorecard</div>
                                 <div id="benchmarkNemoScorecardMeta" style="color:#64748b;font-size:11px;margin-bottom:10px">Per-operator winner by dimension (this DT). n=1 drive test — directional, not statistically significant.</div>
                                 <div id="benchmarkNemoScorecardBody"></div>
+                            </div>
+
+                            <div id="benchmarkNemoMacroCard" class="benchmark-nemo-card" style="display:none;margin-bottom:16px">
+                                <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+                                    <div>
+                                        <div class="benchmark-nemo-card-title" style="margin:0 0 4px 0">Macro diagnosis</div>
+                                        <div id="benchmarkNemoMacroHeader" style="color:#64748b;font-size:11px;line-height:1.5"></div>
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                        <label style="display:flex;align-items:center;gap:6px;color:#94a3b8;font-size:11px">
+                                            <span>DT type</span>
+                                            <select id="benchmarkNemoMacroDtTypeSelect" class="benchmark-nemo-dt-select" style="min-width:120px">
+                                                <option value="Auto">Auto</option>
+                                                <option value="Static">Static</option>
+                                                <option value="Mobility">Mobility</option>
+                                                <option value="Indoor">Indoor</option>
+                                                <option value="Event">Event</option>
+                                            </select>
+                                        </label>
+                                        <button id="benchmarkNemoMacroResetThresholdsBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Reset thresholds</button>
+                                        <button id="benchmarkNemoMacroExportProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Export profile</button>
+                                        <button id="benchmarkNemoMacroImportProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Import file</button>
+                                        <button id="benchmarkNemoMacroPasteProfileBtn" type="button" class="benchmark-toolbar-btn benchmark-toolbar-btn-secondary">Paste JSON</button>
+                                        <input id="benchmarkNemoMacroImportInput" type="file" accept=".json,application/json" hidden>
+                                    </div>
+                                </div>
+                                <div id="benchmarkNemoMacroBody"></div>
+                                <details style="margin-top:12px;border-top:1px solid var(--bn-divider);padding-top:10px">
+                                    <summary style="cursor:pointer;color:#cbd5e1;font-size:11px;font-weight:700">Thresholds</summary>
+                                    <div id="benchmarkNemoMacroThresholds" style="margin-top:10px"></div>
+                                </details>
                             </div>
 
                             <div class="bn-section" data-bn-section="throughput" style="display:none">
@@ -1108,10 +1140,11 @@
     <!-- Scripts -->
     <script src="benchmark_nemo_ranking_state.js?v=1"></script>
     <script src="benchmark_nemo_scorecard_state.js?v=2"></script>
+    <script src="benchmark_nemo_macro_state.js?v=1"></script>
     <script src="benchmark_nemo_ui_state.js?v=1"></script>
     <script src="theme_v2.js?v=v595"></script>
     <script src="window_manager.js?v=1"></script>
-    <script src="app.js?v=v630"></script>
+    <script src="app.js?v=v631"></script>
     <script src="local_ai_ui.js?v=6"></script>
     <script src="trp_import_ui.js?v=37"></script>
     <!-- User Point Modal -->

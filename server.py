@@ -2433,6 +2433,12 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         mac_total = []
         app_samples = []
         bw_samples = []
+        scell_samples = []
+        rank_samples = []
+        active_coords = []
+        active_nr_slots = 0
+        active_nr_band_counts: dict[str, int] = {}
+        mod256_hits = 0
         measurement_title = None
 
         def _append_sample(bucket, when, value, positive=False, weight=None):
@@ -2580,6 +2586,52 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 elif pdsch_total > 0:
                     active_slot_weight = pdsch_total
                 if active_slot_weight is not None:
+                    band_text = str(row.get("band") or "").strip()
+                    band_key = band_text.lower()
+                    serving_tech_upper = str(
+                        row.get("servingTechnology") or ""
+                    ).upper()
+                    packet_tech_upper = str(
+                        row.get("packetTechnology") or ""
+                    ).upper()
+                    is_nr_active = bool(
+                        (nr_pdsch_num is not None and nr_pdsch_num > 0)
+                        or row.get("nrChannelNumber") is not None
+                        or "5G" in serving_tech_upper
+                        or "EN-DC" in serving_tech_upper
+                        or "5G" in packet_tech_upper
+                        or "EN-DC" in packet_tech_upper
+                        or (_nemo_is_valid_band(band_text) and band_key.startswith("n"))
+                    )
+                    if is_nr_active:
+                        active_nr_slots += 1
+                        if _nemo_is_valid_band(band_text) and band_key.startswith("n"):
+                            active_nr_band_counts[band_key] = (
+                                active_nr_band_counts.get(band_key, 0) + 1
+                            )
+                    mod_cw0 = _nemo_clean_modulation(row.get("pdschModulationCw0"))
+                    mod_cw1 = _nemo_clean_modulation(row.get("pdschModulationCw1"))
+                    if mod_cw0 == "256QAM" or mod_cw1 == "256QAM":
+                        mod256_hits += 1
+                    rank_val = row.get("scheduledRank")
+                    if rank_val in (None, ""):
+                        rank_val = row.get("ri")
+                    _append_sample(rank_samples, rdt, rank_val, positive=True)
+                    _append_sample(
+                        scell_samples,
+                        rdt,
+                        row.get("scellsCount"),
+                        positive=False,
+                    )
+                    lat_val = row.get("lat")
+                    lon_val = row.get("lon")
+                    try:
+                        if lat_val is not None and lon_val is not None:
+                            active_coords.append(
+                                (rdt, float(lat_val), float(lon_val))
+                            )
+                    except (TypeError, ValueError):
+                        pass
                     _append_sample(
                         rf_rsrp,
                         rdt,
@@ -2718,12 +2770,31 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         lte_pdsch_mean = _avg_series(lte_pdsch)
         mac_total_mean = _avg_series(mac_total, plateau_start_dt)
         bw_mhz = _median_series(bw_samples)
+        agg_bw_mhz = _avg_series(bw_samples, min_points=1) or bw_mhz
+        avg_rank = _avg_series(rank_samples, min_points=1)
+        scell_count = _avg_series(scell_samples, min_points=1)
         active_slot_count = len(app_samples) or len(
             {dt for dt, _, _ in nr_pdsch} | {dt for dt, _, _ in lte_pdsch}
         )
         rf_sample_count = max(len(rf_rsrp), len(rf_sinr))
         steady_or_avg = steady_state_mbps or avg_rate
         steady_or_avg_raw = steady_state_raw or avg_rate_raw
+        nr_dwell_pct = (
+            round((active_nr_slots / float(active_slot_count)) * 100.0, 1)
+            if active_slot_count
+            else None
+        )
+        nr_band_dwell_pct = {}
+        if active_nr_slots:
+            nr_band_dwell_pct = {
+                band: round((count / float(active_nr_slots)) * 100.0, 1)
+                for band, count in sorted(active_nr_band_counts.items())
+            }
+        mod256_pct = (
+            round((mod256_hits / float(active_slot_count)) * 100.0, 1)
+            if active_slot_count
+            else None
+        )
         throughput_spread = None
         if app_samples:
             app_vals = [value for _, value in app_samples]
@@ -2738,9 +2809,44 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         if steady_or_avg_raw and bw_mhz and bw_mhz > 0:
             mbps_per_mhz = round(steady_or_avg_raw / bw_mhz, 2)
             spectral_eff_bps_hz = mbps_per_mhz
+        spectral_eff_mbps_per_mhz = mbps_per_mhz
         if steady_or_avg_raw and prb_util_mean and prb_util_mean > 0:
             mbps_per_prb_pct = round(steady_or_avg_raw / prb_util_mean, 2)
             scheduler_yield_mbps_per_prb_pct = mbps_per_prb_pct
+        dl_centroid = None
+        dl_median_speed_kmh = None
+        if active_coords:
+            dl_centroid = {
+                "lat": round(
+                    sum(lat for _, lat, _ in active_coords)
+                    / float(len(active_coords)),
+                    6,
+                ),
+                "lon": round(
+                    sum(lon for _, _, lon in active_coords)
+                    / float(len(active_coords)),
+                    6,
+                ),
+            }
+            speed_samples = []
+            ordered_coords = sorted(active_coords, key=lambda item: item[0])
+            for idx in range(1, len(ordered_coords)):
+                prev_dt, prev_lat, prev_lon = ordered_coords[idx - 1]
+                curr_dt, curr_lat, curr_lon = ordered_coords[idx]
+                delta_s = (curr_dt - prev_dt).total_seconds()
+                if delta_s <= 0:
+                    continue
+                dist_m = _nemo_haversine_m(prev_lat, prev_lon, curr_lat, curr_lon)
+                if dist_m is None:
+                    continue
+                speed_samples.append((dist_m / delta_s) * 3.6)
+            if speed_samples:
+                dl_median_speed_kmh = round(
+                    _nemo_numeric_median(speed_samples),
+                    1,
+                )
+            elif len(active_coords) >= 1:
+                dl_median_speed_kmh = 0.0
         if steady_or_avg_raw and mac_total_mean and mac_total_mean > 0:
             delivery_candidate = steady_or_avg_raw / mac_total_mean * 100.0
             if 20 <= delivery_candidate <= 105:
@@ -2873,11 +2979,21 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "peakToAvgRatio": peak_to_avg_ratio,
             "dlSlowStartNote": slow_start_note,
             "bwMHz": bw_mhz,
+            "aggBwMhz": agg_bw_mhz,
+            "scellCount": scell_count,
             "mbpsPerMHz": mbps_per_mhz,
             "mbpsPerPrbPct": mbps_per_prb_pct,
             "spectralEfficiencyBpsHz": spectral_eff_bps_hz,
+            "spectralEffMbpsPerMhz": spectral_eff_mbps_per_mhz,
             "schedulerYieldMbpsPerPrbPct": scheduler_yield_mbps_per_prb_pct,
             "deliveryEfficiencyPct": delivery_efficiency_pct,
+            "nrDwellPct": nr_dwell_pct,
+            "nrRoutePresencePct": None,
+            "nrBandDwellPct": nr_band_dwell_pct,
+            "mod256Pct": mod256_pct,
+            "avgRank": avg_rank,
+            "dlCentroid": dl_centroid,
+            "dlMedianSpeedKmh": dl_median_speed_kmh,
             "loadState": load_state,
             "confidenceClass": confidence_class,
             "confidenceLevel": confidence_class,
@@ -2972,11 +3088,21 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "dlPeakToAvgRatio": ds.get("peakToAvgRatio"),
             "dlSlowStartNote": ds.get("dlSlowStartNote"),
             "bwMHz": ds.get("bwMHz"),
+            "aggBwMhz": ds.get("aggBwMhz"),
+            "scellCount": ds.get("scellCount"),
             "mbpsPerMHz": ds.get("mbpsPerMHz"),
             "mbpsPerPrbPct": ds.get("mbpsPerPrbPct"),
             "spectralEfficiencyBpsHz": ds.get("spectralEfficiencyBpsHz"),
+            "spectralEffMbpsPerMhz": ds.get("spectralEffMbpsPerMhz"),
             "schedulerYieldMbpsPerPrbPct": ds.get("schedulerYieldMbpsPerPrbPct"),
             "deliveryEfficiencyPct": ds.get("deliveryEfficiencyPct"),
+            "nrDwellPct": ds.get("nrDwellPct"),
+            "nrRoutePresencePct": ds.get("nrRoutePresencePct"),
+            "nrBandDwellPct": ds.get("nrBandDwellPct") or {},
+            "mod256Pct": ds.get("mod256Pct"),
+            "avgRank": ds.get("avgRank"),
+            "dlCentroid": ds.get("dlCentroid"),
+            "dlMedianSpeedKmh": ds.get("dlMedianSpeedKmh"),
             "loadState": ds.get("loadState"),
             "confidenceClass": ds.get("confidenceClass"),
             "confidenceLevel": ds.get("confidenceLevel"),
@@ -14765,7 +14891,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 49
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 50
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15072,6 +15198,21 @@ def _benchmark_nemo_build_dataset(
             window_mode=window_mode,
         )
         item["technologyStatus"] = merged_technology_status
+        timeline_entry = dl_timeline_by_metric.get(item.get("operator") or "")
+        nr_route_presence_pct = (
+            merged_technology_status.get("nrPresencePct")
+            if isinstance(merged_technology_status, dict)
+            else None
+        )
+        if isinstance(timeline_entry, dict):
+            session_stats = timeline_entry.setdefault("sessionStats", {})
+            download_stats = session_stats.get("download") or {}
+            if download_stats:
+                download_stats["nrRoutePresencePct"] = nr_route_presence_pct
+                kpis_block = session_stats.get("kpis") or {}
+                kpis_block["nrRoutePresencePct"] = nr_route_presence_pct
+                session_stats["kpis"] = kpis_block
+                session_stats["download"] = download_stats
         operators_payload.append({
             "operator": item.get("operator"),
             "fileName": item.get("fileName"),
@@ -15255,6 +15396,13 @@ def _benchmark_nemo_build_dataset(
         "rawParsingQa": raw_parsing_qa,
         "sourceFiles": [{"operator": item.get("operator"), "fileName": item.get("fileName"), "path": item.get("path")} for item in prepared_operator_files],
         "deepBenchmark": deep_benchmark,
+        "macroContext": {
+            "causalChain": (
+                ((deep_benchmark or {}).get("execSummary") or {}).get("causalChain")
+                or {}
+            ),
+            "deviceByOperator": device_by_operator,
+        },
         "operatorCount": len(operators_payload),
         "testCount": len(all_tests),
         "transferSessionCount": len(all_transfer_sessions),
