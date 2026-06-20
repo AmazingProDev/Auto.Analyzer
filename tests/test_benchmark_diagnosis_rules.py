@@ -1206,7 +1206,7 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(download["confidenceClass"], "high")
         self.assertEqual(kpis["confidenceClass"], "high")
 
-    def test_nemo_extract_dl_events_uses_only_active_slots_for_rf_means(self):
+    def test_nemo_extract_dl_events_rf_means_use_transfer_window(self):
         rows = self._nemo_download_session_rows(
             dreq_offset_s=0.3,
             dcomp_offset_s=4.3,
@@ -1261,8 +1261,11 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         download = result["download"]
         kpis = result["kpis"]
 
-        self.assertAlmostEqual(download["ssSinrMean"], 12.7, places=1)
-        self.assertAlmostEqual(download["ssRsrpMean"], -91.5, places=1)
+        # RF is the simple mean over the DREQ→DCOMP transfer window. The two idle rows
+        # (at 0.1 s before DREQ and 4.7 s after DCOMP) are excluded; the three transfer-window
+        # samples (10/12/14 dB, -95/-92/-90 dBm) are averaged unweighted.
+        self.assertAlmostEqual(download["ssSinrMean"], 12.0, places=1)
+        self.assertAlmostEqual(download["ssRsrpMean"], -92.3, places=1)
         self.assertEqual(download["rfSampleCount"], 3)
         self.assertEqual(kpis["rfSampleCount"], 3)
         self.assertEqual(download["activeSlotCount"], 3)

@@ -589,12 +589,38 @@ def _benchmark_nemo_saved_paths() -> list[str]:
     return []
 
 
+def _benchmark_nemo_upload_dir_paths() -> list[str]:
+    """Fallback source: the Nemo TXT files sitting in the upload dir. Used when the saved
+    config points at stale/temp paths that no longer exist (e.g. after a reboot or a temp-file
+    cleanup), so a reload still works instead of failing with 'no files found'."""
+    folder = os.path.join(UPLOAD_DIR, "benchmark_nemo")
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.lower().endswith((".txt", ".csv", ".tsv")):
+            continue
+        if _nemo_is_session_stats_file(name):
+            continue
+        out.append(os.path.join(folder, name))
+    return out
+
+
 def _benchmark_nemo_resolve_paths(explicit_paths=None) -> list[str]:
     if isinstance(explicit_paths, list):
         paths = [str(path).strip() for path in explicit_paths if str(path or "").strip()]
         if paths:
             return paths
-    return _benchmark_nemo_saved_paths()
+    saved = _benchmark_nemo_saved_paths()
+    existing = [p for p in saved if os.path.isfile(p)]
+    if existing:
+        return existing
+    # Saved config is empty or stale (points at files that no longer exist) → fall back to
+    # whatever Nemo TXT files are in the upload dir so a reload still succeeds.
+    fallback = _benchmark_nemo_upload_dir_paths()
+    return fallback or saved
 
 
 # DL throughput is computed only from "App. rate DL" (instantaneous appDlMbps). The old
@@ -2427,6 +2453,10 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
     for sess in sessions_raw:
         win_start = sess.get("_daa_dt") or sess.get("_dreq_dt")
         win_end = sess.get("_dad_dt") or sess.get("_dcomp_dt")
+        # RF/PHY is averaged over the actual transfer window (DREQ→DCOMP), which excludes the
+        # brief connect (DAA→DREQ) and teardown (DCOMP→DAD) phases where SINR can be transitional.
+        rf_lo = sess.get("_dreq_dt") or win_start
+        rf_hi = sess.get("_dcomp_dt") or win_end
         direction = protocol = status = ""
         bytes_dl = bytes_ul = dl_time_kpi = file_size = None
         rf_rsrp = []; rf_sinr = []; rf_prb = []; nr_pdsch = []; lte_pdsch = []
@@ -2515,6 +2545,17 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 rdt = row.get("_dt")
                 if rdt is None or rdt < win_start or rdt > win_end:
                     continue
+                # SS-RSRP / SS-SINR / PRB are logged on DIFFERENT rows than the per-second
+                # throughput samples (sparse change-event columns), so the two practically
+                # never co-occur. Collect RF over ALL rows in the download window — not only
+                # throughput-active rows — otherwise the averages come back empty. Simple
+                # windowed mean (no throughput weighting; weights would need co-located
+                # throughput that doesn't exist). This still excludes the pre-DREQ connect and
+                # post-DCOMP idle (RF is restricted to the DREQ→DCOMP transfer window below).
+                if (rf_lo is None or rdt >= rf_lo) and (rf_hi is None or rdt <= rf_hi):
+                    _append_sample(rf_rsrp, rdt, row.get("rsrpNr"))
+                    _append_sample(rf_sinr, rdt, row.get("sinrNr"))
+                    _append_sample(rf_prb, rdt, row.get("dlPrbPct"), positive=True)
                 if not measurement_title:
                     measurement_title = str(row.get("measurementTitle") or "").strip() or None
                 d = str(row.get("dataTransferDirection") or "").strip()
@@ -2632,19 +2673,6 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                             )
                     except (TypeError, ValueError):
                         pass
-                    _append_sample(
-                        rf_rsrp,
-                        rdt,
-                        row.get("rsrpNr"),
-                        weight=active_slot_weight,
-                    )
-                    _append_sample(
-                        rf_sinr,
-                        rdt,
-                        row.get("sinrNr"),
-                        weight=active_slot_weight,
-                    )
-                    _append_sample(rf_prb, rdt, row.get("dlPrbPct"), positive=True)
                     _append_sample(
                         nr_pdsch,
                         rdt,
@@ -14891,7 +14919,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 50
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 51
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
