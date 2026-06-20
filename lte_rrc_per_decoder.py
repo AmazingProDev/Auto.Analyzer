@@ -895,6 +895,189 @@ _RRC_EVENT_PROFILES: List[Dict[str, Any]] = [
             "RRCConnectionReestablishmentReject_r8_IEs",
         ],
     },
+    {
+        "id": "rrc_conn_setup",
+        "param_prefix": "rrc_setup",
+        "event_contains": [
+            "ccchdl.rrcconnectionsetup",
+            "dcchul.rrcconnectionsetup",
+            ".rrcconnectionsetup",
+        ],
+        "must_tokens": ["rrcconnectionsetup"],
+        "candidate_names": [
+            "DL_CCCH_Message",
+            "RRCConnectionSetup",
+            "RRCConnectionSetup_r8_IEs",
+        ],
+    },
+    {
+        "id": "rrc_conn_reject",
+        "param_prefix": "rrc_conn_reject",
+        "event_contains": [
+            "ccchdl.rrcconnectionreject",
+            ".rrcconnectionreject",
+        ],
+        "must_tokens": ["rrcconnectionreject"],
+        "candidate_names": [
+            "DL_CCCH_Message",
+            "RRCConnectionReject",
+            "RRCConnectionReject_r8_IEs",
+        ],
+    },
+    {
+        "id": "rrc_reestablishment",
+        "param_prefix": "rrc_reest",
+        "event_contains": [
+            "ccchdl.rrcconnectionreestablishment",
+            "dcchdl.rrcconnectionreestablishment",
+        ],
+        "must_tokens": ["rrcconnectionreestablishment"],
+        "candidate_names": [
+            "DL_CCCH_Message",
+            "RRCConnectionReestablishment",
+            "RRCConnectionReestablishment_r8_IEs",
+        ],
+    },
+    {
+        "id": "mobility_from_eutra",
+        "param_prefix": "mobility_from_eutra",
+        "event_contains": [
+            "mobilityfromeutracommand",
+            ".mobilityfromeUTRAcommand",
+        ],
+        "must_tokens": ["mobilityfromeutracommand"],
+        "candidate_names": [
+            "DL_DCCH_Message",
+            "MobilityFromEUTRACommand",
+            "MobilityFromEUTRACommand_r8_IEs",
+        ],
+    },
+    {
+        "id": "ho_from_eutra_prep",
+        "param_prefix": "ho_from_eutra_prep",
+        "event_contains": [
+            "handoverfromeutrapreparationrequest",
+        ],
+        "must_tokens": ["handoverfromeutrapreparationrequest"],
+        "candidate_names": [
+            "UL_DCCH_Message",
+            "HandoverFromEUTRAPreparationRequest",
+            "HandoverFromEUTRAPreparationRequest_r8_IEs",
+        ],
+    },
+    {
+        "id": "ue_capability_enquiry",
+        "param_prefix": "ue_cap_enquiry",
+        "event_contains": [
+            "dcchdl.uecapabilityenquiry",
+            ".uecapabilityenquiry",
+        ],
+        "must_tokens": ["uecapabilityenquiry"],
+        "candidate_names": [
+            "DL_DCCH_Message",
+            "UECapabilityEnquiry",
+            "UECapabilityEnquiry_r8_IEs",
+        ],
+    },
+    {
+        "id": "dl_info_transfer",
+        "param_prefix": "dl_info_transfer",
+        "event_contains": [
+            "dcchdl.dlinformationtransfer",
+            ".dlinformationtransfer",
+        ],
+        "must_tokens": ["dlinformationtransfer"],
+        "candidate_names": [
+            "DL_DCCH_Message",
+            "DLInformationTransfer",
+            "DLInformationTransfer_r8_IEs",
+        ],
+    },
+    {
+        "id": "ul_info_transfer",
+        "param_prefix": "ul_info_transfer",
+        "event_contains": [
+            "dcchul.ulinformationtransfer",
+            ".ulinformationtransfer",
+        ],
+        "must_tokens": ["ulinformationtransfer"],
+        "candidate_names": [
+            "UL_DCCH_Message",
+            "ULInformationTransfer",
+            "ULInformationTransfer_r8_IEs",
+        ],
+    },
+    {
+        "id": "ul_ho_prep_transfer",
+        "param_prefix": "ul_ho_prep_transfer",
+        "event_contains": [
+            "dcchul.ulhandoverpreparationtransfer",
+            ".ulhandoverpreparationtransfer",
+        ],
+        "must_tokens": ["ulhandoverpreparationtransfer"],
+        "candidate_names": [
+            "UL_DCCH_Message",
+            "ULHandoverPreparationTransfer",
+            "ULHandoverPreparationTransfer_r8_IEs",
+        ],
+    },
+    {
+        "id": "sib2",
+        "param_prefix": "sib2",
+        "event_contains": [
+            "systeminformation - sib2",
+            "systeminformation - sib1,sib2",
+            ".sib2",
+        ],
+        "must_tokens": ["sib2"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
+    {
+        "id": "sib4",
+        "param_prefix": "sib4",
+        "event_contains": [
+            "systeminformation - sib4",
+            ".sib4",
+        ],
+        "must_tokens": ["sib4"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
+    {
+        "id": "sib6",
+        "param_prefix": "sib6",
+        "event_contains": [
+            "systeminformation - sib6",
+            ".sib6",
+        ],
+        "must_tokens": ["sib6"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
+    {
+        "id": "sib7",
+        "param_prefix": "sib7",
+        "event_contains": [
+            "systeminformation - sib7",
+            ".sib7",
+        ],
+        "must_tokens": ["sib7"],
+        "candidate_names": [
+            "BCCH_DL_SCH_Message",
+            "SystemInformation",
+            "SystemInformation_r8_IEs",
+        ],
+    },
 ]
 
 
@@ -902,10 +1085,20 @@ def _pick_rrc_event_profile(event_name: str) -> Optional[Dict[str, Any]]:
     low = str(event_name or "").strip().lower()
     if not low:
         return None
+    # First pass: full substring match (works for ETSI names with channel segment)
     for profile in _RRC_EVENT_PROFILES:
         for token in profile.get("event_contains") or []:
             if str(token) and str(token) in low:
                 return profile
+    # Second pass: match on last dot-segment only (handles Nemo names like
+    # "Message.Layer3.LteRrc.RrcConnectionSetup" that have no channel segment)
+    last_seg = low.rsplit(".", 1)[-1] if "." in low else low
+    if last_seg:
+        for profile in _RRC_EVENT_PROFILES:
+            for token in profile.get("event_contains") or []:
+                token_last = str(token).rsplit(".", 1)[-1]
+                if token_last and len(token_last) > 4 and token_last in last_seg:
+                    return profile
     return None
 
 
@@ -1459,6 +1652,106 @@ def _summary_for_profile(profile: Dict[str, Any], decoded_json: Dict[str, Any]) 
         summary["hasRlfInfoAvailable"] = bool(
             _first_present(decoded_json, ["rlf_InfoAvailable_r10", "rlf_InfoAvailable_r9"])
         )
+    elif profile_id == "rrc_conn_setup":
+        rr_cfg = _find_first_key(decoded_json, "radioResourceConfigDedicated")
+        if isinstance(rr_cfg, dict):
+            srb_list = rr_cfg.get("srb-ToAddModList") or rr_cfg.get("srb_ToAddModList") or []
+            drb_list = rr_cfg.get("drb-ToAddModList") or rr_cfg.get("drb_ToAddModList") or []
+            summary["srbCount"] = len(srb_list) if isinstance(srb_list, list) else 0
+            summary["drbCount"] = len(drb_list) if isinstance(drb_list, list) else 0
+        summary["hasRadioResourceConfig"] = bool(rr_cfg)
+    elif profile_id == "rrc_conn_reject":
+        summary["waitTime"] = _safe_int(_first_present(decoded_json, ["waitTime", "wait-Time", "wait_Time"]))
+    elif profile_id == "rrc_reestablishment":
+        summary["nextHopChainingCount"] = _safe_int(
+            _first_present(decoded_json, ["nextHopChainingCount", "nextHopChainingCount-r8"])
+        )
+        summary["hasRadioResourceConfig"] = bool(_find_first_key(decoded_json, "radioResourceConfigDedicated"))
+    elif profile_id == "mobility_from_eutra":
+        purpose = _first_present(decoded_json, ["purpose", "Purpose"])
+        if isinstance(purpose, dict):
+            summary["targetRAT"] = next(iter(purpose.keys()), None)
+        else:
+            summary["targetRAT"] = purpose
+        summary["hasCsParameters"] = bool(_find_first_key(decoded_json, "cs-Parameters") or _find_first_key(decoded_json, "cs_Parameters"))
+    elif profile_id == "ho_from_eutra_prep":
+        summary["cdma2000Type"] = _first_present(decoded_json, ["cdma2000-Type", "cdma2000_Type"])
+        summary["hasMobilityParameters"] = bool(_find_first_key(decoded_json, "mobilityParameters"))
+    elif profile_id == "ue_capability_enquiry":
+        req = _first_present(decoded_json, ["ue-CapabilityRequest", "ue_CapabilityRequest"])
+        if isinstance(req, list):
+            summary["requestedRatTypes"] = req
+            summary["requestedRatTypeCount"] = len(req)
+        summary["hasFreqBandIndicators"] = bool(_find_first_key(decoded_json, "freqBandIndicatorEUTRA") or _find_first_key(decoded_json, "freqBandIndicatorNR"))
+    elif profile_id in ("dl_info_transfer", "ul_info_transfer", "ul_ho_prep_transfer"):
+        dedicated_info = _first_present(decoded_json, ["dedicatedInfo", "dedicatedInfoType"])
+        if isinstance(dedicated_info, dict):
+            summary["dedicatedInfoType"] = next(iter(dedicated_info.keys()), "nas")
+            nas_val = dedicated_info.get("nas") or dedicated_info.get("dedicatedInfoNAS")
+            if nas_val is not None:
+                summary["hasNasPayload"] = True
+                if isinstance(nas_val, (str, bytes, list)):
+                    try:
+                        if isinstance(nas_val, str):
+                            summary["nasPayloadLenBytes"] = len(nas_val.encode("latin-1"))
+                        elif isinstance(nas_val, bytes):
+                            summary["nasPayloadLenBytes"] = len(nas_val)
+                        elif isinstance(nas_val, list):
+                            summary["nasPayloadLenBytes"] = len(nas_val)
+                    except Exception:
+                        pass
+        else:
+            has_nas = bool(_first_present(decoded_json, ["dedicatedInfoNAS", "dedicated_info_nas", "dedicatedInfoNAS-r15"]))
+            summary["hasNasPayload"] = has_nas
+    elif profile_id == "sib2":
+        sib2 = _find_first_key(decoded_json, "sib2")
+        if isinstance(sib2, dict):
+            rr_common = sib2.get("radioResourceConfigCommon") or {}
+            timers = sib2.get("ue-TimersAndConstants") or sib2.get("ue_TimersAndConstants") or {}
+            ac_barring = sib2.get("ac-BarringConfig") or sib2.get("ac_BarringConfig") or {}
+            summary["hasAcBarring"] = bool(ac_barring)
+            summary["t300"] = _safe_int(_first_present(timers, ["t300"]))
+            summary["t301"] = _safe_int(_first_present(timers, ["t301"]))
+            summary["t310"] = _safe_int(_first_present(timers, ["t310"]))
+            summary["t311"] = _safe_int(_first_present(timers, ["t311"]))
+            summary["hasRaConfig"] = bool(rr_common.get("rach-ConfigCommon") or rr_common.get("rach_ConfigCommon"))
+    elif profile_id == "sib4":
+        sib4 = _find_first_key(decoded_json, "sib4")
+        if isinstance(sib4, dict):
+            neigh_list = sib4.get("intraFreqNeighCellList") or []
+            black_list = sib4.get("intraFreqBlackCellList") or []
+            summary["intraFreqNeighCellCount"] = len(neigh_list) if isinstance(neigh_list, list) else 0
+            summary["intraFreqBlackCellCount"] = len(black_list) if isinstance(black_list, list) else 0
+            pcis = []
+            if isinstance(neigh_list, list):
+                for cell in neigh_list:
+                    if isinstance(cell, dict):
+                        pci = _safe_int(cell.get("physCellId") or cell.get("phys-CellId"))
+                        if pci is not None:
+                            pcis.append(pci)
+            summary["intraFreqNeighPCIs"] = pcis
+    elif profile_id == "sib6":
+        sib6 = _find_first_key(decoded_json, "sib6")
+        if isinstance(sib6, dict):
+            fdd_list = sib6.get("carrierFreqListUTRA-FDD") or sib6.get("carrierFreqListUTRA_FDD") or []
+            tdd_list = sib6.get("carrierFreqListUTRA-TDD") or sib6.get("carrierFreqListUTRA_TDD") or []
+            summary["utraFddCarrierCount"] = len(fdd_list) if isinstance(fdd_list, list) else 0
+            summary["utraTddCarrierCount"] = len(tdd_list) if isinstance(tdd_list, list) else 0
+            carriers = []
+            for row in (fdd_list if isinstance(fdd_list, list) else []):
+                if isinstance(row, dict):
+                    carriers.append({
+                        "rat": "UTRA-FDD",
+                        "uarfcn": _safe_int(row.get("carrierFreq")),
+                        "priority": _safe_int(row.get("cellReselectionPriority")),
+                        "qRxLevMin": _safe_int(row.get("q-RxLevMin") or row.get("q_RxLevMin")),
+                    })
+            summary["utraCarriers"] = carriers
+    elif profile_id == "sib7":
+        sib7 = _find_first_key(decoded_json, "sib7")
+        if isinstance(sib7, dict):
+            geran_list = sib7.get("carrierFreqsInfoList") or []
+            summary["geranCarrierGroupCount"] = len(geran_list) if isinstance(geran_list, list) else 0
     return summary
 
 
