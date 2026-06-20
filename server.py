@@ -2464,11 +2464,17 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         app_samples = []
         bw_samples = []
         scell_samples = []
-        rank_samples = []
         active_coords = []
-        active_nr_slots = 0
-        active_nr_band_counts: dict[str, int] = {}
-        mod256_hits = 0
+        # Band / modulation / rank / NR-presence live on sparse change-event rows (not the
+        # throughput rows), so they are accumulated over the whole transfer window below —
+        # the same fix applied to RF. Throughput-row-only counting produced n78%=—,
+        # mod256%=0, rank=None and an impossible 5G dwell of 125%.
+        win_banded_rows = 0
+        win_nr_rows = 0
+        win_band_counts: dict[str, int] = {}
+        win_mod256 = 0
+        win_mod_total = 0
+        win_rank = []
         measurement_title = None
 
         def _append_sample(bucket, when, value, positive=False, weight=None):
@@ -2556,6 +2562,30 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                     _append_sample(rf_rsrp, rdt, row.get("rsrpNr"))
                     _append_sample(rf_sinr, rdt, row.get("sinrNr"))
                     _append_sample(rf_prb, rdt, row.get("dlPrbPct"), positive=True)
+                    # Band / modulation / rank / NR-presence over the transfer window.
+                    _band_text = str(row.get("band") or "").strip()
+                    if _nemo_is_valid_band(_band_text):
+                        win_banded_rows += 1
+                        _bk = _band_text.lower()
+                        _tech = (
+                            str(row.get("servingTechnology") or "").upper()
+                            + " "
+                            + str(row.get("packetTechnology") or "").upper()
+                        )
+                        if _bk.startswith("n") or "5G" in _tech or "EN-DC" in _tech:
+                            win_nr_rows += 1
+                            if _bk.startswith("n"):
+                                win_band_counts[_bk] = win_band_counts.get(_bk, 0) + 1
+                    _m0 = _nemo_clean_modulation(row.get("pdschModulationCw0"))
+                    _m1 = _nemo_clean_modulation(row.get("pdschModulationCw1"))
+                    if _m0 or _m1:
+                        win_mod_total += 1
+                        if _m0 == "256QAM" or _m1 == "256QAM":
+                            win_mod256 += 1
+                    _rk = row.get("scheduledRank")
+                    if _rk in (None, ""):
+                        _rk = row.get("ri")
+                    _append_sample(win_rank, rdt, _rk, positive=True)
                 if not measurement_title:
                     measurement_title = str(row.get("measurementTitle") or "").strip() or None
                 d = str(row.get("dataTransferDirection") or "").strip()
@@ -2627,37 +2657,6 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 elif pdsch_total > 0:
                     active_slot_weight = pdsch_total
                 if active_slot_weight is not None:
-                    band_text = str(row.get("band") or "").strip()
-                    band_key = band_text.lower()
-                    serving_tech_upper = str(
-                        row.get("servingTechnology") or ""
-                    ).upper()
-                    packet_tech_upper = str(
-                        row.get("packetTechnology") or ""
-                    ).upper()
-                    is_nr_active = bool(
-                        (nr_pdsch_num is not None and nr_pdsch_num > 0)
-                        or row.get("nrChannelNumber") is not None
-                        or "5G" in serving_tech_upper
-                        or "EN-DC" in serving_tech_upper
-                        or "5G" in packet_tech_upper
-                        or "EN-DC" in packet_tech_upper
-                        or (_nemo_is_valid_band(band_text) and band_key.startswith("n"))
-                    )
-                    if is_nr_active:
-                        active_nr_slots += 1
-                        if _nemo_is_valid_band(band_text) and band_key.startswith("n"):
-                            active_nr_band_counts[band_key] = (
-                                active_nr_band_counts.get(band_key, 0) + 1
-                            )
-                    mod_cw0 = _nemo_clean_modulation(row.get("pdschModulationCw0"))
-                    mod_cw1 = _nemo_clean_modulation(row.get("pdschModulationCw1"))
-                    if mod_cw0 == "256QAM" or mod_cw1 == "256QAM":
-                        mod256_hits += 1
-                    rank_val = row.get("scheduledRank")
-                    if rank_val in (None, ""):
-                        rank_val = row.get("ri")
-                    _append_sample(rank_samples, rdt, rank_val, positive=True)
                     _append_sample(
                         scell_samples,
                         rdt,
@@ -2799,7 +2798,7 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         mac_total_mean = _avg_series(mac_total, plateau_start_dt)
         bw_mhz = _median_series(bw_samples)
         agg_bw_mhz = _avg_series(bw_samples, min_points=1) or bw_mhz
-        avg_rank = _avg_series(rank_samples, min_points=1)
+        avg_rank = _avg_series(win_rank, min_points=1)
         scell_count = _avg_series(scell_samples, min_points=1)
         active_slot_count = len(app_samples) or len(
             {dt for dt, _, _ in nr_pdsch} | {dt for dt, _, _ in lte_pdsch}
@@ -2807,20 +2806,23 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         rf_sample_count = max(len(rf_rsrp), len(rf_sinr))
         steady_or_avg = steady_state_mbps or avg_rate
         steady_or_avg_raw = steady_state_raw or avg_rate_raw
+        # 5G dwell = NR-banded rows / all banded rows in the transfer window (≤100%).
         nr_dwell_pct = (
-            round((active_nr_slots / float(active_slot_count)) * 100.0, 1)
-            if active_slot_count
+            round((win_nr_rows / float(win_banded_rows)) * 100.0, 1)
+            if win_banded_rows
             else None
         )
+        # Per-NR-band dwell = each NR band's share of NR time in the window.
         nr_band_dwell_pct = {}
-        if active_nr_slots:
+        if win_nr_rows:
             nr_band_dwell_pct = {
-                band: round((count / float(active_nr_slots)) * 100.0, 1)
-                for band, count in sorted(active_nr_band_counts.items())
+                band: round((count / float(win_nr_rows)) * 100.0, 1)
+                for band, count in sorted(win_band_counts.items())
             }
+        # 256QAM share = rows at 256QAM / rows with any modulation in the window.
         mod256_pct = (
-            round((mod256_hits / float(active_slot_count)) * 100.0, 1)
-            if active_slot_count
+            round((win_mod256 / float(win_mod_total)) * 100.0, 1)
+            if win_mod_total
             else None
         )
         throughput_spread = None
@@ -14919,7 +14921,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 51
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 52
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
