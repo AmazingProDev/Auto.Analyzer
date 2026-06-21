@@ -24,6 +24,7 @@
       "NO_N78_CBAND",
       "N78_UNDER_USED",
       "RF_COVERAGE_QUALITY_LIMITATION",
+      "LTE_RF_COVERAGE_QUALITY_LIMITATION",
       "ACTIVE_BANDWIDTH_LIMITATION",
       "CA_LIMITATION",
       "MIMO_RANK_LIMITATION",
@@ -31,6 +32,7 @@
       "CAPACITY_LOAD_LIMITATION",
       "SCHEDULER_ALLOCATION_LIMITATION",
       "SERVER_TCP_APPLICATION_LIMITATION",
+      "LTE_ONLY_BENCHMARK_GAP",
       "MIXED_OR_INCONCLUSIVE",
     ];
     const TECHNICAL_WEIGHTS = {
@@ -375,24 +377,46 @@
             .slice()
             .sort((a, b) => dlThroughput(b) - dlThroughput(a))[0]
         : null;
-      const normNrDwell = metricNormalize(allRows, (row) => row.nrDwellPct);
-      const normN78 = metricNormalize(
-        allRows,
-        (row) => (row.nrBandDwellPct || {}).n78,
+      // LTE-only segment: no operator has meaningful 5G, so NR/n78/BW/rank are absent or
+      // stale. Score the technical reference on the LTE-relevant KPIs (SINR + RSRP + DL +
+      // CQI + 256QAM) instead — otherwise a weaker competitor can win on a phantom NR metric.
+      const lteOnly = !allRows.some(
+        (row) =>
+          (asNumber(row.nrDwellPct) || 0) >= 5 ||
+          (asNumber(row.nrRoutePresencePct) || 0) >= 5,
       );
-      const normBw = metricNormalize(allRows, (row) => row.aggBwMhz);
       const normSinr = metricNormalize(allRows, (row) => row.ssSinrMean);
-      const normRank = metricNormalize(allRows, (row) => row.avgRank);
       const normMod256 = metricNormalize(allRows, (row) => row.mod256Pct);
-      competitors.forEach((row) => {
-        row._macroTechScore =
-          TECHNICAL_WEIGHTS.nrDwellPct * normNrDwell(row) +
-          TECHNICAL_WEIGHTS.n78Pct * normN78(row) +
-          TECHNICAL_WEIGHTS.aggBwMhz * normBw(row) +
-          TECHNICAL_WEIGHTS.ssSinrMean * normSinr(row) +
-          TECHNICAL_WEIGHTS.avgRank * normRank(row) +
-          TECHNICAL_WEIGHTS.mod256Pct * normMod256(row);
-      });
+      if (lteOnly) {
+        const normRsrp = metricNormalize(allRows, (row) => row.ssRsrpMean);
+        const normDl = metricNormalize(allRows, (row) => dlThroughput(row));
+        const normCqi = metricNormalize(allRows, (row) => row.cqiMean);
+        competitors.forEach((row) => {
+          row._macroTechScore =
+            0.35 * normSinr(row) +
+            0.25 * normRsrp(row) +
+            0.2 * normDl(row) +
+            0.1 * normCqi(row) +
+            0.1 * normMod256(row);
+        });
+      } else {
+        const normNrDwell = metricNormalize(allRows, (row) => row.nrDwellPct);
+        const normN78 = metricNormalize(
+          allRows,
+          (row) => (row.nrBandDwellPct || {}).n78,
+        );
+        const normBw = metricNormalize(allRows, (row) => row.aggBwMhz);
+        const normRank = metricNormalize(allRows, (row) => row.avgRank);
+        competitors.forEach((row) => {
+          row._macroTechScore =
+            TECHNICAL_WEIGHTS.nrDwellPct * normNrDwell(row) +
+            TECHNICAL_WEIGHTS.n78Pct * normN78(row) +
+            TECHNICAL_WEIGHTS.aggBwMhz * normBw(row) +
+            TECHNICAL_WEIGHTS.ssSinrMean * normSinr(row) +
+            TECHNICAL_WEIGHTS.avgRank * normRank(row) +
+            TECHNICAL_WEIGHTS.mod256Pct * normMod256(row);
+        });
+      }
       const bestTechnicalCompetitor = competitors.length
         ? competitors
             .slice()
@@ -490,6 +514,16 @@
           label: "Coverage / quality limitation",
           action:
             "Prioritize RF coverage and quality optimization before scheduler or throughput policy changes.",
+        },
+        LTE_RF_COVERAGE_QUALITY_LIMITATION: {
+          label: "LTE RF quality limitation vs best operator",
+          action:
+            "LTE-only segment (no 5G for any operator): check IAM's LTE serving layer — coverage footprint, azimuth/tilt, overshooting, interference, PCI/RS pollution and serving-cell selection at the DT centroid. Separately verify whether 5G/n78 should exist here.",
+        },
+        LTE_ONLY_BENCHMARK_GAP: {
+          label: "LTE-only benchmark gap",
+          action:
+            "No 5G detected for any operator in this DT segment; treat as an LTE performance gap and diagnose with LTE RF / CQI / modulation / bandwidth / load / scheduler, not 5G/n78 causes.",
         },
         ACTIVE_BANDWIDTH_LIMITATION: {
           label: "Active bandwidth limitation",
@@ -612,6 +646,16 @@
         pieces.push(
           "RF quality is materially worse for IAM during the active download window.",
         );
+      } else if (diagnosis.primaryCode === "LTE_RF_COVERAGE_QUALITY_LIMITATION") {
+        pieces.push(
+          "No 5G/n78 was detected for any operator on this DT segment, so this is an LTE-only gap — not 'No 5G for IAM'. The most likely cause is weaker LTE RF quality for IAM versus " +
+            ((bestTechnical && bestTechnical.operator) || "the best operator") +
+            " (lower SS-SINR / RSRP), which is consistent with the lower throughput.",
+        );
+      } else if (diagnosis.primaryCode === "LTE_ONLY_BENCHMARK_GAP") {
+        pieces.push(
+          "No 5G was detected for any operator on this DT segment; this is an LTE-only benchmark gap, not an IAM-specific 5G/n78 problem.",
+        );
       } else if (diagnosis.primaryCode === "IAM_CLOSE_TO_BEST") {
         pieces.push(
           "This is framed as an optimization opportunity rather than a hard failure.",
@@ -636,13 +680,15 @@
             .join(" "),
         );
       }
-      if (diagnosis.confidence && diagnosis.confidence.reasons.length) {
+      if (diagnosis.confidence) {
         pieces.push(
-          "Confidence " +
-            diagnosis.confidence.label +
-            " because " +
-            diagnosis.confidence.reasons.join("; ") +
-            ".",
+          diagnosis.confidence.reasons.length
+            ? "Confidence " +
+                diagnosis.confidence.label +
+                " — penalties: " +
+                diagnosis.confidence.reasons.join("; ") +
+                "."
+            : "Confidence " + diagnosis.confidence.label + ".",
         );
       }
       if (iam && iam.deviceModel && ctx.devicesComparable === false) {
@@ -693,6 +739,10 @@
             "%",
         );
       }
+      if (iam && iam.metricsUnavailable) {
+        score -= 25;
+        reasons.push("NR/PHY resource metrics unavailable or invalid (CQI/MCS/rank/BW/PRB)");
+      }
       const prbWarning = warnings.find((item) => item.code === "prbConsistencyWarning");
       const rfWarning = warnings.find((item) => item.code === "rfThroughputContradiction");
       if (prbWarning) {
@@ -714,6 +764,11 @@
       score = Math.max(0, Math.min(100, score));
       if (prbWarning || rfWarning) {
         score = Math.min(score, thresholds.lowConfidenceMaxScore);
+      }
+      // Missing/invalid PHY metrics cap confidence at Medium — the throughput gap can be
+      // clear while the detailed technical attribution stays uncertain.
+      if (iam && iam.metricsUnavailable) {
+        score = Math.min(score, thresholds.mediumConfidenceMaxScore);
       }
       const label =
         score <= thresholds.lowConfidenceMaxScore
@@ -844,6 +899,29 @@
         iam.ssSinrMean >= thresholds.poorSinrDb &&
         iam.ssRsrpMean >= thresholds.poorRsrpDbm;
 
+      // LTE-only segment: no operator reached the 5G-dwell floor (active window OR route).
+      // Then "No 5G for IAM" / "No n78" are context conditions, not IAM-specific causes.
+      const operatorHas5g = (row) =>
+        (asNumber(row && row.nrDwellPct) || 0) >= thresholds.minNrDwellPct ||
+        (asNumber(row && row.nrRoutePresencePct) || 0) >= thresholds.minNrDwellPct;
+      const lteOnly = allRows.length > 0 && !allRows.some(operatorHas5g);
+      const competitorHas5g = allRows.some(
+        (row) => upper(row.operator) !== "IAM" && operatorHas5g(row),
+      );
+      // NR/PHY resource KPIs are unavailable (all zero) yet IAM downloaded data → the
+      // zeros are "not exported", not real. Don't let them drive MIMO/modulation/load.
+      const phyUnavailable =
+        (asNumber(iam && iam.aggBwMhz) || 0) === 0 &&
+        (asNumber(iam && iam.prbPct) || 0) === 0 &&
+        (asNumber(iam && iam.avgRank) || 0) === 0 &&
+        (asNumber(iam && iam.avgMcs) || 0) === 0 &&
+        (dlThroughput(iam) || 0) > 0;
+      if (iam) iam.metricsUnavailable = phyUnavailable;
+      if (ctx) {
+        ctx.lteOnly = lteOnly;
+        ctx.phyUnavailable = phyUnavailable;
+      }
+
       if (iam) {
         if (
           asNumber(iam.dlSteadyMbps) !== null &&
@@ -949,74 +1027,96 @@
           );
         }
 
-        if (
-          asNumber(iam.nrDwellPct) !== null &&
-          asNumber(iam.nrRoutePresencePct) !== null &&
-          iam.nrDwellPct < thresholds.minNrDwellPct &&
-          iam.nrRoutePresencePct < thresholds.minNrDwellPct
-        ) {
-          addMatch(
+        if (lteOnly) {
+          // No operator had 5G in this DT segment → absence of 5G/n78 is a shared context
+          // condition, not an IAM-specific root cause. Block both and note the LTE-only mode.
+          addBlockedCause(
             "NO_5G_FOR_IAM",
-            "IAM has almost no 5G during the active download window or on the route context.",
+            "No 5G detected for any operator in this DT segment (LTE-only) — not IAM-specific.",
           );
-          pushEvidence(
-            evidence,
-            "5G dwell",
-            iam.nrDwellPct,
-            iam.nrRoutePresencePct,
-            iam.nrRoutePresencePct - iam.nrDwellPct,
-            "No effective 5G participation during the download.",
-          );
-        } else if (
-          asNumber(iam.nrDwellPct) !== null &&
-          asNumber(iam.nrRoutePresencePct) !== null &&
-          iam.nrDwellPct < thresholds.lowNrDwellPct &&
-          iam.nrRoutePresencePct >= thresholds.lowNrDwellPct
-        ) {
-          addMatch(
-            "LOW_5G_RETENTION",
-            "5G is present on the route but not retained through the active download.",
-          );
-          pushEvidence(
-            evidence,
-            "5G retention",
-            iam.nrDwellPct,
-            iam.nrRoutePresencePct,
-            iam.nrRoutePresencePct - iam.nrDwellPct,
-            "Route NR presence exceeds active-download NR dwell, pointing to retention loss.",
-          );
-        }
-
-        if (routeN78 < thresholds.minN78DwellPct) {
-          addMatch(
+          addBlockedCause(
             "NO_N78_CBAND",
-            "IAM shows effectively no n78 usage during the active download.",
+            "No n78 / C-Band for any operator in this LTE-only segment — not IAM-specific.",
           );
           pushEvidence(
             evidence,
-            "n78 dwell",
-            routeN78,
-            refN78,
-            refN78 - routeN78,
-            "n78 C-Band is absent during the active download.",
+            "5G availability",
+            iam.nrDwellPct,
+            null,
+            null,
+            "LTE-only benchmark: no operator reached the 5G-dwell floor on this DT segment.",
           );
-        } else if (refN78 - routeN78 > thresholds.n78GapPts) {
-          addMatch(
-            "N78_UNDER_USED",
-            "IAM under-uses n78 compared with the best technical reference.",
-          );
-          pushEvidence(
-            evidence,
-            "n78 dwell",
-            routeN78,
-            refN78,
-            refN78 - routeN78,
-            "n78 dwell " +
-              formatNumber(routeN78, 1) +
-              "% vs " +
-              formatNumber(refN78, 1) +
-              "% shows under-used C-Band.",
-          );
+        } else {
+          if (
+            asNumber(iam.nrDwellPct) !== null &&
+            asNumber(iam.nrRoutePresencePct) !== null &&
+            iam.nrDwellPct < thresholds.minNrDwellPct &&
+            iam.nrRoutePresencePct < thresholds.minNrDwellPct &&
+            competitorHas5g
+          ) {
+            addMatch(
+              "NO_5G_FOR_IAM",
+              "IAM has almost no 5G during the active download while a competitor uses 5G.",
+            );
+            pushEvidence(
+              evidence,
+              "5G dwell",
+              iam.nrDwellPct,
+              iam.nrRoutePresencePct,
+              iam.nrRoutePresencePct - iam.nrDwellPct,
+              "No effective 5G for IAM while a competitor has 5G.",
+            );
+          } else if (
+            asNumber(iam.nrDwellPct) !== null &&
+            asNumber(iam.nrRoutePresencePct) !== null &&
+            iam.nrDwellPct < thresholds.lowNrDwellPct &&
+            iam.nrRoutePresencePct >= thresholds.lowNrDwellPct
+          ) {
+            addMatch(
+              "LOW_5G_RETENTION",
+              "5G is present on the route but not retained through the active download.",
+            );
+            pushEvidence(
+              evidence,
+              "5G retention",
+              iam.nrDwellPct,
+              iam.nrRoutePresencePct,
+              iam.nrRoutePresencePct - iam.nrDwellPct,
+              "Route NR presence exceeds active-download NR dwell, pointing to retention loss.",
+            );
+          }
+
+          if (routeN78 < thresholds.minN78DwellPct && competitorHas5g && refN78 > 0) {
+            addMatch(
+              "NO_N78_CBAND",
+              "IAM shows effectively no n78 usage while a competitor uses C-Band.",
+            );
+            pushEvidence(
+              evidence,
+              "n78 dwell",
+              routeN78,
+              refN78,
+              refN78 - routeN78,
+              "n78 C-Band is absent for IAM while a competitor uses it.",
+            );
+          } else if (refN78 - routeN78 > thresholds.n78GapPts) {
+            addMatch(
+              "N78_UNDER_USED",
+              "IAM under-uses n78 compared with the best technical reference.",
+            );
+            pushEvidence(
+              evidence,
+              "n78 dwell",
+              routeN78,
+              refN78,
+              refN78 - routeN78,
+              "n78 dwell " +
+                formatNumber(routeN78, 1) +
+                "% vs " +
+                formatNumber(refN78, 1) +
+                "% shows under-used C-Band.",
+            );
+          }
         }
 
         if (iamRfPoor || iamRfWorse) {
@@ -1026,9 +1126,16 @@
               "RF limitation blocked: IAM RF ≥ reference.",
             );
           } else {
+            // In an LTE-only segment label this as the LTE RF limitation so the verdict
+            // reads "LTE RF quality limitation vs best operator", not a generic NR-tinged one.
+            const rfCode = lteOnly
+              ? "LTE_RF_COVERAGE_QUALITY_LIMITATION"
+              : "RF_COVERAGE_QUALITY_LIMITATION";
             addMatch(
-              "RF_COVERAGE_QUALITY_LIMITATION",
-              "IAM RF quality is materially worse or objectively poor during download.",
+              rfCode,
+              lteOnly
+                ? "LTE-only segment: IAM LTE RF quality is materially worse than the best operator."
+                : "IAM RF quality is materially worse or objectively poor during download.",
             );
             pushEvidence(
               evidence,
@@ -1036,12 +1143,13 @@
               iam && iam.ssSinrMean,
               bestTechnical && bestTechnical.ssSinrMean,
               sinrGap,
-              "RF gap indicates coverage / quality limitation.",
+              "RF gap indicates " +
+                (lteOnly ? "LTE coverage / quality limitation." : "coverage / quality limitation."),
             );
           }
         }
 
-        if (bwGapPct !== null && bwGapPct >= thresholds.bandwidthGapPct) {
+        if (!phyUnavailable && bwGapPct !== null && bwGapPct >= thresholds.bandwidthGapPct) {
           addMatch(
             "ACTIVE_BANDWIDTH_LIMITATION",
             "IAM active bandwidth materially trails the technical reference.",
@@ -1061,6 +1169,7 @@
         }
 
         if (
+          !phyUnavailable &&
           !allZeroScells &&
           scellGap !== null &&
           scellGap >= thresholds.scellGapCount
@@ -1079,7 +1188,7 @@
           );
         }
 
-        if (rankGap !== null && rankGap > thresholds.rankGap) {
+        if (!phyUnavailable && rankGap !== null && rankGap > thresholds.rankGap) {
           if (rfComparable) {
             addMatch(
               "MIMO_RANK_LIMITATION",
@@ -1101,7 +1210,7 @@
           }
         }
 
-        if (qamGap !== null && qamGap > thresholds.qam256GapPts) {
+        if (!phyUnavailable && qamGap !== null && qamGap > thresholds.qam256GapPts) {
           if (rfComparable) {
             addMatch(
               "MODULATION_LIMITATION",
@@ -1126,7 +1235,7 @@
         const prbWarningActive = warnings.some(
           (item) => item.code === "prbConsistencyWarning",
         );
-        if (asNumber(iam && iam.prbPct) !== null && iam.prbPct >= thresholds.highPrbPct) {
+        if (!phyUnavailable && asNumber(iam && iam.prbPct) !== null && iam.prbPct >= thresholds.highPrbPct) {
           if (prbWarningActive) {
             addBlockedCause(
               "CAPACITY_LOAD_LIMITATION",
@@ -1149,6 +1258,7 @@
         }
 
         if (
+          !phyUnavailable &&
           goodRf &&
           asNumber(iam && iam.prbPct) !== null &&
           iam.prbPct < thresholds.lowPrbPct &&
@@ -1187,24 +1297,43 @@
               iam.deliveryEfficiencyPct < 75)
           )
         ) {
-          addMatch(
-            "SERVER_TCP_APPLICATION_LIMITATION",
-            "Application-layer behavior suggests the file transfer itself depresses the byte-based result.",
+          // A radio (RF) limitation explains the gap upstream of the application — and a
+          // competitor reaching far higher throughput in the same context proves the server
+          // can deliver more. So block server/TCP when RF is the detected limiter.
+          const rfLimitationDetected = matches.some(
+            (m) =>
+              m.code === "RF_COVERAGE_QUALITY_LIMITATION" ||
+              m.code === "LTE_RF_COVERAGE_QUALITY_LIMITATION",
           );
-          pushEvidence(
-            evidence,
-            "Byte vs curve delta",
-            iam && iam.byteVsCurveDeltaPct,
-            thresholds.maxByteVsCurveDeltaPct,
-            null,
-            "Large byte-vs-curve delta / slow start points to transfer-method effects.",
-          );
+          if (rfLimitationDetected || iamRfPoor || iamRfWorse) {
+            addBlockedCause(
+              "SERVER_TCP_APPLICATION_LIMITATION",
+              "Server / TCP blocked: a radio (RF) limitation is detected first, and a competitor reaches far higher throughput in the same context.",
+            );
+          } else {
+            addMatch(
+              "SERVER_TCP_APPLICATION_LIMITATION",
+              "Application-layer behavior suggests the file transfer itself depresses the byte-based result.",
+            );
+            pushEvidence(
+              evidence,
+              "Byte vs curve delta",
+              iam && iam.byteVsCurveDeltaPct,
+              thresholds.maxByteVsCurveDeltaPct,
+              null,
+              "Large byte-vs-curve delta / slow start points to transfer-method effects.",
+            );
+          }
         }
 
         if (!matches.length) {
+          // LTE-only segment with no clear LTE sub-cause → name it an LTE-only benchmark gap
+          // rather than a generic "mixed / inconclusive".
           addMatch(
-            "MIXED_OR_INCONCLUSIVE",
-            "No single upstream macro cause dominated after the available checks.",
+            lteOnly ? "LTE_ONLY_BENCHMARK_GAP" : "MIXED_OR_INCONCLUSIVE",
+            lteOnly
+              ? "No 5G for any operator and no dominant LTE sub-cause isolated; LTE-only performance gap."
+              : "No single upstream macro cause dominated after the available checks.",
           );
         }
       }

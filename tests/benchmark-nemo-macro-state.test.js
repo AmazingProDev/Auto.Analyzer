@@ -21,10 +21,34 @@ global.localStorage = (() => {
 
 const {
   buildBenchmarkNemoMacroModel,
+  diagnoseMacro,
   importMacroProfile,
   loadMacroThresholds,
   selectMacroReferences,
 } = require("../benchmark_nemo_macro_state.js");
+
+function makeLteOnlyOp(operator, dl, rsrp, sinr, mod256, phyZero) {
+  return {
+    operator,
+    dlSteadyMbps: dl,
+    dlByteMbps: operator === "IAM" ? 34 : dl * 0.9,
+    dlAppRateMbps: operator === "IAM" ? 34 : dl * 0.9,
+    nrDwellPct: 0,
+    nrRoutePresencePct: 0,
+    nrBandDwellPct: {},
+    mod256Pct: mod256,
+    avgRank: phyZero ? 0 : 1.5,
+    aggBwMhz: phyZero ? 0 : 20,
+    prbPct: phyZero ? 0 : 30,
+    cqiMean: phyZero ? 0 : 9,
+    avgMcs: phyZero ? 0 : 15,
+    ssRsrpMean: rsrp,
+    ssSinrMean: sinr,
+    byteVsCurveDeltaPct: operator === "IAM" ? 32 : 5,
+    throughputSamples: 14,
+    rfSamples: 8,
+  };
+}
 
 function mergeDeep(base, extra) {
   if (!extra || typeof extra !== "object") return base;
@@ -613,5 +637,61 @@ test("acceptance-style Mohammedia fixture yields n78 under-use with blocked RF a
   assert.match(
     diagnosis.conclusionText,
     /Optimization opportunity|under-used C-Band|active bandwidth/i,
+  );
+});
+
+test("LTE-only DT (no operator has 5G): LTE RF limitation, 5G/n78/server blocked, INWI refs, Low confidence", () => {
+  const perOp = {
+    IAM: makeLteOnlyOp("IAM", 49, -92.5, 2.1, 0, true),
+    ORANGE: makeLteOnlyOp("Orange", 89, -93.7, 2.5, 10.6, false),
+    INWI: makeLteOnlyOp("INWI", 169, -85.5, 8.6, 12, false),
+  };
+  const out = diagnoseMacro(perOp, {}, {});
+  const d = out.diagnosis;
+  assert.equal(out.references.bestThroughput.operator, "INWI");
+  assert.equal(out.references.bestTechnical.operator, "INWI");
+  assert.equal(d.primaryCode, "LTE_RF_COVERAGE_QUALITY_LIMITATION");
+  assert.equal(d.severity, "Significant degradation");
+  assert.equal(d.confidence.label, "Low");
+  // 5G/n78 are shared context, not IAM-specific causes; server/TCP blocked behind RF
+  assert.ok(d.blockedCauses.some((b) => b.code === "NO_5G_FOR_IAM"));
+  assert.ok(d.blockedCauses.some((b) => b.code === "NO_N78_CBAND"));
+  assert.ok(d.blockedCauses.some((b) => b.code === "SERVER_TCP_APPLICATION_LIMITATION"));
+  assert.ok(!d.secondary.some((s) => s.code === "NO_5G_FOR_IAM"));
+  assert.ok(!d.secondary.some((s) => s.code === "SERVER_TCP_APPLICATION_LIMITATION"));
+  assert.equal(perOp.IAM.metricsUnavailable, true);
+  assert.match(d.conclusionText, /LTE-only|LTE RF quality/i);
+  assert.match(d.conclusionText, /penalties:/i);
+});
+
+test("NO_5G_FOR_IAM fires only when a competitor actually has 5G", () => {
+  const mk = (operator, dl, nr) => ({
+    operator,
+    dlSteadyMbps: dl,
+    dlByteMbps: dl,
+    dlAppRateMbps: dl,
+    nrDwellPct: nr,
+    nrRoutePresencePct: nr,
+    nrBandDwellPct: nr > 0 ? { n78: nr } : {},
+    mod256Pct: 10,
+    avgRank: 1.5,
+    aggBwMhz: 40,
+    prbPct: 30,
+    cqiMean: 9,
+    avgMcs: 15,
+    ssRsrpMean: -90,
+    ssSinrMean: 10,
+    byteVsCurveDeltaPct: 5,
+    throughputSamples: 50,
+    rfSamples: 40,
+  });
+  const withCompetitor5g = diagnoseMacro(
+    { IAM: mk("IAM", 60, 0), ORANGE: mk("Orange", 80, 50), INWI: mk("INWI", 120, 60) },
+    {},
+    {},
+  ).diagnosis;
+  assert.ok(
+    withCompetitor5g.primaryCode === "NO_5G_FOR_IAM" ||
+      withCompetitor5g.secondary.some((s) => s.code === "NO_5G_FOR_IAM"),
   );
 });
