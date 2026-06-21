@@ -3633,6 +3633,15 @@ document.addEventListener("DOMContentLoaded", () => {
             '<div style="font-size:10px;color:#94a3b8">' +
             escapeHtml(row.deviceModel || "device unknown") +
             "</div></div>";
+        // NR/PHY resource KPIs all zero while data flowed = "not exported", not real zeros.
+        // Show "—" so invalid zeros don't mislead (the diagnosis already ignores them).
+        const phyNA =
+          Number(row.aggBwMhz || 0) === 0 &&
+          Number(row.prbPct || 0) === 0 &&
+          Number(row.avgRank || 0) === 0 &&
+          Number(row.avgMcs || 0) === 0 &&
+          Number(row.dlSteadyMbps || row.dlByteMbps || 0) > 0;
+        const phyVal = (formatted) => (phyNA ? "—" : formatted);
         return (
           "<tr>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);font-size:11px;font-weight:700;color:' +
@@ -3671,9 +3680,9 @@ document.addEventListener("DOMContentLoaded", () => {
           '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(row.nrBands || "—") +
           '</div><div style="font-size:10px;color:#94a3b8">CQI ' +
-          escapeHtml(fmtRank(row.cqiMean)) +
+          phyVal(escapeHtml(fmtRank(row.cqiMean))) +
           " · MCS " +
-          escapeHtml(fmtRank(row.avgMcs)) +
+          phyVal(escapeHtml(fmtRank(row.avgMcs))) +
           "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "rf") +
@@ -3687,23 +3696,23 @@ document.addEventListener("DOMContentLoaded", () => {
           cellStyle(row, "mimo") +
           '">' +
           '<div style="font-size:11px;color:#e2e8f0">' +
-          escapeHtml(fmtPct(row.mod256Pct, 1)) +
+          phyVal(escapeHtml(fmtPct(row.mod256Pct, 1))) +
           '</div><div style="font-size:10px;color:#94a3b8">rank ' +
-          escapeHtml(fmtRank(row.avgRank)) +
+          phyVal(escapeHtml(fmtRank(row.avgRank))) +
           "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "aggBw") +
           '">' +
           '<div style="font-size:11px;color:#e2e8f0">' +
-          escapeHtml(fmtMhz(row.aggBwMhz)) +
+          phyVal(escapeHtml(fmtMhz(row.aggBwMhz))) +
           '</div><div style="font-size:10px;color:#94a3b8">SCells ' +
-          escapeHtml(fmtRank(row.scellCount)) +
+          phyVal(escapeHtml(fmtRank(row.scellCount))) +
           "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "prb") +
           '">' +
           '<div style="font-size:11px;color:#e2e8f0">' +
-          escapeHtml(fmtPct(row.prbPct, 1)) +
+          phyVal(escapeHtml(fmtPct(row.prbPct, 1))) +
           '</div><div style="font-size:10px;color:#94a3b8">' +
           escapeHtml(row.loadState || "—") +
           "</div></td>" +
@@ -3711,7 +3720,7 @@ document.addEventListener("DOMContentLoaded", () => {
           cellStyle(row, "yield") +
           '">' +
           '<div style="font-size:11px;color:#e2e8f0">' +
-          escapeHtml(fmtNum(row.spectralEffMbpsPerMhz, 2)) +
+          phyVal(escapeHtml(fmtNum(row.spectralEffMbpsPerMhz, 2))) +
           '</div><div style="font-size:10px;color:#94a3b8">yield ' +
           escapeHtml(fmtNum(row.schedulerYield, 2)) +
           " · delivery " +
