@@ -3,11 +3,69 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
 from unittest import mock
+import os
 
 import server
 
 
 class BenchmarkDiagnosisRulesTests(unittest.TestCase):
+    def test_nemo_read_tabular_file_streams_without_full_read(self):
+        class _NoReadWrapper:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def read(self, *_args, **_kwargs):
+                raise AssertionError("full-file read() should not be used")
+
+            def readline(self, *args, **kwargs):
+                return self._handle.readline(*args, **kwargs)
+
+            def seek(self, *args, **kwargs):
+                return self._handle.seek(*args, **kwargs)
+
+            def __iter__(self):
+                return iter(self._handle)
+
+            def __next__(self):
+                return next(self._handle)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return self._handle.__exit__(exc_type, exc, tb)
+
+            def close(self):
+                return self._handle.close()
+
+        tmp = NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+        try:
+            tmp.write("Time\tMeasurement Title\tApp. rate DL\n")
+            tmp.write("2026-06-20 08:40:00.000\tDT1\t125000000\n")
+            tmp.close()
+            real_open = open
+
+            def _wrapped_open(path, *args, **kwargs):
+                handle = real_open(path, *args, **kwargs)
+                if path == tmp.name and "r" in (args[0] if args else kwargs.get("mode", "r")):
+                    return _NoReadWrapper(handle)
+                return handle
+
+            with mock.patch("builtins.open", side_effect=_wrapped_open):
+                delimiter, headers, rows = server._nemo_read_tabular_file(tmp.name)
+
+            self.assertEqual(delimiter, "\t")
+            self.assertEqual(headers, ["Time", "Measurement Title", "App. rate DL"])
+            self.assertEqual(
+                rows,
+                [["2026-06-20 08:40:00.000", "DT1", "125000000"]],
+            )
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
     def _nemo_event_row(self, when, event_id, **extra):
         row = {
             "_dt": when,
@@ -355,6 +413,140 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(kpis["dl"]["pooledAverage"], 83.33)
         self.assertEqual(kpis["dl"]["average"], 75.0)
         self.assertEqual(kpis["dl"]["perDtCount"], 2)
+        self.assertEqual(kpis["dl"]["aggMethod"], "dt_weighted")
+        self.assertEqual(kpis["dl"]["pooledAggMethod"], "pooled")
+        self.assertEqual(kpis["appDl"]["aggMethod"], "pooled")
+        self.assertEqual(kpis["successRateAggMethod"], "rate")
+        self.assertEqual(kpis["rsrp"]["aggMethod"], "pooled")
+        self.assertEqual(kpis["dlPrbUtilPct"]["aggMethod"], "pooled")
+        self.assertEqual(kpis["pdschMcs"]["aggMethod"], "pooled")
+
+    def test_operator_kpis_collapse_duplicate_titles_to_one_dt_vote(self):
+        kpis = server._nemo_operator_kpis(
+            {
+                "rows": [],
+                "benchmarkDlMetricKey": "appDlAvgMbps",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 100.0},
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 50.0},
+                    {"measurementTitle": "Kenitra_26Jun04_140005.4", "avgDlMbps": 200.0},
+                ],
+            }
+        )
+
+        self.assertEqual(kpis["dl"]["average"], 137.5)
+        self.assertEqual(kpis["dl"]["perDtCount"], 2)
+
+    def test_location_win_rate_matches_titles_without_trailing_suffix(self):
+        operator_files = [
+            {
+                "operator": "IAM",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 108.0},
+                    {"measurementTitle": "Kenitra_26Jun04_140005.4", "avgDlMbps": 151.0},
+                ],
+                "transferSessions": [],
+            },
+            {
+                "operator": "Orange",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 108.0},
+                    {"measurementTitle": "Kenitra_26Jun04_140005.4", "avgDlMbps": 151.0},
+                ],
+                "transferSessions": [],
+            },
+            {
+                "operator": "INWI",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.6", "avgDlMbps": 144.0},
+                    {"measurementTitle": "Kenitra_26Jun04_140005.6", "avgDlMbps": 149.0},
+                ],
+                "transferSessions": [],
+            },
+        ]
+
+        win_rate = server._nemo_build_location_win_rate(operator_files, metric_kind="dl")
+
+        self.assertEqual(win_rate["matchedLocationCount"], 2)
+        self.assertEqual(win_rate["titleMatchMethod"], "measurement_title_suffix_stripped")
+        self.assertEqual(win_rate["tiePolicy"], "shared_win")
+        self.assertEqual(win_rate["byOperator"]["INWI"]["locationWins"], 1)
+        self.assertEqual(win_rate["byOperator"]["IAM"]["locationWins"], 1)
+        self.assertEqual(win_rate["byOperator"]["Orange"]["locationWins"], 1)
+        self.assertEqual(win_rate["byOperator"]["IAM"]["locationsCompared"], 2)
+
+    def test_location_win_rate_averages_duplicate_titles_per_operator(self):
+        operator_files = [
+            {
+                "operator": "IAM",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 100.0},
+                    {"measurementTitle": "Kenitra_26Jun04_135005.4", "avgDlMbps": 50.0},
+                ],
+                "transferSessions": [],
+            },
+            {
+                "operator": "INWI",
+                "tests": [
+                    {"measurementTitle": "Kenitra_26Jun04_135005.6", "avgDlMbps": 60.0},
+                ],
+                "transferSessions": [],
+            },
+        ]
+
+        win_rate = server._nemo_build_location_win_rate(operator_files, metric_kind="dl")
+
+        self.assertEqual(win_rate["matchedLocationCount"], 1)
+        self.assertEqual(win_rate["byOperator"]["IAM"]["locationWins"], 1)
+        self.assertEqual(win_rate["byOperator"]["INWI"]["locationWins"], 0)
+
+    def test_load_benchmark_nemo_files_rebuilds_when_persisted_dataset_is_stale(self):
+        path = "/tmp/mock-benchmark-nemo.txt"
+        fresh_dataset = {
+            "analysisVersion": server._BENCHMARK_NEMO_ANALYSIS_VERSION,
+            "operators": [{"operator": "IAM"}],
+        }
+
+        with mock.patch.dict(
+            server.BENCHMARK_NEMO_DATASET,
+            {
+                "paths": [],
+                "path_mtimes": {},
+                "data": None,
+                "loaded_at": None,
+                "operator_files": None,
+                "dataset_id": None,
+                "dataset_key": None,
+                "mode_datasets": {},
+                "mode_dataset_ids": {},
+                "mode_dataset_keys": {},
+                "dt_datasets": {},
+                "dl_mode": "app_rate_dl",
+                "window_mode": "all_dt_session",
+            },
+            clear=True,
+        ):
+            with mock.patch("server._benchmark_nemo_resolve_paths", return_value=[path]), \
+                 mock.patch("server.os.path.isfile", return_value=True), \
+                 mock.patch("server._benchmark_nemo_collect_mtimes", return_value={path: 1.0}), \
+                 mock.patch("server._benchmark_nemo_collect_file_meta", return_value=[{"path": path}]), \
+                 mock.patch("server._benchmark_nemo_dataset_key", return_value="dataset-key"), \
+                 mock.patch("server._benchmark_nemo_begin_load_state"), \
+                 mock.patch("server._benchmark_nemo_finish_load_state"), \
+                 mock.patch("server._benchmark_nemo_library_load_dataset_by_key", return_value={"id": 9}), \
+                 mock.patch("server._benchmark_nemo_library_load_into_memory", side_effect=lambda _record: server.BENCHMARK_NEMO_DATASET.update({"data": {"analysisVersion": server._BENCHMARK_NEMO_ANALYSIS_VERSION - 1}})), \
+                 mock.patch("server._benchmark_nemo_parse_operator_files", return_value=["parsed"]) as parse_mock, \
+                 mock.patch("server._benchmark_nemo_build_dataset", return_value=fresh_dataset) as build_mock, \
+                 mock.patch("server._benchmark_nemo_library_store_dataset", return_value=11), \
+                 mock.patch("server._benchmark_nemo_save_paths"):
+                result = server._load_benchmark_nemo_files([path])
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["persistent"])
+        self.assertFalse(result["cached"])
+        self.assertEqual(result["dataset"]["analysisVersion"], server._BENCHMARK_NEMO_ANALYSIS_VERSION)
+        parse_mock.assert_called_once_with([path])
+        build_mock.assert_called_once()
 
     def test_align_benchmark_tests_with_transfer_sessions_relabels_dt_titles(self):
         operator_file = {
@@ -943,6 +1135,131 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
             try:
                 import os
 
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    def test_benchmark_library_skips_large_operator_files_blob(self):
+        tmp_db = NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        tmp_db.close()
+        dataset = {
+            "name": "Nemo TXT Benchmark",
+            "operatorCount": 1,
+            "testCount": 1,
+            "transferSessionCount": 1,
+            "dtList": [],
+            "dlMode": "app_rate_dl",
+            "windowMode": "all_dt_session",
+        }
+        operator_files = [
+            {
+                "operator": "IAM",
+                "path": "/tmp/iam.txt",
+                "fileName": "iam.txt",
+                "rows": [{"measurementTitle": "DT1"} for _ in range(2)],
+            }
+        ]
+        file_metas = [
+            {
+                "ordinal": 0,
+                "operator": "IAM",
+                "fileName": "iam.txt",
+                "path": "/tmp/iam.txt",
+                "sizeBytes": 123,
+                "mtime": 1.0,
+                "sha256": "",
+            }
+        ]
+        try:
+            with mock.patch.object(
+                server,
+                "BENCHMARK_NEMO_LIBRARY_DB_PATH",
+                tmp_db.name,
+            ), mock.patch.object(
+                server,
+                "_BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP",
+                1,
+                create=True,
+            ):
+                dataset_id = server._benchmark_nemo_library_store_dataset(
+                    "large-blob-key",
+                    file_metas,
+                    dataset,
+                    operator_files,
+                )
+                self.assertIsNotNone(dataset_id)
+                record = server._benchmark_nemo_library_load_dataset_by_key(
+                    "large-blob-key",
+                )
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record["dataset"]["name"], "Nemo TXT Benchmark")
+            self.assertEqual(record["operatorFiles"], [])
+        finally:
+            try:
+                os.unlink(tmp_db.name)
+            except OSError:
+                pass
+
+    def test_benchmark_dt_dataset_reparses_when_cached_operator_rows_are_dropped(self):
+        tmp = NamedTemporaryFile(suffix=".txt", delete=False)
+        tmp.close()
+        parsed_operator_files = [
+            self._benchmark_window_scope_operator_fixture("IAM"),
+        ]
+        original_cache = deepcopy(server.BENCHMARK_NEMO_DATASET)
+        server.BENCHMARK_NEMO_DATASET.clear()
+        server.BENCHMARK_NEMO_DATASET.update(
+            {
+                "paths": [tmp.name],
+                "path_mtimes": {tmp.name: 1.0},
+                "data": None,
+                "loaded_at": None,
+                "operator_files": [
+                    {
+                        "operator": "IAM",
+                        "path": tmp.name,
+                        "fileName": os.path.basename(tmp.name),
+                        "rows": [],
+                        "transferSessions": [],
+                        "measurementTitles": ["DT1"],
+                    }
+                ],
+                "mode_datasets": {},
+                "mode_dataset_ids": {},
+                "mode_dataset_keys": {},
+                "dt_datasets": {},
+                "dataset_id": None,
+                "dataset_key": "",
+            }
+        )
+        try:
+            with mock.patch.object(
+                server,
+                "_benchmark_nemo_resolve_paths",
+                return_value=[tmp.name],
+            ), mock.patch.object(
+                server,
+                "_benchmark_nemo_collect_mtimes",
+                return_value={tmp.name: 1.0},
+            ), mock.patch.object(
+                server,
+                "_benchmark_nemo_parse_operator_files",
+                return_value=deepcopy(parsed_operator_files),
+            ) as parse_mock:
+                dataset = server._benchmark_nemo_dt_dataset(
+                    0,
+                    dl_mode="app_rate_dl",
+                    window_mode="all_dt_session",
+                )
+
+            self.assertTrue(dataset)
+            self.assertEqual(parse_mock.call_count, 1)
+            self.assertEqual(dataset["ranking"][0]["operator"], "IAM")
+        finally:
+            server.BENCHMARK_NEMO_DATASET.clear()
+            server.BENCHMARK_NEMO_DATASET.update(original_cache)
+            try:
                 os.unlink(tmp.name)
             except OSError:
                 pass

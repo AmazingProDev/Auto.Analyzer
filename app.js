@@ -6960,10 +6960,14 @@ document.addEventListener("DOMContentLoaded", () => {
     benchmarkNemoSection.style.display = "block";
     benchmarkNemoSection.classList.remove("is-empty");
     if (benchmarkNemoMeta) {
-      benchmarkNemoMeta.textContent = t("metaTemplate")(
+      let metaText = t("metaTemplate")(
         dataset.operatorCount || 0,
         dataset.testCount || 0,
       );
+      if (dataset.largeDriveNotice) {
+        metaText += " · " + String(dataset.largeDriveNotice);
+      }
+      benchmarkNemoMeta.textContent = metaText;
     }
 
     const benchmarkNemoOrangeServingCells = document.getElementById(
@@ -8076,20 +8080,39 @@ document.addEventListener("DOMContentLoaded", () => {
         normalizeBenchmarkNemoRankingMetric(benchmarkState.nemoRankingMetric) ===
         "app_rate_dl_avg"
           ? currentLang === "fr"
-            ? "Métrique : App rate DL avg. "
-            : "Metric: App rate DL avg. "
+            ? "Métrique : App rate DL (pondéré DT pour le classement, poolé pour diagnostic). "
+            : "Metric: App. rate DL (DT-weighted for ranking, pooled for diagnostics). "
           : currentLang === "fr"
-            ? "Métrique : App rate DL. "
-            : "Metric: App rate DL. ";
+            ? "Métrique : App rate DL (pondéré DT pour le classement, poolé pour diagnostic). "
+            : "Metric: App. rate DL (DT-weighted for ranking, pooled for diagnostics). ";
       const chartNoteFr =
         "Le classement DL inclut tous les opérateurs. Les comparaisons 5G spécifiques excluent les opérateurs sans 5G détectée.";
       const chartNoteEn =
         "The DL throughput ranking includes all operators. 5G-specific diagnosis compares only operators with valid 5G data.";
+      const dlWinRate = ((dataset.locationWinRate || {}).dl || {}).byOperator || {};
+      const winRateParts = ["IAM", "Orange", "INWI"]
+        .map((operator) => {
+          const info = dlWinRate[operator];
+          if (!info || !info.locationsCompared) return "";
+          return (
+            operator +
+            " " +
+            String(info.locationWins || 0) +
+            "/" +
+            String(info.locationsCompared)
+          );
+        })
+        .filter(Boolean);
       benchmarkNemoRankingNote.textContent =
         metricLead +
         (currentLang === "fr"
           ? diagnosis.chartNote_fr || chartNoteFr
-          : diagnosis.chartNote || chartNoteEn);
+          : diagnosis.chartNote || chartNoteEn) +
+        (winRateParts.length
+          ? currentLang === "fr"
+            ? " Taux de gain par localisation : " + winRateParts.join(" · ")
+            : " Location win-rate: " + winRateParts.join(" · ")
+          : "");
     }
 
     if (benchmarkNemoRankingInterpretation) {
@@ -8097,6 +8120,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const details = [];
       const ranking = Array.isArray(dataset.ranking) ? dataset.ranking : [];
       const rankLabel = currentLang === "fr" ? "Rang" : "Rank";
+      const aggLabel = (method) => {
+        if (method === "pooled")
+          return currentLang === "fr" ? "poolé" : "pooled";
+        if (method === "rate") return currentLang === "fr" ? "taux" : "rate";
+        return currentLang === "fr" ? "pondéré DT" : "DT-weighted";
+      };
       ranking.forEach((entry) => {
         if (entry && entry.rank != null && entry.operator) {
           const no5gTag =
@@ -8105,6 +8134,28 @@ document.addEventListener("DOMContentLoaded", () => {
               : !entry.has5g
                 ? " ⚠ No 5G"
                 : "";
+          const pooledBits =
+            entry.avgDlPooledMbps != null
+              ? currentLang === "fr"
+                ? " · diagnostic poolé " +
+                  benchmarkNumber(entry.avgDlPooledMbps, 1) +
+                  " Mbps"
+                : " · pooled diagnostic " +
+                  benchmarkNumber(entry.avgDlPooledMbps, 1) +
+                  " Mbps"
+              : "";
+          const winBits =
+            entry.locationWins != null && entry.locationsCompared
+              ? currentLang === "fr"
+                ? " · gains " +
+                  String(entry.locationWins) +
+                  "/" +
+                  String(entry.locationsCompared)
+                : " · wins " +
+                  String(entry.locationWins) +
+                  "/" +
+                  String(entry.locationsCompared)
+              : "";
           details.push(
             rankLabel +
               " " +
@@ -8113,12 +8164,10 @@ document.addEventListener("DOMContentLoaded", () => {
               entry.operator +
               " (" +
               benchmarkNumber(entry.avgDlMbps, 1) +
-              " Mbps" +
-              (entry.avgDlAppRateMbps != null
-                ? " · App. rate DL " +
-                  benchmarkNumber(entry.avgDlAppRateMbps, 1) +
-                  " Mbps"
-                : "") +
+              " Mbps · " +
+              aggLabel(entry.avgDlAggMethod) +
+              pooledBits +
+              winBits +
               ")" +
               no5gTag,
           );
@@ -10224,9 +10273,35 @@ document.addEventListener("DOMContentLoaded", () => {
     const selectedFiles = Array.from(files || []).filter(Boolean);
     if (!selectedFiles.length) return false;
     setBenchmarkStatus(t("statusUploading"));
+    let loadStatusTimer = null;
+    const stopLoadStatusPoll = () => {
+      if (loadStatusTimer) {
+        window.clearInterval(loadStatusTimer);
+        loadStatusTimer = null;
+      }
+    };
+    const pollLoadStatus = async () => {
+      try {
+        const statusResponse = await fetch("/api/benchmark-nemo/status");
+        const statusData = await statusResponse.json().catch(() => ({}));
+        const loadState = (statusData && statusData.loadState) || {};
+        if (!loadState || !loadState.active) return;
+        let nextText =
+          String(loadState.message || "").trim() || t("statusUploading");
+        const progress = Number(loadState.progressPct);
+        if (Number.isFinite(progress) && progress > 0 && progress < 100) {
+          nextText += " (" + Math.round(progress) + "%)";
+        }
+        setBenchmarkStatus(nextText);
+      } catch (_error) {}
+    };
     try {
       const fd = new FormData();
       selectedFiles.forEach((file) => fd.append("file", file, file.name));
+      loadStatusTimer = window.setInterval(() => {
+        void pollLoadStatus();
+      }, 1000);
+      void pollLoadStatus();
       const response = await fetch("/api/benchmark-nemo/upload", {
         method: "POST",
         body: fd,
@@ -10266,6 +10341,16 @@ document.addEventListener("DOMContentLoaded", () => {
       await refreshBenchmarkMycomContext();
       return true;
     } catch (error) {
+      const fetchFailed =
+        error instanceof TypeError &&
+        /failed to fetch|load failed|networkerror/i.test(
+          String(error && error.message ? error.message : error),
+        );
+      const userMessage = fetchFailed
+        ? "The Optim Analyzer server is not reachable on localhost:8000. Restart `python3 server.py`, then try the Nemo upload again."
+        : error && error.message
+          ? error.message
+          : String(error);
       console.error("[Benchmark Nemo] upload failed:", error);
       benchmarkState.nemoDataset = null;
       benchmarkState.nemoGlobalDataset = null;
@@ -10277,11 +10362,12 @@ document.addEventListener("DOMContentLoaded", () => {
       populateBenchmarkDtScope([]);
       resetBenchmarkNemoSection();
       setBenchmarkStatus(
-        t("statusUploadFailed") +
-          (error && error.message ? error.message : String(error)),
+        t("statusUploadFailed") + userMessage,
         "is-error",
       );
       return false;
+    } finally {
+      stopLoadStatusPoll();
     }
   };
 

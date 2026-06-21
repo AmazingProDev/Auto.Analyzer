@@ -29,6 +29,10 @@
       return (Array.isArray(rankingRows) ? rankingRows : []).map((row) => ({
         ...row,
         selectedMetric,
+        aggMethod: row?.avgDlAggMethod || "dt_weighted",
+        pooledValue:
+          row?.avgDlPooledMbps != null ? Number(row.avgDlPooledMbps) : null,
+        pooledAggMethod: row?.avgDlPooledAggMethod || "pooled",
         value: Number(row?.avgDlMbps || 0),
       }));
     }

@@ -21,14 +21,34 @@ test("normalizeBenchmarkNemoRankingMetric always resolves to app_rate_dl", () =>
 test("buildBenchmarkNemoRankingRows uses the DT-weighted App. rate DL (avgDlMbps)", () => {
   const rows = buildBenchmarkNemoRankingRows(
     [
-      { operator: "IAM", avgDlMbps: 50, avgDlAppRateMbps: 150 },
-      { operator: "Orange", avgDlMbps: 80, avgDlAppRateMbps: 120 },
+      {
+        operator: "IAM",
+        avgDlMbps: 50,
+        avgDlAppRateMbps: 150,
+        avgDlAggMethod: "dt_weighted",
+        avgDlPooledMbps: 45,
+      },
+      {
+        operator: "Orange",
+        avgDlMbps: 80,
+        avgDlAppRateMbps: 120,
+        avgDlAggMethod: "dt_weighted",
+        avgDlPooledMbps: 72,
+      },
     ],
     undefined,
   );
   assert.deepEqual(
     rows.map((row) => row.value),
     [50, 80],
+  );
+  assert.deepEqual(
+    rows.map((row) => row.aggMethod),
+    ["dt_weighted", "dt_weighted"],
+  );
+  assert.deepEqual(
+    rows.map((row) => row.pooledValue),
+    [45, 72],
   );
 });
 

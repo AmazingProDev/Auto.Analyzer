@@ -113,7 +113,16 @@ BENCHMARK_NEMO_LIBRARY_DB_PATH = os.environ.get(
 # dataset cache key, so a bump misses the SQLite cache and forces a fresh re-parse of the
 # TXT files. (Analysis-only changes use _BENCHMARK_NEMO_ANALYSIS_VERSION, which rebuilds KPIs
 # from the already-parsed rows without re-parsing.)
-_BENCHMARK_NEMO_PARSER_VERSION = 7
+_BENCHMARK_NEMO_PARSER_VERSION = 8
+_BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP = int(
+    os.environ.get("OPTIM_BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP", "50000")
+)
+_BENCHMARK_NEMO_WINDOWED_PARSE_FILE_SIZE_BYTES = int(
+    os.environ.get("OPTIM_BENCHMARK_NEMO_WINDOWED_PARSE_FILE_SIZE_BYTES", str(40 * 1024 * 1024))
+)
+_BENCHMARK_NEMO_WINDOW_MARGIN_SECONDS = float(
+    os.environ.get("OPTIM_BENCHMARK_NEMO_WINDOW_MARGIN_SECONDS", "5.0")
+)
 BENCHMARK_DEFAULT_PATH = os.environ.get(
     "OPTIM_BENCHMARK_PATH",
     "/Users/abdelilah/Desktop/AutoAnalyzer IAM/Benchmark/DR Rabat - Benchmark Avril 2026.xlsx",
@@ -140,6 +149,18 @@ BENCHMARK_NEMO_DATASET = {
     "dataset_key": "",
     "dl_mode": "app_rate_dl",
     "window_mode": "all_dt_session",
+}
+BENCHMARK_NEMO_LOAD_STATE = {
+    "active": False,
+    "phase": "idle",
+    "message": "",
+    "progressPct": 0.0,
+    "filesTotal": 0,
+    "filesDone": 0,
+    "currentFile": "",
+    "largeDrive": False,
+    "error": "",
+    "startedAt": None,
 }
 BENCHMARK_MYCOM_DATASET = {"path": "", "data": None, "loaded_at": None}
 
@@ -713,6 +734,7 @@ def _benchmark_nemo_status_payload() -> dict:
         "dlMode": dataset.get("dlMode") or BENCHMARK_NEMO_DATASET.get("dl_mode") or "app_rate_dl",
         "windowMode": dataset.get("windowMode") or BENCHMARK_NEMO_DATASET.get("window_mode") or _BENCHMARK_NEMO_WINDOW_MODE_DEFAULT,
         "libraryCount": library_count,
+        "loadState": dict(BENCHMARK_NEMO_LOAD_STATE),
     }
 
 
@@ -724,6 +746,80 @@ def _benchmark_nemo_collect_mtimes(paths: list[str]) -> dict:
         except OSError:
             mtimes[path] = None
     return mtimes
+
+
+def _benchmark_nemo_set_load_state(**updates):
+    BENCHMARK_NEMO_LOAD_STATE.update(updates)
+
+
+def _benchmark_nemo_begin_load_state(file_metas: list[dict]):
+    total_size = sum(int(meta.get("sizeBytes") or 0) for meta in (file_metas or []))
+    _benchmark_nemo_set_load_state(
+        active=True,
+        phase="starting",
+        message="Preparing Nemo benchmark import…",
+        progressPct=0.0,
+        filesTotal=len(file_metas or []),
+        filesDone=0,
+        currentFile="",
+        largeDrive=total_size >= 150 * 1024 * 1024,
+        error="",
+        startedAt=time.time(),
+    )
+
+
+def _benchmark_nemo_finish_load_state(message: str = "", error: str = ""):
+    _benchmark_nemo_set_load_state(
+        active=False,
+        phase="done" if not error else "error",
+        message=message,
+        progressPct=100.0 if not error else float(BENCHMARK_NEMO_LOAD_STATE.get("progressPct") or 0.0),
+        currentFile="",
+        error=error,
+    )
+
+
+def _benchmark_nemo_operator_files_row_count(operator_files: list[dict]) -> int:
+    total = 0
+    for operator_file in operator_files or []:
+        try:
+            total += len(operator_file.get("rows") or [])
+        except Exception:
+            continue
+    return total
+
+
+def _benchmark_nemo_operator_files_have_rows(operator_files: list[dict]) -> bool:
+    for operator_file in operator_files or []:
+        rows = operator_file.get("rows")
+        if isinstance(rows, list) and rows:
+            return True
+    return False
+
+
+def _benchmark_nemo_compact_operator_files(operator_files: list[dict]) -> list[dict]:
+    compact = []
+    for operator_file in operator_files or []:
+        item = dict(operator_file or {})
+        row_count = len(item.get("rows") or [])
+        item["rowCount"] = int(item.get("rowCount") or row_count)
+        item["rows"] = []
+        item["rowsByMeasurementTitle"] = {}
+        item["rowsDropped"] = True
+        compact.append(item)
+    return compact
+
+
+def _benchmark_nemo_cacheable_operator_files(operator_files: list[dict]) -> list[dict]:
+    if _benchmark_nemo_operator_files_row_count(operator_files) > _BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP:
+        return []
+    return operator_files
+
+
+def _benchmark_nemo_resident_operator_files(operator_files: list[dict]) -> list[dict]:
+    if _benchmark_nemo_operator_files_row_count(operator_files) > _BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP:
+        return _benchmark_nemo_compact_operator_files(operator_files)
+    return operator_files
 
 
 def _benchmark_nemo_save_paths(paths: list[str]):
@@ -856,6 +952,7 @@ def _benchmark_nemo_library_store_dataset(dataset_key: str, file_metas: list[dic
         return None
     _benchmark_nemo_library_init()
     now = time.time()
+    cacheable_operator_files = _benchmark_nemo_cacheable_operator_files(operator_files)
     with _benchmark_nemo_library_connect() as conn:
         row = conn.execute(
             "SELECT id, created_at FROM nemo_benchmark_datasets WHERE dataset_key = ?",
@@ -879,7 +976,7 @@ def _benchmark_nemo_library_store_dataset(dataset_key: str, file_metas: list[dic
                     int(dataset.get("transferSessionCount") or 0),
                     len(dataset.get("dtList") or []),
                     _benchmark_nemo_pack_blob(dataset),
-                    _benchmark_nemo_pack_blob(operator_files),
+                    _benchmark_nemo_pack_blob(cacheable_operator_files),
                     dataset_id,
                 ),
             )
@@ -901,7 +998,7 @@ def _benchmark_nemo_library_store_dataset(dataset_key: str, file_metas: list[dic
                     int(dataset.get("transferSessionCount") or 0),
                     len(dataset.get("dtList") or []),
                     _benchmark_nemo_pack_blob(dataset),
-                    _benchmark_nemo_pack_blob(operator_files),
+                    _benchmark_nemo_pack_blob(cacheable_operator_files),
                 ),
             )
             dataset_id = int(cur.lastrowid)
@@ -3459,16 +3556,38 @@ def _nemo_presence_share_from_cells(cells_payload: list[dict], dwell_field: str)
 
 
 def _nemo_read_tabular_file(path: str) -> tuple[str, list[str], list[list[str]]]:
-    import io
+    handle, delimiter, headers, reader = _nemo_open_tabular_reader(path)
+    try:
+        return delimiter, headers, [row for row in reader]
+    finally:
+        handle.close()
 
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-        text = f.read()
-    delimiter = _nemo_guess_delimiter(text[:10000])
-    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
-    if not rows:
-        return delimiter, [], []
-    headers = [str(value).strip() if value is not None else "" for value in rows[0]]
-    return delimiter, headers, rows[1:]
+
+def _nemo_open_tabular_reader(path: str):
+    handle = open(path, "r", encoding="utf-8-sig", errors="replace", newline="")
+    try:
+        sample_lines = []
+        sample_chars = 0
+        for _ in range(32):
+            line = handle.readline()
+            if not line:
+                break
+            sample_lines.append(line)
+            sample_chars += len(line)
+            if sample_chars >= 10000:
+                break
+        delimiter = _nemo_guess_delimiter("".join(sample_lines))
+        handle.seek(0)
+        reader = csv.reader(handle, delimiter=delimiter)
+        try:
+            header_row = next(reader)
+        except StopIteration:
+            return handle, delimiter, [], iter(())
+        headers = [str(value).strip() if value is not None else "" for value in header_row]
+        return handle, delimiter, headers, reader
+    except Exception:
+        handle.close()
+        raise
 
 
 def _nemo_header_index_map(headers: list[str]) -> dict:
@@ -3941,8 +4060,15 @@ def _nemo_parse_operator_file(path: str) -> dict:
     return result
 
 
-def _nemo_parse_operator_file_uncached(path: str) -> dict:
-    delimiter, headers, data_rows = _nemo_read_tabular_file(path)
+def _nemo_parse_operator_file_rows(
+    path: str,
+    delimiter: str,
+    headers: list[str],
+    data_rows: list[list[str]],
+    precomputed_transfer_sessions: list[dict] | None = None,
+    session_stats_rows: list[dict] | None = None,
+    windowed_parse: bool = False,
+) -> dict:
     header_map = _nemo_header_index_map(headers)
     operator = _nemo_guess_operator(path)
     file_name = os.path.basename(path)
@@ -4389,6 +4515,10 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
     if device_models_seen:
         device_model = max(set(device_models_seen), key=device_models_seen.count)
         technology_status["deviceModel"] = device_model
+    transfer_sessions = list(precomputed_transfer_sessions or []) or _nemo_build_transfer_sessions(
+        normalized_rows,
+        operator,
+    )
 
     return {
         "operator": operator,
@@ -4406,11 +4536,175 @@ def _nemo_parse_operator_file_uncached(path: str) -> dict:
         "coverage": coverage,
         "technologyStatus": technology_status,
         "deviceModel": device_model,
+        "transferSessions": transfer_sessions,
+        "_sessionStatsRows": list(session_stats_rows or normalized_rows),
+        "windowedParse": bool(windowed_parse),
         "parsingQa": parsing_qa,
         # Authoritative per-session statistics from the sibling "Data transfer session
         # statistics" export (ping/upload/download), when present alongside this file.
         "sessionStats": _nemo_parse_session_stats(_nemo_find_session_stats_path(path)),
     }
+
+
+def _nemo_dt_in_intervals(dt_value, intervals: list[tuple]) -> bool:
+    if not isinstance(dt_value, _dt):
+        return False
+    for start_dt, end_dt in intervals or []:
+        if start_dt <= dt_value <= end_dt:
+            return True
+    return False
+
+
+def _nemo_parse_operator_file_uncached_windowed(path: str) -> dict:
+    _benchmark_nemo_set_load_state(
+        phase="pass1",
+        message=f"Scanning {os.path.basename(path)} for transfer windows…",
+        currentFile=os.path.basename(path),
+    )
+    handle, delimiter, headers, reader = _nemo_open_tabular_reader(path)
+    try:
+        header_map = _nemo_header_index_map(headers)
+        resolve = _nemo_resolve_indices
+        operator = _nemo_guess_operator(path)
+        time_indices = header_map.get("Time") or []
+        measurement_title_indices = resolve(header_map, ("Measurement Title", "measurement"))
+        app_protocol_indices = resolve(header_map, ("Application protocol",))
+        transfer_status_indices = resolve(header_map, ("Transf. status", "Data Transfer Status", "Nemo status"))
+        lon_indices = resolve(header_map, ("Lon.", "Lon", "Longitude"))
+        lat_indices = resolve(header_map, ("Lat.", "Lat", "Latitude"))
+        app_dl_indices = resolve(header_map, ("App. rate DL",))
+        app_ul_indices = resolve(header_map, ("App. rate UL",))
+        bytes_dl_indices = resolve(header_map, ("Bytes DL",))
+        bytes_ul_indices = resolve(header_map, ("Bytes UL",))
+        file_size_indices = resolve(header_map, ("File size",))
+        transfer_direction_indices = resolve(header_map, ("Data transfer direction",))
+        transfer_filename_indices = resolve(header_map, ("Filename",))
+        download_time_indices = resolve(header_map, ("Download time",))
+
+        light_rows = []
+        last_title = ""
+        for row in reader:
+            n = len(row)
+            event_time = _nemo_pick_time_resolved(row, time_indices, n)
+            measurement_title = _nemo_pick_text_resolved(row, measurement_title_indices, n)
+            if measurement_title:
+                last_title = measurement_title
+            else:
+                measurement_title = last_title
+
+            data_transfer_direction = _nemo_pick_text_resolved(row, transfer_direction_indices, n)
+            application_protocol = _nemo_pick_text_resolved(row, app_protocol_indices, n)
+            transfer_status = _nemo_pick_text_resolved(row, transfer_status_indices, n)
+            bytes_dl = _nemo_pick_float_resolved(row, bytes_dl_indices, n)
+            bytes_ul = _nemo_pick_float_resolved(row, bytes_ul_indices, n)
+            app_dl = _nemo_pick_float_resolved(row, app_dl_indices, n)
+            app_ul = _nemo_pick_float_resolved(row, app_ul_indices, n)
+            file_size = _nemo_pick_float_resolved(row, file_size_indices, n)
+            transfer_filename = _nemo_pick_text_resolved(row, transfer_filename_indices, n)
+            download_time = _nemo_pick_float_resolved(row, download_time_indices, n)
+            if not any(
+                value not in (None, "")
+                for value in (
+                    data_transfer_direction,
+                    application_protocol,
+                    transfer_status,
+                    bytes_dl,
+                    bytes_ul,
+                    app_dl,
+                    app_ul,
+                    file_size,
+                    transfer_filename,
+                    download_time,
+                )
+            ):
+                continue
+            light_rows.append(
+                {
+                    "_dt": event_time,
+                    "time": _nemo_iso(event_time),
+                    "measurementTitle": measurement_title,
+                    "dataTransferDirection": data_transfer_direction,
+                    "applicationProtocol": application_protocol,
+                    "transferStatus": transfer_status,
+                    "bytesDl": bytes_dl,
+                    "bytesUl": bytes_ul,
+                    "appDlMbps": app_dl,
+                    "appUlMbps": app_ul,
+                    "fileSizeBytes": file_size,
+                    "transferFilename": transfer_filename,
+                    "downloadTimeS": download_time,
+                    "lat": _nemo_pick_float_resolved(row, lat_indices, n),
+                    "lon": _nemo_pick_float_resolved(row, lon_indices, n),
+                }
+            )
+    finally:
+        handle.close()
+
+    transfer_sessions = _nemo_build_transfer_sessions(light_rows, operator)
+    if not transfer_sessions:
+        delimiter, headers, data_rows = _nemo_read_tabular_file(path)
+        return _nemo_parse_operator_file_rows(path, delimiter, headers, data_rows)
+
+    margin = _td(seconds=_BENCHMARK_NEMO_WINDOW_MARGIN_SECONDS)
+    retain_intervals = []
+    for session in transfer_sessions:
+        if not str(session.get("direction") or "").strip().lower().startswith("down"):
+            continue
+        try:
+            start_dt = _dt.fromisoformat(str(session.get("startTime") or ""))
+            end_dt = _dt.fromisoformat(str(session.get("endTime") or ""))
+        except Exception:
+            continue
+        retain_intervals.append((start_dt - margin, end_dt + margin))
+    if not retain_intervals:
+        delimiter, headers, data_rows = _nemo_read_tabular_file(path)
+        return _nemo_parse_operator_file_rows(path, delimiter, headers, data_rows)
+
+    _benchmark_nemo_set_load_state(
+        phase="pass2",
+        message=f"Collecting windowed samples from {os.path.basename(path)}…",
+        currentFile=os.path.basename(path),
+    )
+    handle, delimiter, headers, reader = _nemo_open_tabular_reader(path)
+    try:
+        time_indices = _nemo_header_index_map(headers).get("Time") or []
+        selected_rows = []
+        sampled_second = None
+        for row in reader:
+            n = len(row)
+            event_time = _nemo_pick_time_resolved(row, time_indices, n)
+            if _nemo_dt_in_intervals(event_time, retain_intervals):
+                selected_rows.append(row)
+                continue
+            if not isinstance(event_time, _dt):
+                continue
+            second_bucket = event_time.replace(microsecond=0)
+            if second_bucket != sampled_second:
+                selected_rows.append(row)
+                sampled_second = second_bucket
+    finally:
+        handle.close()
+
+    return _nemo_parse_operator_file_rows(
+        path,
+        delimiter,
+        headers,
+        selected_rows,
+        precomputed_transfer_sessions=transfer_sessions,
+        session_stats_rows=light_rows,
+        windowed_parse=True,
+    )
+
+
+def _nemo_parse_operator_file_uncached(path: str) -> dict:
+    try:
+        size_bytes = os.path.getsize(path)
+    except OSError:
+        size_bytes = 0
+    if size_bytes >= _BENCHMARK_NEMO_WINDOWED_PARSE_FILE_SIZE_BYTES:
+        return _nemo_parse_operator_file_uncached_windowed(path)
+    delimiter, headers, data_rows = _nemo_read_tabular_file(path)
+    return _nemo_parse_operator_file_rows(path, delimiter, headers, data_rows)
 
 
 def _nemo_preferred_dl_value(row: dict):
@@ -4924,6 +5218,169 @@ def _nemo_build_tests(rows: list[dict], operator: str, benchmark_dl_metric_key: 
     return tests
 
 
+_NEMO_DT_SUFFIX_RE = re.compile(r"\.\d+$")
+
+
+def _nemo_matchable_measurement_title(title: str) -> str:
+    text = _benchmark_text(title)
+    if not text:
+        return ""
+    return _NEMO_DT_SUFFIX_RE.sub("", text).strip()
+
+
+def _nemo_tag_metric_stats(stats: dict | None, method: str) -> dict:
+    tagged = dict(stats or {})
+    tagged["aggMethod"] = method
+    return tagged
+
+
+def _nemo_measurement_title_metric_map(items: list[dict], key: str) -> dict[str, float]:
+    buckets: dict[str, list[float]] = {}
+    fallback_index = 0
+    for item in items or []:
+        value = item.get(key)
+        if value is None:
+            continue
+        try:
+            value_float = float(value)
+        except Exception:
+            continue
+        if not math.isfinite(value_float):
+            continue
+        title_key = _nemo_matchable_measurement_title(item.get("measurementTitle"))
+        if not title_key:
+            title_key = f"__untitled__{fallback_index}"
+            fallback_index += 1
+        buckets.setdefault(title_key, []).append(value_float)
+    return {
+        title_key: round(sum(values) / float(len(values)), 2)
+        for title_key, values in buckets.items()
+        if values
+    }
+
+
+def _nemo_dt_weighted_average_from_tests(tests: list[dict], key: str) -> tuple[float | None, int]:
+    values = list(_nemo_measurement_title_metric_map(tests, key).values())
+    if not values:
+        return None, 0
+    return round(sum(values) / float(len(values)), 2), len(values)
+
+
+def _nemo_measurement_title_session_rates(
+    transfer_sessions: list[dict],
+    direction_prefix: str,
+) -> dict[str, float]:
+    buckets: dict[str, list[float]] = {}
+    for session in transfer_sessions or []:
+        direction = str(session.get("direction") or "").strip().lower()
+        if not direction.startswith(direction_prefix):
+            continue
+        title_key = _nemo_matchable_measurement_title(session.get("measurementTitle"))
+        if not title_key:
+            continue
+        transferred = session.get("transferredBytes")
+        if transferred in (None, 0):
+            continue
+        try:
+            start_dt = _dt.fromisoformat(str(session.get("startTime") or ""))
+            end_dt = _dt.fromisoformat(str(session.get("endTime") or ""))
+            duration_s = max((end_dt - start_dt).total_seconds(), 0.0)
+            transferred_float = float(transferred)
+        except Exception:
+            continue
+        if duration_s <= 0 or transferred_float <= 0:
+            continue
+        buckets.setdefault(title_key, []).append((transferred_float * 8.0) / 1_000_000.0 / duration_s)
+    return {
+        key: round(sum(values) / float(len(values)), 2)
+        for key, values in buckets.items()
+        if values
+    }
+
+
+def _nemo_build_location_win_rate(
+    operator_files: list[dict],
+    metric_kind: str = "dl",
+) -> dict:
+    per_operator_values: dict[str, dict[str, float]] = {}
+    for operator_file in operator_files or []:
+        operator = str(operator_file.get("operator") or "UNKNOWN")
+        if metric_kind == "ul":
+            value_map = _nemo_measurement_title_session_rates(
+                operator_file.get("transferSessions") or [],
+                "up",
+            )
+        else:
+            value_map = _nemo_measurement_title_metric_map(
+                operator_file.get("tests") or [],
+                "avgDlMbps",
+            )
+        per_operator_values[operator] = value_map
+
+    compared_keys = sorted({
+        title_key
+        for value_map in per_operator_values.values()
+        for title_key in value_map.keys()
+    })
+    results = {
+        operator: {
+            "locationWins": 0,
+            "locationsCompared": 0,
+            "tieWins": 0,
+            "winPct": None,
+        }
+        for operator in per_operator_values.keys()
+    }
+    matched_locations = []
+    for title_key in compared_keys:
+        values = {
+            operator: value_map.get(title_key)
+            for operator, value_map in per_operator_values.items()
+            if value_map.get(title_key) is not None
+        }
+        if len(values) < 2:
+            continue
+        best_value = max(values.values())
+        winners = [
+            operator
+            for operator, value in values.items()
+            if abs(float(value) - float(best_value)) < 1e-9
+        ]
+        for operator in values.keys():
+            results.setdefault(operator, {
+                "locationWins": 0,
+                "locationsCompared": 0,
+                "tieWins": 0,
+                "winPct": None,
+            })
+            results[operator]["locationsCompared"] += 1
+        for operator in winners:
+            results[operator]["locationWins"] += 1
+            if len(winners) > 1:
+                results[operator]["tieWins"] += 1
+        matched_locations.append({
+            "titleKey": title_key,
+            "operators": values,
+            "winners": winners,
+        })
+
+    for operator, payload in results.items():
+        compared = payload.get("locationsCompared") or 0
+        payload["winPct"] = (
+            round(payload.get("locationWins", 0) / float(compared) * 100.0, 1)
+            if compared
+            else None
+        )
+    return {
+        "metric": metric_kind,
+        "byOperator": results,
+        "matchedLocationCount": len(matched_locations),
+        "locations": matched_locations,
+        "titleMatchMethod": "measurement_title_suffix_stripped",
+        "tiePolicy": "shared_win",
+    }
+
+
 def _nemo_endc_secondary_node_stats(rows: list[dict], sustain_sec: float = 3.0) -> dict:
     """Reconstruct EN-DC NR secondary-node (SgNB) addition/removal events from the NR SCG
     PSCell presence timeline. These Nemo exports carry no explicit SgNB RRC signalling
@@ -5013,6 +5470,7 @@ def _nemo_endc_secondary_node_stats(rows: list[dict], sustain_sec: float = 3.0) 
 def _nemo_operator_kpis(operator_data: dict) -> dict:
     rows = operator_data.get("rows") or []
     tests = operator_data.get("tests") or []
+    is_cumulative_scope = len(tests) > 1
     dl_metric_key = operator_data.get("benchmarkDlMetricKey") or operator_data.get("dlMetricKey") or _nemo_select_benchmark_dl_metric_key(rows)
     dl_values = _nemo_metric_series(rows, dl_metric_key)
     app_stats = _nemo_metric_stats(dl_values)
@@ -5022,14 +5480,18 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
     # rows by `measurementTitle`, because some Nemo exports leave transfer rows blank
     # and forward-filling then merges multiple DTs under the same title.
     _dt_dl_avgs = [
-        float(test.get("avgDlMbps")) for test in tests
-        if test.get("avgDlMbps") is not None and float(test.get("avgDlMbps")) > 0
+        value
+        for value in _nemo_measurement_title_metric_map(tests, "avgDlMbps").values()
+        if value > 0
     ]
     if _dt_dl_avgs:
         app_stats = dict(app_stats)
         app_stats["pooledAverage"] = app_stats.get("average")
         app_stats["average"] = round(sum(_dt_dl_avgs) / float(len(_dt_dl_avgs)), 2)
         app_stats["perDtCount"] = len(_dt_dl_avgs)
+    app_stats["aggMethod"] = "dt_weighted" if is_cumulative_scope and _dt_dl_avgs else "pooled"
+    if app_stats.get("pooledAverage") is not None:
+        app_stats["pooledAggMethod"] = "pooled"
 
     metric = lambda key, positive=False: [
         float(row.get(key)) for row in rows
@@ -5330,57 +5792,58 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
     return {
         "dlMetricKey": dl_metric_key,
         "dl": app_stats,
-        "appDl": app_dl_sample_stats,
+        "appDl": _nemo_tag_metric_stats(app_dl_sample_stats, "pooled"),
         "successRate": round((sum(1 for test in tests if test.get("success")) / float(len(tests))) * 100.0, 1) if tests else None,
+        "successRateAggMethod": "rate",
         "testCount": len(tests),
-        "mac5g": _nemo_metric_stats(metric("macDl5gMbps", positive=True)),
-        "macLte": mac_lte_stats,
+        "mac5g": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macDl5gMbps", positive=True)), "pooled"),
+        "macLte": _nemo_tag_metric_stats(mac_lte_stats, "pooled"),
         "nrThroughputContribPct": nr_throughput_contrib_pct,
         "lteThroughputContribPct": lte_throughput_contrib_pct,
-        "scheduled5g": _nemo_metric_stats(metric("pdschSched5gMbps", positive=True)),
-        "pdsch5g": _nemo_metric_stats(metric("pdschDl5gMbps", positive=True)),
-        "prbs": _nemo_metric_stats(metric("pdschPrbs", positive=True)),
-        "pdschSlotPct": pdsch_slot_stats,
-        "scheduledRank": scheduled_rank_stats,
-        "availableBandwidthPrbs": _nemo_metric_stats(available_prbs_values),
-        "rsrp": _nemo_metric_stats(metric("rsrp")),
-        "rsrq": _nemo_metric_stats(metric("rsrq")),
-        "sinr": _nemo_metric_stats(metric("sinr")),
-        "rsrpNr": rsrp_nr_stats,
-        "rsrpLte": rsrp_lte_stats,
-        "rsrqNr": rsrq_nr_stats,
-        "rsrqLte": rsrq_lte_stats,
-        "sinrNr": sinr_nr_stats,
-        "sinrLte": sinr_lte_stats,
+        "scheduled5g": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdschSched5gMbps", positive=True)), "pooled"),
+        "pdsch5g": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdschDl5gMbps", positive=True)), "pooled"),
+        "prbs": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdschPrbs", positive=True)), "pooled"),
+        "pdschSlotPct": _nemo_tag_metric_stats(pdsch_slot_stats, "pooled"),
+        "scheduledRank": _nemo_tag_metric_stats(scheduled_rank_stats, "pooled"),
+        "availableBandwidthPrbs": _nemo_tag_metric_stats(_nemo_metric_stats(available_prbs_values), "pooled"),
+        "rsrp": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rsrp")), "pooled"),
+        "rsrq": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rsrq")), "pooled"),
+        "sinr": _nemo_tag_metric_stats(_nemo_metric_stats(metric("sinr")), "pooled"),
+        "rsrpNr": _nemo_tag_metric_stats(rsrp_nr_stats, "pooled"),
+        "rsrpLte": _nemo_tag_metric_stats(rsrp_lte_stats, "pooled"),
+        "rsrqNr": _nemo_tag_metric_stats(rsrq_nr_stats, "pooled"),
+        "rsrqLte": _nemo_tag_metric_stats(rsrq_lte_stats, "pooled"),
+        "sinrNr": _nemo_tag_metric_stats(sinr_nr_stats, "pooled"),
+        "sinrLte": _nemo_tag_metric_stats(sinr_lte_stats, "pooled"),
         "rfNrLte": rf_nr_lte,
-        "cqi": _nemo_metric_stats(metric("wbCqi", positive=True)),
-        "ri": _nemo_metric_stats(ri_values),
+        "cqi": _nemo_tag_metric_stats(_nemo_metric_stats(metric("wbCqi", positive=True)), "pooled"),
+        "ri": _nemo_tag_metric_stats(_nemo_metric_stats(ri_values), "pooled"),
         "riGe3Share": round((sum(1 for value in ri_values if value >= 3) / float(len(ri_values))) * 100.0, 1) if ri_values else None,
         "ri1Share": round((sum(1 for value in ri_values if value <= 1) / float(len(ri_values))) * 100.0, 1) if ri_values else None,
-        "bler": _nemo_metric_stats(metric("macDlBler")),
-        "macUlRetx": _nemo_metric_stats(metric("macUlRetx5g")),
+        "bler": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macDlBler")), "pooled"),
+        "macUlRetx": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macUlRetx5g")), "pooled"),
         # Additional capacity / reliability / CA / UL metrics from the richer export.
-        "dlPrbUtilPct": _nemo_metric_stats(metric("dlPrbPct")),
-        "prbsAvgDlAll": _nemo_metric_stats(metric("prbsAvgDl", positive=True)),
-        "schBitratePerPrb": _nemo_metric_stats(metric("schBitratePerPrb", positive=True)),
-        "pdschBlerLte": _nemo_metric_stats(metric("pdschBlerLte")),
-        "macDlResidualBler": _nemo_metric_stats(metric("macDlResidualBler")),
-        "pdcchBlerEst": _nemo_metric_stats(metric("pdcchBlerEst")),
-        "macUlRetxLte": _nemo_metric_stats(metric("macUlRetxLte")),
-        "caTotalBwMhz": _nemo_metric_stats(metric("caTotalBwMhz", positive=True)),
-        "primaryBwMhz": _nemo_metric_stats(metric("primaryBwMhz", positive=True)),
-        "sumSecondaryBwMhz": _nemo_metric_stats(metric("sumSecondaryBwMhz", positive=True)),
-        "txPower": _nemo_metric_stats(metric("txPower")),
-        "puschTxPower": _nemo_metric_stats(metric("puschTxPower")),
-        "wbCqi0": _nemo_metric_stats(metric("wbCqi0", positive=True)),
-        "wbCqi1": _nemo_metric_stats(metric("wbCqi1", positive=True)),
-        "hoUplaneInterruptionMs": _nemo_metric_stats(metric("hoUplaneInterruptionMs", positive=True)),
-        "pppRate": _nemo_metric_stats(metric("pppRateDl", positive=True)),
+        "dlPrbUtilPct": _nemo_tag_metric_stats(_nemo_metric_stats(metric("dlPrbPct")), "pooled"),
+        "prbsAvgDlAll": _nemo_tag_metric_stats(_nemo_metric_stats(metric("prbsAvgDl", positive=True)), "pooled"),
+        "schBitratePerPrb": _nemo_tag_metric_stats(_nemo_metric_stats(metric("schBitratePerPrb", positive=True)), "pooled"),
+        "pdschBlerLte": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdschBlerLte")), "pooled"),
+        "macDlResidualBler": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macDlResidualBler")), "pooled"),
+        "pdcchBlerEst": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdcchBlerEst")), "pooled"),
+        "macUlRetxLte": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macUlRetxLte")), "pooled"),
+        "caTotalBwMhz": _nemo_tag_metric_stats(_nemo_metric_stats(metric("caTotalBwMhz", positive=True)), "pooled"),
+        "primaryBwMhz": _nemo_tag_metric_stats(_nemo_metric_stats(metric("primaryBwMhz", positive=True)), "pooled"),
+        "sumSecondaryBwMhz": _nemo_tag_metric_stats(_nemo_metric_stats(metric("sumSecondaryBwMhz", positive=True)), "pooled"),
+        "txPower": _nemo_tag_metric_stats(_nemo_metric_stats(metric("txPower")), "pooled"),
+        "puschTxPower": _nemo_tag_metric_stats(_nemo_metric_stats(metric("puschTxPower")), "pooled"),
+        "wbCqi0": _nemo_tag_metric_stats(_nemo_metric_stats(metric("wbCqi0", positive=True)), "pooled"),
+        "wbCqi1": _nemo_tag_metric_stats(_nemo_metric_stats(metric("wbCqi1", positive=True)), "pooled"),
+        "hoUplaneInterruptionMs": _nemo_tag_metric_stats(_nemo_metric_stats(metric("hoUplaneInterruptionMs", positive=True)), "pooled"),
+        "pppRate": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pppRateDl", positive=True)), "pooled"),
         "endcSecondaryNode": _nemo_endc_secondary_node_stats(rows),
-        "totalMacDl": total_mac_stats,
+        "totalMacDl": _nemo_tag_metric_stats(total_mac_stats, "pooled"),
         "transportRatio": transport_ratio,
-        "tcpHandshake": _nemo_metric_stats(metric("tcpHandshakeMs", positive=True)),
-        "lostPacket": _nemo_metric_stats(metric("lostPacket", positive=True)),
+        "tcpHandshake": _nemo_tag_metric_stats(_nemo_metric_stats(metric("tcpHandshakeMs", positive=True)), "pooled"),
+        "lostPacket": _nemo_tag_metric_stats(_nemo_metric_stats(metric("lostPacket", positive=True)), "pooled"),
         "n78Share": n78_share,  # over all rows with band field
         "n78ShareNrOnly": n78_share_nr_only,  # over NR-only rows
         "n28ShareNrOnly": nr_band_shares.get("n28"),  # over NR-only rows
@@ -5391,11 +5854,11 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         "pdschModulationCw0": {"distribution": mod_cw0_dist, "dominant": mod_cw0_dist[0]["label"] if mod_cw0_dist else None},
         "pdschModulationCw1": {"distribution": mod_cw1_dist, "dominant": mod_cw1_dist[0]["label"] if mod_cw1_dist else None},
         "rank2UtilPct": rank2_util_pct,
-        "pdschDlLte": pdsch_dl_lte_stats,
-        "pdschDlLteCw0": pdsch_dl_lte_cw0_stats,
-        "pdschDlLteCw1": pdsch_dl_lte_cw1_stats,
-        "pdschMcsCw0": mcs_cw0_stats,
-        "pdschMcsCw1": mcs_cw1_stats,
+        "pdschDlLte": _nemo_tag_metric_stats(pdsch_dl_lte_stats, "pooled"),
+        "pdschDlLteCw0": _nemo_tag_metric_stats(pdsch_dl_lte_cw0_stats, "pooled"),
+        "pdschDlLteCw1": _nemo_tag_metric_stats(pdsch_dl_lte_cw1_stats, "pooled"),
+        "pdschMcsCw0": _nemo_tag_metric_stats(mcs_cw0_stats, "pooled"),
+        "pdschMcsCw1": _nemo_tag_metric_stats(mcs_cw1_stats, "pooled"),
         "rrcStateShares": rrc_state_shares,
         "applicationProtocolShares": app_protocol_shares,
         "servingTechnologyShares": serving_tech_shares,
@@ -5438,31 +5901,41 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
                 "qam256Share": _nemo_distribution_share(mod_cw1_dist, "256QAM"),
             },
         },
-        "pdschMcs": pdsch_mcs_stats,
-        "pdschBitPerHz": pdsch_bits_hz_stats,
-        "pdschMaxBitPerHz": pdsch_max_bits_hz_stats,
-        "pdschTbs": pdsch_tbs_stats,
+        "pdschMcs": _nemo_tag_metric_stats(pdsch_mcs_stats, "pooled"),
+        "pdschBitPerHz": _nemo_tag_metric_stats(pdsch_bits_hz_stats, "pooled"),
+        "pdschMaxBitPerHz": _nemo_tag_metric_stats(pdsch_max_bits_hz_stats, "pooled"),
+        "pdschTbs": _nemo_tag_metric_stats(pdsch_tbs_stats, "pooled"),
         "pdschActiveSampleCount": len(pdsch_rows),
         "nrPresencePct": kpi_nr_presence_pct,
         "lteOnlyPresencePct": kpi_lte_only_presence_pct,
     }
 
 
-def _nemo_build_ranking(operators: list[dict]) -> list[dict]:
+def _nemo_build_ranking(operators: list[dict], location_win_rate: dict | None = None) -> list[dict]:
+    win_rate_by_operator = (location_win_rate or {}).get("byOperator") or {}
     ranking = []
     for item in operators or []:
         kpis = item.get("kpis") or {}
         dl = kpis.get("dl") or {}
         app_dl = kpis.get("appDl") or {}
+        operator_name = item.get("operator") or "UNKNOWN"
+        win_stats = win_rate_by_operator.get(str(operator_name))
         ranking.append({
-            "operator": item.get("operator") or "UNKNOWN",
+            "operator": operator_name,
             "avgDlMbps": dl.get("average"),
             "avgDlAppRateMbps": app_dl.get("average"),
+            "avgDlAggMethod": dl.get("aggMethod") or "pooled",
+            "avgDlPooledMbps": dl.get("pooledAverage"),
+            "avgDlPooledAggMethod": dl.get("pooledAggMethod") or "pooled",
             "medianDlMbps": dl.get("median"),
             "p10DlMbps": dl.get("p10"),
             "p90DlMbps": dl.get("p90"),
             "maxDlMbps": dl.get("max"),
             "sampleCount": dl.get("sampleCount"),
+            "locationWins": (win_stats or {}).get("locationWins"),
+            "locationsCompared": (win_stats or {}).get("locationsCompared"),
+            "locationTieWins": (win_stats or {}).get("tieWins"),
+            "winPct": (win_stats or {}).get("winPct"),
             "has5g": bool(item.get("has5g")),
             "fiveGStatus": item.get("fiveGStatus") or "",
         })
@@ -10455,6 +10928,7 @@ def _nemo_group_rows_by_measurement_title(rows: list[dict]) -> tuple[list[str], 
 
 def _benchmark_nemo_parse_operator_files(paths: list[str]) -> list[dict]:
     operator_files = []
+    parseable_paths = []
     for path in paths or []:
         if not os.path.isfile(path):
             continue
@@ -10465,7 +10939,26 @@ def _benchmark_nemo_parse_operator_files(paths: list[str]) -> list[dict]:
         # not parsed as a standalone operator time-series.
         if _nemo_is_session_stats_file(path):
             continue
+        parseable_paths.append(path)
+    total = len(parseable_paths)
+    for index, path in enumerate(parseable_paths, start=1):
+        _benchmark_nemo_set_load_state(
+            phase="parsing",
+            message=f"Parsing {os.path.basename(path)} ({index}/{total})…",
+            progressPct=round(((index - 1) / float(total)) * 100.0, 1) if total else 0.0,
+            filesTotal=total,
+            filesDone=index - 1,
+            currentFile=os.path.basename(path),
+        )
         operator_files.append(_nemo_parse_operator_file(path))
+        _benchmark_nemo_set_load_state(
+            phase="parsing",
+            message=f"Parsed {os.path.basename(path)} ({index}/{total})",
+            progressPct=round((index / float(total)) * 100.0, 1) if total else 100.0,
+            filesTotal=total,
+            filesDone=index,
+            currentFile=os.path.basename(path),
+        )
     return operator_files
 
 
@@ -10722,6 +11215,7 @@ def _benchmark_nemo_dt_dataset(
         and (BENCHMARK_NEMO_DATASET.get("path_mtimes") or {}) == valid_mtimes
         and isinstance(BENCHMARK_NEMO_DATASET.get("operator_files"), list)
         and BENCHMARK_NEMO_DATASET.get("operator_files")
+        and _benchmark_nemo_operator_files_have_rows(BENCHMARK_NEMO_DATASET.get("operator_files"))
     )
     operator_files = (
         BENCHMARK_NEMO_DATASET.get("operator_files") or []
@@ -10731,7 +11225,7 @@ def _benchmark_nemo_dt_dataset(
     if not use_cached_operator_files:
         BENCHMARK_NEMO_DATASET["paths"] = valid_paths
         BENCHMARK_NEMO_DATASET["path_mtimes"] = valid_mtimes
-        BENCHMARK_NEMO_DATASET["operator_files"] = operator_files
+        BENCHMARK_NEMO_DATASET["operator_files"] = _benchmark_nemo_resident_operator_files(operator_files)
         BENCHMARK_NEMO_DATASET["dt_datasets"] = {}
 
     filtered = []
@@ -14981,7 +15475,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 55
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 57
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15022,6 +15516,7 @@ def _benchmark_nemo_build_dataset(
         _benchmark_nemo_scope_operator_file_to_window(operator_file, window_mode=window_mode)
         for operator_file in (operator_files or [])
     ]
+    windowed_parse = any(bool(of.get("windowedParse")) for of in prepared_operator_files)
     window_fallback = window_mode == "active_dl_session" and any(
         of.get("_windowFallback") for of in prepared_operator_files
     )
@@ -15047,7 +15542,9 @@ def _benchmark_nemo_build_dataset(
         _nemo_align_benchmark_tests_with_transfer_sessions(operator_file)
         operator_file["kpis"] = _nemo_operator_kpis(operator_file)
 
-    ranking = _nemo_build_ranking(prepared_operator_files)
+    location_win_rate_dl = _nemo_build_location_win_rate(prepared_operator_files, metric_kind="dl")
+    location_win_rate_ul = _nemo_build_location_win_rate(prepared_operator_files, metric_kind="ul")
+    ranking = _nemo_build_ranking(prepared_operator_files, location_win_rate=location_win_rate_dl)
     diagnosis = _nemo_build_diagnosis(prepared_operator_files, ranking)
     weakness_chain = _nemo_build_weakness_evidence_chain(prepared_operator_files, diagnosis)
     rf_exclusion = _nemo_build_rf_exclusion_check(prepared_operator_files, diagnosis)
@@ -15119,22 +15616,47 @@ def _benchmark_nemo_build_dataset(
     _iam_rank_ord = _nemo_ordinal((iam_entry or {}).get('rank'))
     _best_op = (best_dl_entry or {}).get('operator') or '—'
     _best_mbps = _nemo_safe_round((best_dl_entry or {}).get('avgDlMbps'), 1)
+    _best_pooled_mbps = _nemo_safe_round((best_dl_entry or {}).get('avgDlPooledMbps'), 1)
     _iam_mbps = _nemo_safe_round((iam_entry or {}).get('avgDlMbps'), 1)
+    _iam_pooled_mbps = _nemo_safe_round((iam_entry or {}).get('avgDlPooledMbps'), 1)
     _gap_pct = abs(diagnosis.get('gapToBestDlPct') or 0)
+    _win_rate_iam = (location_win_rate_dl.get("byOperator") or {}).get("IAM") or {}
+    _win_rate_best = (location_win_rate_dl.get("byOperator") or {}).get(str(_best_op)) or {}
+    _locations_compared = int(location_win_rate_dl.get("matchedLocationCount") or 0)
     _rank_ord_fr = {"1st": "1er", "2nd": "2ème", "3rd": "3ème"}.get(_iam_rank_ord, (_iam_rank_ord or 'N/A') + "ème")
     ranking_summary = (
         f"DL throughput ranking includes all operators, even if 5G was not detected. "
-        f"{_best_op} ranks first with {_best_mbps} Mbps average DL throughput. "
-        f"IAM ranks {_iam_rank_ord} with {_iam_mbps} Mbps, "
-        f"representing a {_gap_pct}% gap versus the best DL operator. "
-        f"{no_5g_note}".strip()
+        f"{_best_op} ranks first with {_best_mbps} Mbps DT-weighted DL throughput"
+        + (f" (pooled diagnostic {_best_pooled_mbps} Mbps)." if _best_pooled_mbps is not None else ".")
+        + " "
+        + f"IAM ranks {_iam_rank_ord} with {_iam_mbps} Mbps"
+        + (f" (pooled diagnostic {_iam_pooled_mbps} Mbps)," if _iam_pooled_mbps is not None else ",")
+        + " "
+        + f"representing a {_gap_pct}% gap versus the best DL operator. "
+        + (
+            f"Location win-rate: {_best_op} wins {int(_win_rate_best.get('locationWins') or 0)}/{_locations_compared} matched DTs; "
+            f"IAM wins {int(_win_rate_iam.get('locationWins') or 0)}/{_locations_compared}. "
+            if _locations_compared > 1
+            else ""
+        )
+        + f"{no_5g_note}".strip()
     ) if best_dl_entry and iam_entry else "DL throughput ranking includes all operators, even if 5G was not detected."
     ranking_summary_fr = (
         f"Le classement DL inclut tous les opérateurs, même sans 5G détectée. "
-        f"{_best_op} se classe premier avec {_best_mbps} Mbps de débit DL moyen. "
-        f"IAM se classe {_rank_ord_fr} avec {_iam_mbps} Mbps, "
-        f"soit un écart de {_gap_pct}% par rapport au meilleur opérateur DL. "
-        f"{no_5g_note_fr}".strip()
+        f"{_best_op} se classe premier avec {_best_mbps} Mbps de débit DL pondéré par DT"
+        + (f" (diagnostic poolé {_best_pooled_mbps} Mbps)." if _best_pooled_mbps is not None else ".")
+        + " "
+        + f"IAM se classe {_rank_ord_fr} avec {_iam_mbps} Mbps"
+        + (f" (diagnostic poolé {_iam_pooled_mbps} Mbps)," if _iam_pooled_mbps is not None else ",")
+        + " "
+        + f"soit un écart de {_gap_pct}% par rapport au meilleur opérateur DL. "
+        + (
+            f"Taux de gain par localisation : {_best_op} gagne {int(_win_rate_best.get('locationWins') or 0)}/{_locations_compared} DT appariés ; "
+            f"IAM gagne {int(_win_rate_iam.get('locationWins') or 0)}/{_locations_compared}. "
+            if _locations_compared > 1
+            else ""
+        )
+        + f"{no_5g_note_fr}".strip()
     ) if best_dl_entry and iam_entry else "Le classement DL inclut tous les opérateurs, même sans 5G détectée."
 
     all_tests = []
@@ -15474,6 +15996,12 @@ def _benchmark_nemo_build_dataset(
         "name": "Nemo TXT Benchmark",
         "parserVersion": _BENCHMARK_NEMO_PARSER_VERSION,
         "analysisVersion": _BENCHMARK_NEMO_ANALYSIS_VERSION,
+        "windowedParse": windowed_parse,
+        "largeDriveNotice": (
+            "Large drive detected — using windowed parse (all transfer-session rows plus a 1 row/sec route sample)."
+            if windowed_parse
+            else ""
+        ),
         "dlMode": dl_mode,
         "dlModeLabel": dl_mode_label,
         "windowMode": window_mode,
@@ -15494,6 +16022,10 @@ def _benchmark_nemo_build_dataset(
             "warning": device_parity_warning,
         },
         "benchmarkValidity": benchmark_validity,
+        "locationWinRate": {
+            "dl": location_win_rate_dl,
+            "ul": location_win_rate_ul,
+        },
         "methodologyNote": methodology_note,
         "rawParsingQa": raw_parsing_qa,
         "sourceFiles": [{"operator": item.get("operator"), "fileName": item.get("fileName"), "path": item.get("path")} for item in prepared_operator_files],
@@ -15991,7 +16523,7 @@ def _benchmark_nemo_precompute_alt_window_background(dl_mode, window_mode):
         window_mode = _benchmark_nemo_normalize_window_mode(window_mode)
         alt = "active_dl_session" if window_mode == "all_dt_session" else "all_dt_session"
         operator_files = BENCHMARK_NEMO_DATASET.get("operator_files") or []
-        if not operator_files:
+        if not _benchmark_nemo_operator_files_have_rows(operator_files):
             return
         mode_datasets = BENCHMARK_NEMO_DATASET.setdefault("mode_datasets", {})
         alt_key = _benchmark_nemo_mode_cache_key(dl_mode, alt)
@@ -16021,6 +16553,19 @@ def _load_benchmark_nemo_files(
     valid_mtimes = _benchmark_nemo_collect_mtimes(valid_paths)
     file_metas = _benchmark_nemo_collect_file_meta(valid_paths, uploaded_hashes=uploaded_hashes)
     dataset_key = _benchmark_nemo_dataset_key(file_metas, dl_mode=dl_mode, window_mode=window_mode)
+    _benchmark_nemo_begin_load_state(file_metas)
+
+    def _finish(result: dict):
+        if result.get("ok"):
+            _benchmark_nemo_finish_load_state(
+                message="Nemo benchmark import complete.",
+            )
+        else:
+            _benchmark_nemo_finish_load_state(
+                message=str(result.get("error") or "Nemo benchmark import failed."),
+                error=str(result.get("error") or "Nemo benchmark import failed."),
+            )
+        return result
 
     cached_paths = list(BENCHMARK_NEMO_DATASET.get("paths") or [])
     cached_mtimes = BENCHMARK_NEMO_DATASET.get("path_mtimes") or {}
@@ -16040,7 +16585,7 @@ def _load_benchmark_nemo_files(
             BENCHMARK_NEMO_DATASET["window_mode"] = window_mode
             BENCHMARK_NEMO_DATASET.setdefault("dt_datasets", {})
             _benchmark_nemo_save_paths(valid_paths)
-            return {
+            return _finish({
                 "ok": True,
                 "paths": valid_paths,
                 "dataset": cached_mode_dataset,
@@ -16048,8 +16593,8 @@ def _load_benchmark_nemo_files(
                 "persistent": False,
                 "datasetId": BENCHMARK_NEMO_DATASET.get("dataset_id"),
                 "datasetKey": BENCHMARK_NEMO_DATASET.get("dataset_key") or dataset_key,
-            }
-        if not BENCHMARK_NEMO_DATASET.get("operator_files"):
+            })
+        if not _benchmark_nemo_operator_files_have_rows(BENCHMARK_NEMO_DATASET.get("operator_files")):
             BENCHMARK_NEMO_DATASET["operator_files"] = _benchmark_nemo_parse_operator_files(valid_paths)
         cached_dataset, _rebuilt = _benchmark_nemo_refresh_dataset(
             cached_dataset,
@@ -16076,8 +16621,11 @@ def _load_benchmark_nemo_files(
         BENCHMARK_NEMO_DATASET["dataset_id"] = _benchmark_nemo_cache_get(BENCHMARK_NEMO_DATASET.get("mode_dataset_ids"), dl_mode, window_mode)
         BENCHMARK_NEMO_DATASET["dl_mode"] = dl_mode
         BENCHMARK_NEMO_DATASET["window_mode"] = window_mode
+        BENCHMARK_NEMO_DATASET["operator_files"] = _benchmark_nemo_resident_operator_files(
+            BENCHMARK_NEMO_DATASET.get("operator_files")
+        )
         _benchmark_nemo_save_paths(valid_paths)
-        return {
+        return _finish({
             "ok": True,
             "paths": valid_paths,
             "dataset": cached_dataset,
@@ -16085,31 +16633,33 @@ def _load_benchmark_nemo_files(
             "persistent": False,
             "datasetId": BENCHMARK_NEMO_DATASET.get("dataset_id"),
             "datasetKey": dataset_key,
-        }
+        })
 
     persisted = _benchmark_nemo_library_load_dataset_by_key(dataset_key)
     if persisted:
         _benchmark_nemo_library_load_into_memory(persisted)
-        return {
-            "ok": True,
-            "paths": valid_paths,
-            "dataset": BENCHMARK_NEMO_DATASET.get("data"),
-            "cached": True,
-            "persistent": True,
-            "datasetId": persisted.get("id"),
-            "datasetKey": dataset_key,
-        }
+        persisted_dataset = BENCHMARK_NEMO_DATASET.get("data")
+        if _benchmark_nemo_dataset_current(persisted_dataset):
+            return _finish({
+                "ok": True,
+                "paths": valid_paths,
+                "dataset": persisted_dataset,
+                "cached": True,
+                "persistent": True,
+                "datasetId": persisted.get("id"),
+                "datasetKey": dataset_key,
+            })
 
     operator_files = _benchmark_nemo_parse_operator_files(valid_paths)
     dataset = _benchmark_nemo_build_dataset(operator_files, dl_mode=dl_mode, window_mode=window_mode)
     if not dataset.get("operators"):
-        return {"ok": False, "error": "No usable Nemo TXT benchmark files were parsed"}
+        return _finish({"ok": False, "error": "No usable Nemo TXT benchmark files were parsed"})
 
     BENCHMARK_NEMO_DATASET["paths"] = valid_paths
     BENCHMARK_NEMO_DATASET["path_mtimes"] = valid_mtimes
     BENCHMARK_NEMO_DATASET["data"] = dataset
     BENCHMARK_NEMO_DATASET["loaded_at"] = time.time()
-    BENCHMARK_NEMO_DATASET["operator_files"] = operator_files
+    BENCHMARK_NEMO_DATASET["operator_files"] = _benchmark_nemo_resident_operator_files(operator_files)
     cache_key = _benchmark_nemo_mode_cache_key(dl_mode, window_mode)
     BENCHMARK_NEMO_DATASET["mode_datasets"] = {cache_key: dataset}
     BENCHMARK_NEMO_DATASET["mode_dataset_ids"] = {}
@@ -16123,7 +16673,7 @@ def _load_benchmark_nemo_files(
     BENCHMARK_NEMO_DATASET["mode_dataset_ids"][cache_key] = dataset_id
     _benchmark_nemo_save_paths(valid_paths)
 
-    return {
+    return _finish({
         "ok": True,
         "paths": valid_paths,
         "dataset": dataset,
@@ -16131,7 +16681,7 @@ def _load_benchmark_nemo_files(
         "persistent": False,
         "datasetId": dataset_id,
         "datasetKey": dataset_key,
-    }
+    })
 
 
 def _correlate_benchmark_mycom_context() -> dict:
