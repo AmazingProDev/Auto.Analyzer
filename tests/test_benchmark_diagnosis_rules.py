@@ -1345,6 +1345,54 @@ class BenchmarkDiagnosisRulesTests(unittest.TestCase):
         self.assertEqual(download["rfConsistencyFlags"], download["rfConsistencyIssues"])
         self.assertEqual(kpis["rfConsistencyFlags"], kpis["rfConsistencyIssues"])
 
+    def test_nemo_extract_dl_events_adds_macro_logic_kpis(self):
+        rows = self._nemo_download_session_rows(
+            dreq_offset_s=0.5,
+            dcomp_offset_s=4.5,
+            dad_offset_s=4.8,
+            download_time_s=4.5,
+            final_bytes_dl=190_000_000,
+            samples=[
+                (1.0, 300.0),
+                (2.0, 450.0),
+                (3.0, 480.0),
+                (4.0, 470.0),
+                (4.5, 465.0),
+            ],
+            prb_pct=5.0,
+            bw_mhz=100.0,
+            sinr_db=15.0,
+        )
+        cqi_samples = [12.0, 11.0, 10.0, 9.0, 8.0]
+        mcs_pairs = [(18.0, 20.0), (17.0, 19.0), (16.0, 18.0), (15.0, 17.0), (14.0, 16.0)]
+        band_values = ["n78", "n78", "n28", "n28", "n28"]
+        app_rows = [row for row in rows if row.get("appDlMbps") is not None]
+        for idx, row in enumerate(app_rows):
+            row["wbCqi"] = cqi_samples[idx]
+            row["pdschMcsCw0"] = mcs_pairs[idx][0]
+            row["pdschMcsCw1"] = mcs_pairs[idx][1]
+            row["band"] = band_values[idx]
+            row["servingTechnology"] = "EN-DC"
+
+        result = server._nemo_extract_dl_events(rows)
+        download = result["download"]
+        kpis = result["kpis"]
+
+        self.assertAlmostEqual(download["cqiMean"], 10.0, places=2)
+        self.assertAlmostEqual(download["avgMcs"], 17.0, places=2)
+        self.assertEqual(download["throughputSamples"], 5)
+        self.assertEqual(download["rfSamples"], download["rfSampleCount"])
+        self.assertAlmostEqual(download["byteVsCurveDeltaPct"], 27.6, places=1)
+        self.assertEqual(download["schedulerYield"], download["schedulerYieldMbpsPerPrbPct"])
+        self.assertEqual(download["nrBands"], "n28/n78")
+        self.assertAlmostEqual(kpis["cqiMean"], 10.0, places=2)
+        self.assertAlmostEqual(kpis["avgMcs"], 17.0, places=2)
+        self.assertEqual(kpis["throughputSamples"], 5)
+        self.assertEqual(kpis["rfSamples"], kpis["rfSampleCount"])
+        self.assertAlmostEqual(kpis["byteVsCurveDeltaPct"], 27.6, places=1)
+        self.assertEqual(kpis["schedulerYield"], kpis["schedulerYieldMbpsPerPrbPct"])
+        self.assertEqual(kpis["nrBands"], "n28/n78")
+
     def test_nemo_extract_dl_events_uses_peak_plateau_for_iam_source_like_samples(self):
         rows = self._nemo_download_session_rows(
             dreq_offset_s=0.272,

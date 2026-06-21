@@ -2474,6 +2474,8 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         bw_samples = []
         scell_samples = []
         active_coords = []
+        cqi_samples = []
+        mcs_samples = []
         # Band / modulation / rank / NR-presence live on sparse change-event rows (not the
         # throughput rows), so they are accumulated over the whole transfer window below —
         # the same fix applied to RF. Throughput-row-only counting produced n78%=—,
@@ -2699,6 +2701,24 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                         mac_total_val,
                         positive=True,
                     )
+                    _append_sample(
+                        cqi_samples,
+                        rdt,
+                        row.get("wbCqi"),
+                        positive=True,
+                    )
+                    _append_sample(
+                        mcs_samples,
+                        rdt,
+                        row.get("pdschMcsCw0"),
+                        positive=True,
+                    )
+                    _append_sample(
+                        mcs_samples,
+                        rdt,
+                        row.get("pdschMcsCw1"),
+                        positive=True,
+                    )
                 bw_val = row.get("caTotalBwMhz")
                 if bw_val in (None, ""):
                     primary_bw = row.get("primaryBwMhz")
@@ -2815,6 +2835,14 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         rf_sample_count = max(len(rf_rsrp), len(rf_sinr))
         steady_or_avg = steady_state_mbps or avg_rate
         steady_or_avg_raw = steady_state_raw or avg_rate_raw
+        cqi_mean = _avg_series(cqi_samples, min_points=1)
+        avg_mcs = _avg_series(mcs_samples, min_points=1)
+        byte_vs_curve_delta_pct = None
+        if avg_rate_raw is not None and steady_state_raw and steady_state_raw > 0:
+            byte_vs_curve_delta_pct = round(
+                abs(avg_rate_raw - steady_state_raw) / steady_state_raw * 100.0,
+                1,
+            )
         # 5G dwell = time-based forward-filled serving/packet-technology presence over the
         # transfer window (EN-DC/5G/NR seconds ÷ attributable seconds) — matches the
         # authoritative "Radio presence (download)" panel and correctly reports EN-DC as
@@ -2836,6 +2864,7 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 band: round((count / float(win_nr_rows)) * 100.0, 1)
                 for band, count in sorted(win_band_counts.items())
             }
+        nr_bands_summary = "/".join(sorted(nr_band_dwell_pct.keys())) or None
         # 256QAM share = rows at 256QAM / rows with any modulation in the window.
         mod256_pct = (
             round((win_mod256 / float(win_mod_total)) * 100.0, 1)
@@ -3033,12 +3062,16 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "spectralEfficiencyBpsHz": spectral_eff_bps_hz,
             "spectralEffMbpsPerMhz": spectral_eff_mbps_per_mhz,
             "schedulerYieldMbpsPerPrbPct": scheduler_yield_mbps_per_prb_pct,
+            "schedulerYield": scheduler_yield_mbps_per_prb_pct,
             "deliveryEfficiencyPct": delivery_efficiency_pct,
             "nrDwellPct": nr_dwell_pct,
             "nrRoutePresencePct": None,
             "nrBandDwellPct": nr_band_dwell_pct,
+            "nrBands": nr_bands_summary,
             "mod256Pct": mod256_pct,
             "avgRank": avg_rank,
+            "cqiMean": cqi_mean,
+            "avgMcs": avg_mcs,
             "dlCentroid": dl_centroid,
             "dlMedianSpeedKmh": dl_median_speed_kmh,
             "loadState": load_state,
@@ -3049,8 +3082,11 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "efficiencyClass": efficiency_class,
             "throughputSpreadMbps": throughput_spread,
             "dlSampleSpread": throughput_spread,
+            "throughputSamples": active_slot_count or None,
             "activeSlotCount": active_slot_count or None,
+            "rfSamples": rf_sample_count or None,
             "rfSampleCount": rf_sample_count or None,
+            "byteVsCurveDeltaPct": byte_vs_curve_delta_pct,
             "rfConsistencyIssues": rf_consistency_issues,
             "rfConsistencyFlags": list(rf_consistency_issues),
             "rfConsistencyNote": rf_consistency_note,
@@ -3142,12 +3178,16 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "spectralEfficiencyBpsHz": ds.get("spectralEfficiencyBpsHz"),
             "spectralEffMbpsPerMhz": ds.get("spectralEffMbpsPerMhz"),
             "schedulerYieldMbpsPerPrbPct": ds.get("schedulerYieldMbpsPerPrbPct"),
+            "schedulerYield": ds.get("schedulerYield"),
             "deliveryEfficiencyPct": ds.get("deliveryEfficiencyPct"),
             "nrDwellPct": ds.get("nrDwellPct"),
             "nrRoutePresencePct": ds.get("nrRoutePresencePct"),
             "nrBandDwellPct": ds.get("nrBandDwellPct") or {},
+            "nrBands": ds.get("nrBands"),
             "mod256Pct": ds.get("mod256Pct"),
             "avgRank": ds.get("avgRank"),
+            "cqiMean": ds.get("cqiMean"),
+            "avgMcs": ds.get("avgMcs"),
             "dlCentroid": ds.get("dlCentroid"),
             "dlMedianSpeedKmh": ds.get("dlMedianSpeedKmh"),
             "loadState": ds.get("loadState"),
@@ -3159,8 +3199,11 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "efficiencyClass": ds.get("efficiencyClass"),
             "throughputSpreadMbps": ds.get("throughputSpreadMbps"),
             "dlSampleSpread": ds.get("dlSampleSpread"),
+            "throughputSamples": ds.get("throughputSamples"),
             "activeSlotCount": ds.get("activeSlotCount"),
+            "rfSamples": ds.get("rfSamples"),
             "rfSampleCount": ds.get("rfSampleCount"),
+            "byteVsCurveDeltaPct": ds.get("byteVsCurveDeltaPct"),
             "rfConsistencyIssues": ds.get("rfConsistencyIssues") or [],
             "rfConsistencyFlags": ds.get("rfConsistencyFlags") or [],
             "rfConsistencyNote": ds.get("rfConsistencyNote"),
@@ -14938,7 +14981,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 54
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 55
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:

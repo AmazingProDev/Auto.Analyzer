@@ -3428,25 +3428,29 @@ document.addEventListener("DOMContentLoaded", () => {
       benchmarkNemoMacroDtTypeSelect.value =
         benchmarkState.nemoMacroDtTypeOverride || "Auto";
     }
-
     const verdict = model.verdict || {};
-    const confidence = verdict.confidence || {};
-    const primaryCode = String((verdict.primary || {}).code || "").toUpperCase();
+    const diagnosis = verdict.diagnosis || {};
+    const references = verdict.references || {};
+    const bestThroughput = references.bestThroughput || {};
+    const bestTechnical = references.bestTechnical || {};
+    const primaryCode = String(diagnosis.primaryCode || "").toUpperCase();
     const highlightColumns = {
-      NO_DL: ["dl"],
-      AT_PAR: ["dl"],
-      NO_5G: ["nrDwell"],
-      ENDC_RETENTION: ["nrDwell"],
-      NO_N78: ["n78"],
-      N78_UNDERUSE: ["n78"],
-      COVERAGE: ["rsrp", "sinr"],
-      CA_BW: ["aggBw"],
-      MIMO: ["rank"],
-      MODULATION: ["mod256"],
-      LOAD: ["prb"],
-      SCHEDULER: ["prb"],
-      SERVER_TCP: ["dl"],
-      MIXED: [],
+      NO_VALID_DL_SESSION: ["dl"],
+      IAM_AT_PAR_OR_LEADING: ["dl"],
+      IAM_CLOSE_TO_BEST: ["dl"],
+      NO_5G_FOR_IAM: ["nrDwell"],
+      LOW_5G_RETENTION: ["nrDwell"],
+      NO_N78_CBAND: ["n78"],
+      N78_UNDER_USED: ["n78"],
+      RF_COVERAGE_QUALITY_LIMITATION: ["rf"],
+      ACTIVE_BANDWIDTH_LIMITATION: ["aggBw"],
+      CA_LIMITATION: ["aggBw"],
+      MIMO_RANK_LIMITATION: ["mimo"],
+      MODULATION_LIMITATION: ["mimo"],
+      CAPACITY_LOAD_LIMITATION: ["prb"],
+      SCHEDULER_ALLOCATION_LIMITATION: ["yield", "prb"],
+      SERVER_TCP_APPLICATION_LIMITATION: ["dl"],
+      MIXED_OR_INCONCLUSIVE: [],
     }[primaryCode] || [];
     const titleAttr = (text) => ' title="' + escapeHtml(String(text || "")) + '"';
     const confidenceTone = {
@@ -3454,6 +3458,15 @@ document.addEventListener("DOMContentLoaded", () => {
       Medium:
         "background:rgba(96,165,250,0.14);color:#bfdbfe;border:1px solid rgba(96,165,250,0.24);",
       Low: "background:rgba(251,191,36,0.14);color:#fde68a;border:1px solid rgba(251,191,36,0.24);",
+    };
+    const severityTone = {
+      None: "background:rgba(34,197,94,0.14);color:#bbf7d0;border:1px solid rgba(34,197,94,0.24);",
+      "Optimization opportunity":
+        "background:rgba(59,130,246,0.14);color:#bfdbfe;border:1px solid rgba(59,130,246,0.24);",
+      "Moderate gap":
+        "background:rgba(249,115,22,0.14);color:#fed7aa;border:1px solid rgba(249,115,22,0.24);",
+      "Significant degradation":
+        "background:rgba(239,68,68,0.14);color:#fecaca;border:1px solid rgba(239,68,68,0.24);",
     };
     const roleTone = {
       iam: "background:rgba(37,99,235,0.14);color:#bfdbfe;border:1px solid rgba(37,99,235,0.22);",
@@ -3477,18 +3490,31 @@ document.addEventListener("DOMContentLoaded", () => {
     const fmtMbps = (value) => fmtNum(value, 0, " Mbps");
     const fmtRank = (value) => fmtNum(value, 1, "");
     const fmtLatLon = (centroid) => {
-      if (!centroid || !Number.isFinite(Number(centroid.lat)) || !Number.isFinite(Number(centroid.lon))) {
+      if (
+        !centroid ||
+        !Number.isFinite(Number(centroid.lat)) ||
+        !Number.isFinite(Number(centroid.lon))
+      ) {
         return "GPS unavailable";
       }
-      return benchmarkNumber(Number(centroid.lat), 5) + ", " + benchmarkNumber(Number(centroid.lon), 5);
+      return (
+        benchmarkNumber(Number(centroid.lat), 5) +
+        ", " +
+        benchmarkNumber(Number(centroid.lon), 5)
+      );
     };
+    const inlineBadge = (label, tone) =>
+      '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700;' +
+      tone +
+      '">' +
+      escapeHtml(label) +
+      "</span>";
     const cellStyle = (row, column) => {
       const shouldHighlight =
         highlightColumns.includes(column) &&
         (String(row.operator || "").toUpperCase() === "IAM" ||
-          String(row.operator || "") === verdict.bestTechnicalCompetitor ||
-          (column === "dl" &&
-            String(row.operator || "") === verdict.bestThroughputCompetitor));
+          String(row.operator || "") === bestTechnical.operator ||
+          String(row.operator || "") === bestThroughput.operator);
       return shouldHighlight
         ? "background:rgba(37,99,235,0.10);box-shadow:inset 0 0 0 1px rgba(37,99,235,0.18);"
         : "";
@@ -3496,78 +3522,121 @@ document.addEventListener("DOMContentLoaded", () => {
     const roleBadge = (row) => {
       const labels = {
         iam: "IAM focus",
-        throughput: "C_tput",
-        technical: "C_tech",
-        "throughput+technical": "C_tput + C_tech",
+        throughput: "Best throughput",
+        technical: "Best technical",
+        "throughput+technical": "Best throughput + technical",
         reference: "ref",
       };
-      return (
-        '<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:999px;font-size:9px;font-weight:700;' +
-        (roleTone[row.role] || roleTone.reference) +
-        '">' +
-        escapeHtml(labels[row.role] || "ref") +
-        "</span>"
-      );
+      return inlineBadge(labels[row.role] || "ref", roleTone[row.role] || roleTone.reference);
     };
-    const secondaryBadges = Array.isArray(verdict.secondary)
-      ? verdict.secondary
-          .map(
-            (item) =>
-              '<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:999px;font-size:9px;font-weight:700;background:rgba(148,163,184,0.08);color:#cbd5e1;border:1px solid rgba(148,163,184,0.18)">' +
-              escapeHtml(item.label || item.code || "Secondary") +
-              "</span>",
+    const renderList = (items, formatter, emptyText) =>
+      Array.isArray(items) && items.length
+        ? '<ul style="margin:0;padding-left:16px;display:grid;gap:5px">' +
+          items.map((item) => "<li>" + formatter(item) + "</li>").join("") +
+          "</ul>"
+        : '<div style="color:#64748b;font-size:10px">' + escapeHtml(emptyText) + "</div>";
+    const confidenceBadge = diagnosis.confidence?.label
+      ? inlineBadge(
+          diagnosis.confidence.label + " confidence",
+          confidenceTone[diagnosis.confidence.label] || confidenceTone.Medium,
+        )
+      : "";
+    const severityBadge = diagnosis.severity
+      ? inlineBadge(
+          diagnosis.severity,
+          severityTone[diagnosis.severity] || severityTone["Optimization opportunity"],
+        )
+      : "";
+    const secondaryBadges = Array.isArray(diagnosis.secondary)
+      ? diagnosis.secondary
+          .map((item) =>
+            inlineBadge(
+              item.label || item.code || "Secondary",
+              "background:rgba(148,163,184,0.08);color:#cbd5e1;border:1px solid rgba(148,163,184,0.18);",
+            ),
           )
           .join(" ")
       : "";
-    const confidenceBadge = verdict.confidence?.level
-      ? '<span style="display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700;' +
-        (confidenceTone[verdict.confidence.level] || confidenceTone.Medium) +
-        '">' +
-        escapeHtml(verdict.confidence.level + " confidence") +
-        "</span>"
-      : "";
     const rowsHtml = model.rows
       .map((row) => {
-        const conclusionHtml =
-          String(row.operator || "").toUpperCase() === "IAM"
-            ? '<div style="display:flex;flex-direction:column;gap:8px;min-width:260px">' +
-              '<div><div style="font-size:11px;font-weight:800;color:#e2e8f0">' +
-              escapeHtml(((verdict.primary || {}).label || "Mixed limitation")) +
-              "</div><div style=\"font-size:10px;color:#93c5fd;margin-top:2px\">" +
-              escapeHtml(((verdict.primary || {}).action || "")) +
-              "</div></div>" +
-              (confidenceBadge || "") +
-              (secondaryBadges
-                ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-                  secondaryBadges +
-                  "</div>"
-                : "") +
-              '<details style="font-size:10px;color:#94a3b8"><summary style="cursor:pointer;color:#cbd5e1;font-weight:700">Evidence</summary>' +
-              '<div style="margin-top:6px;display:grid;gap:4px">' +
-              (Array.isArray(verdict.evidence) && verdict.evidence.length
-                ? verdict.evidence
-                    .map(
-                      (item) =>
-                        '<div>• ' + escapeHtml(String(item || "")) + "</div>",
-                    )
-                    .join("")
-                : '<div>• No additional evidence lines were generated.</div>') +
-              (verdict.consistency?.note
-                ? '<div style="color:' +
-                  (verdict.consistency.aligned ? "#94a3b8" : "#fbbf24") +
-                  '">• ' +
-                  escapeHtml(verdict.consistency.note) +
-                  "</div>"
-                : "") +
-              (verdict.interpretationNote
-                ? '<div>• ' + escapeHtml(verdict.interpretationNote) + "</div>"
-                : "") +
-              "</div></details></div>"
-            : roleBadge(row);
+        const isIam = String(row.operator || "").toUpperCase() === "IAM";
+        const conclusionHtml = isIam
+          ? '<div style="display:flex;flex-direction:column;gap:8px;min-width:320px">' +
+            '<div style="font-size:11px;font-weight:800;color:#e2e8f0">' +
+            escapeHtml(diagnosis.primaryLabel || "Mixed / inconclusive") +
+            "</div>" +
+            '<div style="font-size:10px;color:#cbd5e1;line-height:1.5">' +
+            escapeHtml(diagnosis.conclusionText || "") +
+            "</div>" +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+            severityBadge +
+            (confidenceBadge || "") +
+            "</div>" +
+            (secondaryBadges
+              ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                secondaryBadges +
+                "</div>"
+              : "") +
+            '<details style="font-size:10px;color:#94a3b8"><summary style="cursor:pointer;color:#cbd5e1;font-weight:700">Evidence drawer</summary>' +
+            '<div style="margin-top:6px;display:grid;gap:8px">' +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Evidence</div>' +
+            renderList(
+              diagnosis.evidence,
+              (item) =>
+                escapeHtml(
+                  (item.kpi || "KPI") +
+                    ": IAM " +
+                    (item.iamValue == null ? "—" : item.iamValue) +
+                    (item.refValue == null ? "" : " vs ref " + item.refValue) +
+                    (item.diff == null ? "" : " (gap " + item.diff + ")") +
+                    " — " +
+                    (item.interpretation || ""),
+                ),
+              "No structured evidence.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Blocked causes</div>' +
+            renderList(
+              diagnosis.blockedCauses,
+              (item) => escapeHtml(item.message || item.code || "Blocked"),
+              "No blocked causes.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Warnings</div>' +
+            renderList(
+              diagnosis.warnings,
+              (item) =>
+                escapeHtml(
+                  (item.operator ? item.operator + ": " : "") +
+                    (item.message || item.code || "Warning"),
+                ),
+              "No warnings.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Why this diagnosis</div>' +
+            renderList(
+              diagnosis.action || [],
+              (item) => escapeHtml(item),
+              "No action guidance.",
+            ) +
+            "</div>" +
+            (diagnosis.consistency?.note
+              ? '<div style="color:' +
+                (diagnosis.consistency.aligned ? "#94a3b8" : "#fbbf24") +
+                '">' +
+                escapeHtml(diagnosis.consistency.note) +
+                "</div>"
+              : "") +
+            "</div></details></div>"
+          : '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">' +
+            roleBadge(row) +
+            '<div style="font-size:10px;color:#94a3b8">' +
+            escapeHtml(row.deviceModel || "device unknown") +
+            "</div></div>";
         return (
           "<tr>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);font-size:11px;font-weight:700;color:' +
-          (String(row.operator || "").toUpperCase() === "IAM"
+          (isIam
             ? "#2563eb"
             : String(row.operator || "").toUpperCase() === "ORANGE"
               ? "#f97316"
@@ -3576,6 +3645,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 : "#e2e8f0") +
           '">' +
           escapeHtml(row.operator || "—") +
+          "</td>" +
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          roleBadge(row) +
           "</td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "dl") +
@@ -3588,33 +3660,37 @@ document.addEventListener("DOMContentLoaded", () => {
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "nrDwell") +
           '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(fmtPct(row.nrDwellPct, 1)) +
-          "</td>" +
+          '</div><div style="font-size:10px;color:#94a3b8">n78 ' +
+          escapeHtml(fmtPct((row.nrBandDwellPct || {}).n78, 1)) +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "n78") +
           '">' +
-          escapeHtml(fmtPct((row.nrBandDwellPct || {}).n78, 1)) +
-          "</td>" +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(row.nrBands || "—") +
+          '</div><div style="font-size:10px;color:#94a3b8">CQI ' +
+          escapeHtml(fmtRank(row.cqiMean)) +
+          " · MCS " +
+          escapeHtml(fmtRank(row.avgMcs)) +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
-          cellStyle(row, "rsrp") +
+          cellStyle(row, "rf") +
           '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(fmtDbm(row.ssRsrpMean)) +
-          "</td>" +
-          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
-          cellStyle(row, "sinr") +
-          '">' +
+          '</div><div style="font-size:10px;color:#94a3b8">SINR ' +
           escapeHtml(fmtDb(row.ssSinrMean)) +
-          "</td>" +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
-          cellStyle(row, "mod256") +
+          cellStyle(row, "mimo") +
           '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(fmtPct(row.mod256Pct, 1)) +
-          "</td>" +
-          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
-          cellStyle(row, "rank") +
-          '">' +
+          '</div><div style="font-size:10px;color:#94a3b8">rank ' +
           escapeHtml(fmtRank(row.avgRank)) +
-          "</td>" +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "aggBw") +
           '">' +
@@ -3626,11 +3702,21 @@ document.addEventListener("DOMContentLoaded", () => {
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
           cellStyle(row, "prb") +
           '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(fmtPct(row.prbPct, 1)) +
-          "</td>" +
-          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '</div><div style="font-size:10px;color:#94a3b8">' +
+          escapeHtml(row.loadState || "—") +
+          "</div></td>" +
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08);' +
+          cellStyle(row, "yield") +
+          '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
           escapeHtml(fmtNum(row.spectralEffMbpsPerMhz, 2)) +
-          "</td>" +
+          '</div><div style="font-size:10px;color:#94a3b8">yield ' +
+          escapeHtml(fmtNum(row.schedulerYield, 2)) +
+          " · delivery " +
+          escapeHtml(fmtPct(row.deliveryEfficiencyPct, 1)) +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
           conclusionHtml +
           "</td>" +
@@ -3639,86 +3725,92 @@ document.addEventListener("DOMContentLoaded", () => {
       })
       .join("");
     const thresholdFields = [
-      ["atParGapPct", "At-par gap %", "If IAM stays within this DL gap versus the best-throughput reference, the macro verdict becomes AT_PAR."],
-      ["no5gDwellPct", "No-5G dwell %", "If both DL-window NR dwell and route NR presence stay below this level, the verdict becomes NO_5G."],
-      ["retentionDropPts", "Retention drop pts", "Minimum route-NR minus DL-NR gap that triggers ENDC_RETENTION."],
-      ["noN78DwellPct", "No-n78 dwell %", "If IAM n78 dwell stays below this level, the verdict becomes NO_N78."],
-      ["n78UnderusePts", "n78 under-use pts", "IAM n78 dwell must trail the best technical reference by this many points to trigger N78_UNDERUSE."],
-      ["sinrGapDb", "SINR gap dB", "Coverage rule threshold versus the best technical reference."],
-      ["rsrpGapDb", "RSRP gap dB", "Coverage fallback threshold on signal strength."],
-      ["caBwGapPct", "CA BW gap %", "If IAM active bandwidth is this much below the best technical reference, the verdict becomes CA_BW."],
-      ["rankGap", "Rank gap", "Average-rank gap needed before MIMO becomes the primary macro cause."],
-      ["mod256GapPts", "256QAM gap pts", "Gap in 256QAM share needed before MODULATION becomes primary."],
-      ["prbLowPct", "Low PRB %", "Scheduler rule only triggers below this PRB load band."],
-      ["prbHighPct", "High PRB %", "LOAD triggers above this PRB utilization level."],
-      ["techW.sinr", "C_tech SINR w", "Weight for SINR when choosing the best technical reference."],
-      ["techW.rank", "C_tech rank w", "Weight for average rank when choosing the best technical reference."],
-      ["techW.mod256", "C_tech 256QAM w", "Weight for modulation share when choosing the best technical reference."],
-      ["techW.n78", "C_tech n78 w", "Weight for n78 dwell when choosing the best technical reference."],
-      ["techW.aggBw", "C_tech BW w", "Weight for active bandwidth when choosing the best technical reference."],
-      ["conf.minDlSec", "Min DL sec", "Confidence target for transfer duration."],
-      ["conf.minActiveSlots", "Min active slots", "Confidence target for active download samples."],
-      ["conf.low", "Confidence low", "Scores at or below this level map to Low confidence."],
-      ["conf.high", "Confidence high", "Scores at or above this level map to High confidence."],
+      ["atParGapPct", "At-par gap %", "Gap at or below this threshold is treated as at-par / leading."],
+      ["closeGapPct", "Close gap %", "Gaps up to this threshold remain optimization opportunities, not hard failures."],
+      ["moderateGapPct", "Moderate gap %", "Gap boundary between moderate and significant degradation."],
+      ["minDlDurationSec", "Min DL sec", "Confidence penalty threshold for short downloads."],
+      ["minThroughputSamples", "Min tput samples", "Confidence penalty threshold for sparse active throughput samples."],
+      ["minRfSamples", "Min RF samples", "Confidence penalty threshold for sparse RF samples."],
+      ["maxByteVsCurveDeltaPct", "Max byte/curve delta %", "Beyond this, transfer methodology starts reducing confidence and can support a server/TCP verdict."],
+      ["minNrDwellPct", "Min 5G dwell %", "Below this on both DL dwell and route presence, the verdict becomes No 5G."],
+      ["lowNrDwellPct", "Low retention %", "Low active-download NR dwell despite route presence points to retention limitation."],
+      ["minN78DwellPct", "Min n78 %", "Below this n78 dwell, the verdict becomes No C-Band n78 usage."],
+      ["n78GapPts", "n78 gap pts", "n78 dwell gap needed before under-used C-Band becomes primary."],
+      ["sinrGapDb", "SINR gap dB", "RF comparability and RF limitation threshold on SS-SINR."],
+      ["rsrpGapDb", "RSRP gap dB", "RF comparability and RF limitation threshold on SS-RSRP."],
+      ["poorSinrDb", "Poor SINR dB", "SINR floor for RF-good checks."],
+      ["poorRsrpDbm", "Poor RSRP dBm", "RSRP floor for RF-good checks."],
+      ["bandwidthGapPct", "BW gap %", "Active-bandwidth gap needed before active bandwidth limitation becomes primary."],
+      ["scellGapCount", "SCell gap", "Average SCell gap needed before CA limitation is considered."],
+      ["rankGap", "Rank gap", "Average-rank gap needed before MIMO limitation becomes primary."],
+      ["qam256GapPts", "256QAM gap pts", "256QAM share gap needed before modulation limitation becomes primary."],
+      ["highPrbPct", "High PRB %", "Capacity/load threshold."],
+      ["lowPrbPct", "Low PRB %", "Scheduler-yield threshold when RF is good."],
+      ["seGapPct", "SE gap %", "Reserved spectral-efficiency comparison threshold."],
+      ["lowConfidenceMaxScore", "Low conf max", "Confidence scores at or below this are labeled Low."],
+      ["mediumConfidenceMaxScore", "Medium conf max", "Confidence scores at or below this are labeled Medium."],
     ];
     benchmarkNemoMacroHeader.innerHTML =
       "Macro — " +
-      escapeHtml(resolveBenchmarkNemoScopeLabel(dataset)) +
+      escapeHtml(verdict.scope || resolveBenchmarkNemoScopeLabel(dataset)) +
       " · " +
       escapeHtml(verdict.dtType || model.dtType || "Static") +
-      " · IAM vs " +
-      escapeHtml(verdict.bestThroughputCompetitor || "—") +
-      " (gap " +
-      escapeHtml(
-        verdict.gapPct == null ? "—" : "−" + benchmarkNumber(verdict.gapPct, 1) + "%",
-      ) +
-      ", ≈Δ" +
-      escapeHtml(
-        verdict.deltaMbps == null
-          ? "—"
-          : Math.abs(Number(verdict.deltaMbps)).toFixed(0) + " Mbps",
-      ) +
-      ") · radio ref " +
-      escapeHtml(verdict.bestTechnicalCompetitor || "—") +
       " · " +
-      (confidenceBadge || "");
+      escapeHtml(diagnosis.primaryLabel || "Mixed / inconclusive") +
+      " · Gap " +
+      escapeHtml(
+        diagnosis.gapPct == null ? "—" : benchmarkNumber(diagnosis.gapPct, 1) + "%",
+      ) +
+      " / " +
+      escapeHtml(
+        diagnosis.gapMbps == null ? "—" : benchmarkNumber(diagnosis.gapMbps, 0) + " Mbps",
+      ) +
+      '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' +
+      severityBadge +
+      (confidenceBadge || "") +
+      "</div>" +
+      '<div style="margin-top:8px;font-size:10px;color:#94a3b8;line-height:1.5">' +
+      "Best throughput ref: " +
+      escapeHtml(bestThroughput.operator || "—") +
+      " · Best technical ref: " +
+      escapeHtml(bestTechnical.operator || "—") +
+      (Array.isArray(diagnosis.confidence?.reasons) && diagnosis.confidence.reasons.length
+        ? " · confidence reasons: " +
+          escapeHtml(diagnosis.confidence.reasons.join("; "))
+        : "") +
+      "</div>";
     benchmarkNemoMacroBody.innerHTML =
       '<div style="overflow:auto">' +
-      '<table style="width:100%;border-collapse:collapse;min-width:1280px">' +
+      '<table style="width:100%;border-collapse:collapse;min-width:1540px">' +
       "<thead><tr>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)">Operator</th>' +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)">Role</th>' +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Steady-state App DL first, then the byte-based session average. The steady figure removes short-transfer ramp-up bias.") +
+      titleAttr("Steady-state App DL first, then the byte-based session average. The steady figure reduces short-transfer ramp-up bias.") +
       ">DL</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("NR dwell during the active download window: the share of the real session spent on NR / EN-DC.") +
-      ">5G %</th>" +
+      titleAttr("NR dwell during the active download window and the n78 share within that 5G dwell.") +
+      ">5G / n78</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("C-band means n78 only here. This is the active-download n78 dwell share, not a route-wide presence metric.") +
-      ">n78 %</th>" +
+      titleAttr("NR bands summary derived from active-download NR dwell keys, plus CQI and average MCS for link adaptation context.") +
+      ">NR bands / CQI / MCS</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Throughput-weighted SS-RSRP during active download slots only.") +
-      ">SS-RSRP</th>" +
+      titleAttr("SS-RSRP and SS-SINR during the active download window.") +
+      ">RF</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Throughput-weighted SS-SINR during active download slots only. This is the main RF quality signal in the macro tree.") +
-      ">SS-SINR</th>" +
+      titleAttr("256QAM share and average rank summarize spectral efficiency and MIMO usage once RF is comparable.") +
+      ">256QAM / rank</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Share of active download slots using 256QAM. Lower values often point to spectral-efficiency or CQI/MCS limits.") +
-      ">256QAM %</th>" +
+      titleAttr("Active BW is the mean aggregated bandwidth during active download seconds. The smaller line is average SCell count.") +
+      ">Active BW / SCells</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Average scheduled rank across active download slots. This is the macro MIMO utilization view.") +
-      ">Avg rank</th>" +
+      titleAttr("Mean PRB utilization plus the derived load-state label.") +
+      ">PRB / Load</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Active BW = the mean aggregated bandwidth seen on active download slots. Prefer CA total bandwidth when exported; otherwise fall back to primary plus secondary component bandwidths, then primary only. The smaller line is the average SCell count.") +
-      ">Agg BW / SCells</th>" +
+      titleAttr("Efficiency = Mbps/MHz. The smaller line adds scheduler yield and delivery efficiency.") +
+      ">Efficiency / yield</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Mean PRB utilization during active download slots. High PRB suggests load pressure; low PRB with a big DL gap suggests scheduler yield / allocation inefficiency.") +
-      ">PRB %</th>" +
-      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Steady-state App DL divided by active bandwidth. This is the usable application throughput extracted from each MHz.") +
-      ">Eff.</th>" +
-      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("IAM only: deterministic primary macro cause, recommended action, evidence, secondary contributors, and confidence.") +
+      titleAttr("IAM only: macro diagnosis, evidence, blocked causes, warnings, and confidence reasons.") +
       ">Conclusion</th>" +
       "</tr></thead><tbody>" +
       rowsHtml +
@@ -3726,14 +3818,13 @@ document.addEventListener("DOMContentLoaded", () => {
       '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;color:#94a3b8;font-size:10px">' +
       '<span title="Route-wide NR presence lets the macro tree separate no-coverage from lost-retention cases.">Route NR presence: ' +
       escapeHtml(
-        model.perOp?.IAM
-          ? fmtPct(model.perOp.IAM.nrRoutePresencePct, 1)
-          : "—",
+        model.perOp?.IAM ? fmtPct(model.perOp.IAM.nrRoutePresencePct, 1) : "—",
       ) +
       "</span>" +
       '<span title="IAM device model captured from the export when available.">Device: ' +
       escapeHtml(model.perOp?.IAM?.deviceModel || "unknown") +
       "</span>" +
+      '<span title="Single drive test caveat.">n=1 DT: directional, not statistically significant</span>' +
       '<span title="Active-download centroid used only as a soft confidence factor.">DL centroid: ' +
       escapeHtml(fmtLatLon(model.perOp?.IAM?.dlCentroid)) +
       "</span></div>";
@@ -3767,7 +3858,7 @@ document.addEventListener("DOMContentLoaded", () => {
           })
           .join("") +
         "</div>" +
-        '<div style="margin-top:10px;color:#64748b;font-size:10px">C-band is treated as n78 only. Threshold edits are local to this browser until you export or reset the profile.</div>';
+        '<div style="margin-top:10px;color:#64748b;font-size:10px">C-band is treated as n78 only. Threshold edits are local to this browser until you export, import, or reset the profile.</div>';
     }
     benchmarkNemoMacroCard.style.display = "";
     benchmarkNemoMacroCard

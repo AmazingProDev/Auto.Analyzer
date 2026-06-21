@@ -16,21 +16,31 @@
     const STORAGE_KEY = "benchmarkNemoMacroThresholds";
     const OPERATOR_ORDER = ["IAM", "ORANGE", "INWI"];
     const RULE_ORDER = [
-      "NO_DL",
-      "AT_PAR",
-      "NO_5G",
-      "ENDC_RETENTION",
-      "NO_N78",
-      "N78_UNDERUSE",
-      "COVERAGE",
-      "CA_BW",
-      "MIMO",
-      "MODULATION",
-      "LOAD",
-      "SCHEDULER",
-      "SERVER_TCP",
-      "MIXED",
+      "NO_VALID_DL_SESSION",
+      "IAM_AT_PAR_OR_LEADING",
+      "IAM_CLOSE_TO_BEST",
+      "NO_5G_FOR_IAM",
+      "LOW_5G_RETENTION",
+      "NO_N78_CBAND",
+      "N78_UNDER_USED",
+      "RF_COVERAGE_QUALITY_LIMITATION",
+      "ACTIVE_BANDWIDTH_LIMITATION",
+      "CA_LIMITATION",
+      "MIMO_RANK_LIMITATION",
+      "MODULATION_LIMITATION",
+      "CAPACITY_LOAD_LIMITATION",
+      "SCHEDULER_ALLOCATION_LIMITATION",
+      "SERVER_TCP_APPLICATION_LIMITATION",
+      "MIXED_OR_INCONCLUSIVE",
     ];
+    const TECHNICAL_WEIGHTS = {
+      nrDwellPct: 0.3,
+      n78Pct: 0.25,
+      aggBwMhz: 0.15,
+      ssSinrMean: 0.1,
+      avgRank: 0.1,
+      mod256Pct: 0.1,
+    };
     const DT_TYPE_FACTORS = {
       Static: 1.0,
       Indoor: 0.7,
@@ -38,38 +48,36 @@
       Event: 0.7,
     };
     const DT_TYPE_NOTES = {
-      Static: "Single-point result with the strongest spatial comparability.",
-      Mobility: "RF reflects a route average more than one fixed point.",
-      Indoor: "GPS-based location validity is reduced in this scope.",
-      Event: "This result is event-specific rather than a stable steady-state sample.",
+      Static: "Single-point directional DT with the strongest spatial comparability.",
+      Mobility: "Directional result averaged over a route rather than one fixed point.",
+      Indoor: "Indoor scope reduces the certainty of GPS-based co-location checks.",
+      Event: "Event-driven DTs are directional and may not reflect steady-state network behavior.",
     };
     const MACRO_DEFAULT_THRESHOLDS = {
       atParGapPct: 10,
-      no5gDwellPct: 5,
-      retentionDropPts: 30,
-      noN78DwellPct: 5,
-      n78UnderusePts: 10,
+      closeGapPct: 20,
+      moderateGapPct: 35,
+      minDlDurationSec: 20,
+      minThroughputSamples: 10,
+      minRfSamples: 10,
+      maxByteVsCurveDeltaPct: 15,
+      minNrDwellPct: 5,
+      lowNrDwellPct: 30,
+      minN78DwellPct: 5,
+      n78GapPts: 10,
       sinrGapDb: 3,
       rsrpGapDb: 6,
-      caBwGapPct: 20,
+      poorSinrDb: 5,
+      poorRsrpDbm: -110,
+      bandwidthGapPct: 20,
+      scellGapCount: 1,
       rankGap: 0.5,
-      mod256GapPts: 15,
-      prbLowPct: 15,
-      prbHighPct: 80,
-      serverTcpFloorMbps: null,
-      techW: {
-        sinr: 0.3,
-        rank: 0.2,
-        mod256: 0.2,
-        n78: 0.15,
-        aggBw: 0.15,
-      },
-      conf: {
-        minDlSec: 8,
-        minActiveSlots: 8,
-        low: 0.5,
-        high: 0.8,
-      },
+      qam256GapPts: 15,
+      highPrbPct: 80,
+      lowPrbPct: 15,
+      seGapPct: 20,
+      lowConfidenceMaxScore: 45,
+      mediumConfidenceMaxScore: 75,
     };
 
     function clone(value) {
@@ -100,6 +108,11 @@
       if (value === null || value === undefined || value === "") return null;
       const num = Number(value);
       return Number.isFinite(num) ? num : null;
+    }
+
+    function round1(value) {
+      const num = asNumber(value);
+      return num === null ? null : Number(num.toFixed(1));
     }
 
     function upper(value) {
@@ -163,42 +176,30 @@
       );
     }
 
-    function distanceScore(iam, peer) {
-      if (
-        !iam ||
-        !peer ||
-        !iam.dlCentroid ||
-        !peer.dlCentroid ||
-        asNumber(iam.dlCentroid.lat) === null ||
-        asNumber(iam.dlCentroid.lon) === null ||
-        asNumber(peer.dlCentroid.lat) === null ||
-        asNumber(peer.dlCentroid.lon) === null
-      ) {
-        return 0.5;
-      }
-      const toRad = (deg) => (deg * Math.PI) / 180;
-      const lat1 = toRad(iam.dlCentroid.lat);
-      const lon1 = toRad(iam.dlCentroid.lon);
-      const lat2 = toRad(peer.dlCentroid.lat);
-      const lon2 = toRad(peer.dlCentroid.lon);
-      const dLat = lat2 - lat1;
-      const dLon = lon2 - lon1;
-      const a =
-        Math.sin(dLat / 2) ** 2 +
-        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-      const meters = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      if (meters <= 150) return 1;
-      if (meters <= 400) return 0.8;
-      if (meters <= 900) return 0.6;
-      return 0.4;
-    }
-
     function normalizeBandShares(raw) {
       const out = {};
       Object.keys(raw || {}).forEach((key) => {
-        out[String(key).trim().toLowerCase()] = asNumber(raw[key]) || 0;
+        const value = asNumber(raw[key]);
+        out[String(key).trim().toLowerCase()] = value == null ? 0 : value;
       });
       return out;
+    }
+
+    function getNested(source, path) {
+      let value = source;
+      for (let i = 0; i < path.length; i += 1) {
+        if (!value || typeof value !== "object") return null;
+        value = value[path[i]];
+      }
+      return value == null ? null : value;
+    }
+
+    function firstNumber(...values) {
+      for (let i = 0; i < values.length; i += 1) {
+        const num = asNumber(values[i]);
+        if (num !== null) return num;
+      }
+      return null;
     }
 
     function buildBenchmarkNemoMacroPerOp(dataset) {
@@ -222,36 +223,120 @@
         const opMeta = operatorRows.find(
           (row) => upper(row && row.operator) === upper(operator),
         );
+        const opKpis = (opMeta && opMeta.kpis) || {};
+        const nrBandDwellPct = normalizeBandShares(
+          download.nrBandDwellPct ||
+            evt.nrBandDwellPct ||
+            getNested(opKpis, ["nrBandDwellPct"]) ||
+            {},
+        );
+        const nrBands =
+          String(download.nrBands || evt.nrBands || "").trim() ||
+          (Object.keys(nrBandDwellPct).length
+            ? Object.keys(nrBandDwellPct).sort().join("/")
+            : "");
+        const cqiFallback =
+          getNested(opKpis, ["cqi", "median"]) ??
+          getNested(opKpis, ["cqiMedian"]);
+        const sinrFallback =
+          getNested(opKpis, ["sinr", "median"]) ??
+          getNested(opKpis, ["sinrMedian"]);
+        const rsrpFallback =
+          getNested(opKpis, ["rsrp", "median"]) ??
+          getNested(opKpis, ["rsrpMedian"]);
+        const prbFallback =
+          getNested(opKpis, ["dlPrbUtilPct", "average"]) ??
+          getNested(opKpis, ["prbAvg"]);
         out[upper(operator)] = {
           operator,
-          dlSteadyMbps: asNumber(evt.dlSteadyStateMbps ?? download.steadyStateMbps),
-          dlByteMbps: asNumber(evt.dlAppRateMbps ?? download.avgRateMbps),
-          dlDurationS: asNumber(evt.downloadDurationAvgS ?? download.effTransferTimeS),
-          activeSlotCount: asNumber(evt.activeSlotCount ?? download.activeSlotCount),
-          nrDwellPct: asNumber(download.nrDwellPct),
-          nrRoutePresencePct: asNumber(
-            download.nrRoutePresencePct ?? evt.nrRoutePresencePct,
+          dlSteadyMbps: firstNumber(
+            evt.dlSteadyStateMbps,
+            download.steadyStateMbps,
           ),
-          nrBandDwellPct: normalizeBandShares(download.nrBandDwellPct),
-          mod256Pct: asNumber(download.mod256Pct),
-          avgRank: asNumber(download.avgRank),
-          aggBwMhz: asNumber(download.aggBwMhz ?? download.bwMHz),
-          scellCount: asNumber(download.scellCount),
-          prbPct: asNumber(download.prbUtilMean),
-          spectralEffMbpsPerMhz: asNumber(
-            download.spectralEffMbpsPerMhz ??
-              download.mbpsPerMHz ??
-              evt.mbpsPerMHz,
+          dlByteMbps: firstNumber(
+            evt.dlAppRateMbps,
+            download.avgRateMbps,
+            evt.dlAppTputMbps,
           ),
-          ssRsrpMean: asNumber(download.ssRsrpMean),
-          ssSinrMean: asNumber(download.ssSinrMean),
+          dlAppRateMbps: firstNumber(
+            evt.dlAppRateMbps,
+            download.avgRateMbps,
+            evt.dlAppTputMbps,
+          ),
+          dlDurationS: firstNumber(
+            evt.downloadDurationAvgS,
+            download.effTransferTimeS,
+            download.downloadDurationAvgS,
+          ),
+          activeSlotCount: firstNumber(
+            evt.activeSlotCount,
+            download.activeSlotCount,
+          ),
+          throughputSamples: firstNumber(
+            download.throughputSamples,
+            evt.throughputSamples,
+            evt.activeSlotCount,
+            download.activeSlotCount,
+          ),
+          rfSamples: firstNumber(
+            download.rfSamples,
+            evt.rfSamples,
+            evt.rfSampleCount,
+            download.rfSampleCount,
+          ),
+          byteVsCurveDeltaPct: firstNumber(
+            download.byteVsCurveDeltaPct,
+            evt.byteVsCurveDeltaPct,
+          ),
+          nrDwellPct: firstNumber(
+            download.nrDwellPct,
+            evt.nrDwellPct,
+          ),
+          nrRoutePresencePct: firstNumber(
+            download.nrRoutePresencePct,
+            evt.nrRoutePresencePct,
+          ),
+          nrBandDwellPct,
+          nrBands: nrBands || null,
+          mod256Pct: firstNumber(download.mod256Pct, evt.mod256Pct),
+          avgRank: firstNumber(download.avgRank, evt.avgRank),
+          aggBwMhz: firstNumber(
+            download.aggBwMhz,
+            download.bwMHz,
+            evt.aggBwMhz,
+            evt.bwMHz,
+          ),
+          scellCount: firstNumber(download.scellCount, evt.scellCount),
+          prbPct: firstNumber(download.prbUtilMean, evt.prbUtilMean, prbFallback),
+          spectralEffMbpsPerMhz: firstNumber(
+            download.spectralEffMbpsPerMhz,
+            download.mbpsPerMHz,
+            evt.spectralEffMbpsPerMhz,
+            evt.mbpsPerMHz,
+          ),
+          ssRsrpMean: firstNumber(download.ssRsrpMean, evt.ssRsrpMean, rsrpFallback),
+          ssSinrMean: firstNumber(download.ssSinrMean, evt.ssSinrMean, sinrFallback),
           loadState: String(download.loadState || evt.loadState || "").toLowerCase(),
           slowStartDominated: Boolean(
             evt.dlSlowStartDominated ?? download.slowStartDominated,
           ),
-          deliveryEfficiencyPct: asNumber(download.deliveryEfficiencyPct),
-          dlCentroid: download.dlCentroid || null,
-          dlMedianSpeedKmh: asNumber(download.dlMedianSpeedKmh),
+          deliveryEfficiencyPct: firstNumber(
+            download.deliveryEfficiencyPct,
+            evt.deliveryEfficiencyPct,
+          ),
+          schedulerYield: firstNumber(
+            download.schedulerYield,
+            download.schedulerYieldMbpsPerPrbPct,
+            evt.schedulerYield,
+            evt.schedulerYieldMbpsPerPrbPct,
+          ),
+          cqiMean: firstNumber(download.cqiMean, evt.cqiMean, cqiFallback),
+          avgMcs: firstNumber(download.avgMcs, evt.avgMcs),
+          dlCentroid: download.dlCentroid || evt.dlCentroid || null,
+          dlMedianSpeedKmh: firstNumber(
+            download.dlMedianSpeedKmh,
+            evt.dlMedianSpeedKmh,
+          ),
           deviceModel:
             deviceByOperator[operator] ||
             (opMeta && opMeta.deviceModel) ||
@@ -280,30 +365,33 @@
       };
     }
 
-    function selectMacroReferences(perOp, thresholds) {
+    function selectMacroReferences(perOp) {
       const allRows = Object.values(perOp || {}).filter(Boolean);
       const competitors = allRows.filter(
         (row) => upper(row.operator) !== "IAM" && dlThroughput(row) !== null,
       );
       const bestThroughputCompetitor = competitors.length
-        ? competitors.slice().sort((a, b) => dlThroughput(b) - dlThroughput(a))[0]
+        ? competitors
+            .slice()
+            .sort((a, b) => dlThroughput(b) - dlThroughput(a))[0]
         : null;
-      const w = (thresholds && thresholds.techW) || MACRO_DEFAULT_THRESHOLDS.techW;
-      const normSinr = metricNormalize(allRows, (row) => row.ssSinrMean);
-      const normRank = metricNormalize(allRows, (row) => row.avgRank);
-      const normMod256 = metricNormalize(allRows, (row) => row.mod256Pct);
+      const normNrDwell = metricNormalize(allRows, (row) => row.nrDwellPct);
       const normN78 = metricNormalize(
         allRows,
         (row) => (row.nrBandDwellPct || {}).n78,
       );
       const normBw = metricNormalize(allRows, (row) => row.aggBwMhz);
+      const normSinr = metricNormalize(allRows, (row) => row.ssSinrMean);
+      const normRank = metricNormalize(allRows, (row) => row.avgRank);
+      const normMod256 = metricNormalize(allRows, (row) => row.mod256Pct);
       competitors.forEach((row) => {
         row._macroTechScore =
-          w.sinr * normSinr(row) +
-          w.rank * normRank(row) +
-          w.mod256 * normMod256(row) +
-          w.n78 * normN78(row) +
-          w.aggBw * normBw(row);
+          TECHNICAL_WEIGHTS.nrDwellPct * normNrDwell(row) +
+          TECHNICAL_WEIGHTS.n78Pct * normN78(row) +
+          TECHNICAL_WEIGHTS.aggBwMhz * normBw(row) +
+          TECHNICAL_WEIGHTS.ssSinrMean * normSinr(row) +
+          TECHNICAL_WEIGHTS.avgRank * normRank(row) +
+          TECHNICAL_WEIGHTS.mod256Pct * normMod256(row);
       });
       const bestTechnicalCompetitor = competitors.length
         ? competitors
@@ -327,77 +415,151 @@
       return "Static";
     }
 
-    function scoreMacroConfidence(perOp, ctx, thresholds) {
-      const iam = perOp && perOp.IAM;
-      const refs = selectMacroReferences(perOp, thresholds);
-      const cTech = refs.bestTechnicalCompetitor;
-      const validity = (ctx && ctx.validity) || {};
-      const dtType = (ctx && ctx.dtType) || "Static";
-      const conf = (thresholds && thresholds.conf) || MACRO_DEFAULT_THRESHOLDS.conf;
-      const sameDevice = validity.devicesComparable;
-      const dtCount = asNumber(validity.dtCount) || 1;
-      const availabilityFields = ["ssSinrMean", "avgRank", "mod256Pct", "aggBwMhz", "prbPct"];
-      const availableCount = availabilityFields.reduce((count, field) => {
-        return count +
-          (asNumber(iam && iam[field]) !== null && asNumber(cTech && cTech[field]) !== null
-            ? 1
-            : 0);
-      }, 0);
-      const factors = {
-        dtCount: dtCount >= 4 ? 1 : dtCount >= 2 ? 0.7 : 0.4,
-        dlDuration: iam && iam.dlDurationS ? Math.min(1, iam.dlDurationS / conf.minDlSec) : 0.4,
-        validSamples:
-          iam && iam.activeSlotCount
-            ? Math.min(1, iam.activeSlotCount / conf.minActiveSlots)
-            : 0.3,
-        availability: availabilityFields.length
-          ? availableCount / availabilityFields.length
-          : 0.5,
-        sameLocation: cTech ? distanceScore(iam, cTech) : 0.5,
-        deviceParity:
-          sameDevice === true ? 1 : sameDevice === false ? 0.5 : 0.6,
-        dtType: DT_TYPE_FACTORS[dtType] || 0.8,
-      };
-      const reasons = [];
-      if (factors.dtCount < 0.8) reasons.push("n=" + dtCount + " DT");
-      if (factors.dlDuration < 0.8 && iam && iam.dlDurationS != null) {
-        reasons.push("short " + formatNumber(iam.dlDurationS, 1) + " s transfer");
-      }
-      if (factors.validSamples < 0.8 && iam && iam.activeSlotCount != null) {
-        reasons.push("only " + iam.activeSlotCount + " active download samples");
-      }
-      if (factors.deviceParity < 0.8) reasons.push("devices differ or are unknown");
-      if (factors.sameLocation < 0.8) reasons.push("operator centroids are not co-located");
-      if (factors.availability < 0.8) reasons.push("some RF or capacity fields are missing");
-      const score =
-        Object.values(factors).reduce((sum, value) => sum + value, 0) /
-        Object.keys(factors).length;
-      let level =
-        score >= conf.high ? "High" : score <= conf.low ? "Low" : "Medium";
+    function distanceScore(iam, peer) {
       if (
-        dtCount <= 1 &&
-        (factors.dlDuration < 0.8 || factors.validSamples < 0.8)
+        !iam ||
+        !peer ||
+        !iam.dlCentroid ||
+        !peer.dlCentroid ||
+        asNumber(iam.dlCentroid.lat) === null ||
+        asNumber(iam.dlCentroid.lon) === null ||
+        asNumber(peer.dlCentroid.lat) === null ||
+        asNumber(peer.dlCentroid.lon) === null
       ) {
-        level = "Low";
+        return null;
       }
-      return { level, score, factors, reasons };
+      const toRad = (deg) => (deg * Math.PI) / 180;
+      const lat1 = toRad(iam.dlCentroid.lat);
+      const lon1 = toRad(iam.dlCentroid.lon);
+      const lat2 = toRad(peer.dlCentroid.lat);
+      const lon2 = toRad(peer.dlCentroid.lon);
+      const dLat = lat2 - lat1;
+      const dLon = lon2 - lon1;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+      return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    function mapCausalBreakToMacroCode(causalBreak, iam, refs, thresholds) {
+    function labelForSeverity(gapPct, thresholds) {
+      if (gapPct === null) return "Directional";
+      if (gapPct <= thresholds.atParGapPct) return "None";
+      if (gapPct <= thresholds.closeGapPct) return "Optimization opportunity";
+      if (gapPct <= thresholds.moderateGapPct) return "Moderate gap";
+      return "Significant degradation";
+    }
+
+    function ruleDefinition(code) {
+      const defs = {
+        NO_VALID_DL_SESSION: {
+          label: "No valid DL session",
+          action:
+            "Re-run the DT with a valid download session before using macro automation.",
+        },
+        IAM_AT_PAR_OR_LEADING: {
+          label: "IAM at par / leading",
+          action:
+            "No macro DL action from this directional DT alone; validate on more DTs before tuning.",
+        },
+        IAM_CLOSE_TO_BEST: {
+          label: "IAM close to best competitor",
+          action:
+            "Treat this as an optimization opportunity, not a failure; use the evidence chain to prioritize small gains.",
+        },
+        NO_5G_FOR_IAM: {
+          label: "No 5G for IAM during DL",
+          action:
+            "Validate 5G availability on the tested path before deeper scheduler or modulation analysis.",
+        },
+        LOW_5G_RETENTION: {
+          label: "5G / EN-DC retention limitation",
+          action:
+            "Improve EN-DC retention and NR persistence during the active download window.",
+        },
+        NO_N78_CBAND: {
+          label: "No C-Band n78 usage",
+          action:
+            "Enable or recover n78 usage on the tested path before downstream capacity tuning.",
+        },
+        N78_UNDER_USED: {
+          label: "n78 C-Band under-used",
+          action:
+            "Improve n78 selection and persistence so IAM stays on C-Band during the active download.",
+        },
+        RF_COVERAGE_QUALITY_LIMITATION: {
+          label: "Coverage / quality limitation",
+          action:
+            "Prioritize RF coverage and quality optimization before scheduler or throughput policy changes.",
+        },
+        ACTIVE_BANDWIDTH_LIMITATION: {
+          label: "Active bandwidth limitation",
+          action:
+            "Increase the usable active bandwidth during download before chasing deeper layer tuning.",
+        },
+        CA_LIMITATION: {
+          label: "CA / SCell limitation",
+          action:
+            "Recover CA/SCell activation and secondary-layer usage during the active download.",
+        },
+        MIMO_RANK_LIMITATION: {
+          label: "MIMO / rank limitation",
+          action:
+            "Improve rank utilization and beamforming once RF is comparable.",
+        },
+        MODULATION_LIMITATION: {
+          label: "Modulation limitation",
+          action:
+            "Improve CQI-to-MCS efficiency and 256QAM usage once RF is comparable.",
+        },
+        CAPACITY_LOAD_LIMITATION: {
+          label: "Capacity / load limitation",
+          action:
+            "Investigate cell load or add capacity on the active serving layer.",
+        },
+        SCHEDULER_ALLOCATION_LIMITATION: {
+          label: "Scheduler / allocation limitation",
+          action:
+            "Investigate scheduler allocation yield, PRB grant behavior, and active-layer policy.",
+        },
+        SERVER_TCP_APPLICATION_LIMITATION: {
+          label: "Server / TCP / application limitation",
+          action:
+            "Retest with a longer transfer or cleaner application path before treating radio as the main root cause.",
+        },
+        MIXED_OR_INCONCLUSIVE: {
+          label: "Mixed / inconclusive",
+          action:
+            "Use the evidence chain and repeat DTs to separate methodology effects from network causes.",
+        },
+      };
+      return defs[code] || defs.MIXED_OR_INCONCLUSIVE;
+    }
+
+    function mapCausalBreakToMacroCode(causalBreak, iam, thresholds) {
       const text = String(causalBreak || "").toLowerCase();
       if (!text) return "";
-      if (text.includes("aggregated bandwidth")) return "CA_BW";
-      if (text.includes("resource scheduling")) {
+      if (text.includes("aggregated bandwidth") || text.includes("bandwidth")) {
+        return "ACTIVE_BANDWIDTH_LIMITATION";
+      }
+      if (text.includes("resource scheduling") || text.includes("prb")) {
         return asNumber(iam && iam.prbPct) !== null &&
-          iam.prbPct >= thresholds.prbHighPct
-          ? "LOAD"
-          : "SCHEDULER";
+          iam.prbPct >= thresholds.highPrbPct
+          ? "CAPACITY_LOAD_LIMITATION"
+          : "SCHEDULER_ALLOCATION_LIMITATION";
       }
-      if (text.includes("spectral efficiency")) return "MODULATION";
-      if (text.includes("rf quality") || text.includes("sinr") || text.includes("channel feedback")) {
-        return "COVERAGE";
+      if (text.includes("spectral efficiency") || text.includes("modulation")) {
+        return "MODULATION_LIMITATION";
       }
-      if (text.includes("not explained")) return "SERVER_TCP";
+      if (
+        text.includes("rf quality") ||
+        text.includes("sinr") ||
+        text.includes("channel feedback")
+      ) {
+        return "RF_COVERAGE_QUALITY_LIMITATION";
+      }
+      if (text.includes("not explained") || text.includes("tcp")) {
+        return "SERVER_TCP_APPLICATION_LIMITATION";
+      }
       return "";
     }
 
@@ -406,329 +568,773 @@
       return idx < 0 ? RULE_ORDER.length : idx;
     }
 
-    function ruleDefinition(code) {
-      const defs = {
-        NO_DL: {
-          label: "No valid DL session",
-          action: "Re-test with a valid download session before drawing a macro verdict.",
-        },
-        AT_PAR: {
-          label: "IAM at par / leading",
-          action: "No major DL action from this directional DT alone.",
-        },
-        NO_5G: {
-          label: "No 5G coverage / deployment",
-          action: "Deploy or enable 5G on the tested path before deeper scheduler analysis.",
-        },
-        ENDC_RETENTION: {
-          label: "NR not retained during download",
-          action: "Optimize EN-DC / SCG retention, anchor stability, and NR leg persistence.",
-        },
-        NO_N78: {
-          label: "No n78 usage",
-          action: "Deploy or activate n78 on the tested route.",
-        },
-        N78_UNDERUSE: {
-          label: "n78 under-used",
-          action: "Improve n78 selection and retention during the active download.",
-        },
-        COVERAGE: {
-          label: "Coverage / quality limitation",
-          action: "Prioritize RF optimization before downstream scheduler tuning.",
-        },
-        CA_BW: {
-          label: "CA / bandwidth limitation",
-          action: "Expand aggregated bandwidth, BWP, or usable SCell layer on the route.",
-        },
-        MIMO: {
-          label: "MIMO / rank limitation",
-          action: "Improve rank utilization and beamforming before tuning throughput policy.",
-        },
-        MODULATION: {
-          label: "Modulation limitation",
-          action: "Improve CQI-to-MCS efficiency and link adaptation on the active layer.",
-        },
-        LOAD: {
-          label: "Capacity / load limitation",
-          action: "Offload or expand capacity on the loaded serving layer.",
-        },
-        SCHEDULER: {
-          label: "Scheduler / allocation limitation",
-          action: "Investigate scheduler policy, PRB allocation, and CA activation.",
-        },
-        SERVER_TCP: {
-          label: "Server / TCP / methodology limitation",
-          action: "Retest with a larger or multi-thread transfer before treating radio as the root cause.",
-        },
-        MIXED: {
-          label: "Mixed limitation",
-          action: "Use the detailed causal chain to prioritize the next validation step.",
-        },
-      };
-      return defs[code] || defs.MIXED;
+    function pushEvidence(bucket, kpi, iamValue, refValue, diff, interpretation) {
+      bucket.push({
+        kpi,
+        iamValue: iamValue == null ? null : round1(iamValue),
+        refValue: refValue == null ? null : round1(refValue),
+        diff: diff == null ? null : round1(diff),
+        interpretation,
+      });
+    }
+
+    function buildConclusion(ctx, diagnosis) {
+      const iam = ctx.iam;
+      const bestThroughput = ctx.bestThroughput;
+      const bestTechnical = ctx.bestTechnical;
+      const severity = diagnosis.severity || "Directional";
+      const label = diagnosis.primaryLabel || "Mixed / inconclusive";
+      const pieces = [];
+      pieces.push(
+        severity +
+          ": IAM is " +
+          (diagnosis.gapPct == null
+            ? "directional versus peers"
+            : formatNumber(diagnosis.gapPct, 1) +
+              "% (" +
+              formatNumber(diagnosis.gapMbps, 0) +
+              " Mbps) behind " +
+              ((bestThroughput && bestThroughput.operator) || "the best competitor") +
+              "."),
+      );
+      pieces.push("Primary macro diagnosis: " + label + ".");
+      if (diagnosis.primaryCode === "N78_UNDER_USED") {
+        pieces.push(
+          "IAM extracts fewer Mbps mainly because it spends less of the active download on n78 C-Band than " +
+            ((bestTechnical && bestTechnical.operator) || "the technical reference") +
+            ".",
+        );
+      } else if (diagnosis.primaryCode === "ACTIVE_BANDWIDTH_LIMITATION") {
+        pieces.push(
+          "The active-download bandwidth available to IAM stays below the technical reference.",
+        );
+      } else if (diagnosis.primaryCode === "RF_COVERAGE_QUALITY_LIMITATION") {
+        pieces.push(
+          "RF quality is materially worse for IAM during the active download window.",
+        );
+      } else if (diagnosis.primaryCode === "IAM_CLOSE_TO_BEST") {
+        pieces.push(
+          "This is framed as an optimization opportunity rather than a hard failure.",
+        );
+      }
+      if (diagnosis.efficiencyInsight) {
+        const eff = diagnosis.efficiencyInsight;
+        pieces.push(
+          "Per-MHz efficiency is " +
+            formatNumber(eff.iamValue, 2) +
+            " versus " +
+            formatNumber(eff.referenceValue, 2) +
+            " bps/Hz for " +
+            (eff.referenceOperator || "the reference") +
+            ", so the gap is not explained by poorer spectral efficiency alone.",
+        );
+      }
+      if (Array.isArray(diagnosis.blockedCauses) && diagnosis.blockedCauses.length) {
+        pieces.push(
+          diagnosis.blockedCauses
+            .map((item) => item.message)
+            .join(" "),
+        );
+      }
+      if (diagnosis.confidence && diagnosis.confidence.reasons.length) {
+        pieces.push(
+          "Confidence " +
+            diagnosis.confidence.label +
+            " because " +
+            diagnosis.confidence.reasons.join("; ") +
+            ".",
+        );
+      }
+      if (iam && iam.deviceModel && ctx.devicesComparable === false) {
+        pieces.push("Devices differ across operators, so keep the result directional.");
+      }
+      return pieces.join(" ");
+    }
+
+    function scoreMacroConfidence(ctx, thresholds) {
+      const iam = ctx.iam;
+      const reasons = [];
+      let score = 100;
+      const warnings = ctx.warnings || [];
+      if (asNumber(iam && iam.dlDurationS) !== null && iam.dlDurationS < thresholds.minDlDurationSec) {
+        score -= 25;
+        reasons.push(
+          "short DL (" + formatNumber(iam.dlDurationS, 1) + " s)",
+        );
+      }
+      if (
+        asNumber(iam && iam.throughputSamples) !== null &&
+        iam.throughputSamples < thresholds.minThroughputSamples
+      ) {
+        score -= 20;
+        reasons.push(
+          "few throughput samples (" + formatNumber(iam.throughputSamples, 0) + ")",
+        );
+      }
+      if (
+        asNumber(iam && iam.rfSamples) !== null &&
+        iam.rfSamples < thresholds.minRfSamples
+      ) {
+        score -= 20;
+        reasons.push(
+          "few RF samples (" + formatNumber(iam.rfSamples, 0) + ")",
+        );
+      }
+      if (
+        asNumber(iam && iam.byteVsCurveDeltaPct) !== null &&
+        iam.byteVsCurveDeltaPct > thresholds.maxByteVsCurveDeltaPct
+      ) {
+        score -= 15;
+        reasons.push(
+          "byte-vs-curve delta " +
+            formatNumber(iam.byteVsCurveDeltaPct, 1) +
+            "% exceeds " +
+            thresholds.maxByteVsCurveDeltaPct +
+            "%",
+        );
+      }
+      const prbWarning = warnings.find((item) => item.code === "prbConsistencyWarning");
+      const rfWarning = warnings.find((item) => item.code === "rfThroughputContradiction");
+      if (prbWarning) {
+        score -= 20;
+        reasons.push(prbWarning.message);
+      }
+      if (rfWarning) {
+        score -= 15;
+        reasons.push(rfWarning.message);
+      }
+      if (ctx.devicesComparable !== true) {
+        score -= 10;
+        reasons.push("device parity unknown or mismatched");
+      }
+      if (ctx.sameLocationKnown !== true) {
+        score -= 15;
+        reasons.push("same-location comparability unknown");
+      }
+      score = Math.max(0, Math.min(100, score));
+      if (prbWarning || rfWarning) {
+        score = Math.min(score, thresholds.lowConfidenceMaxScore);
+      }
+      const label =
+        score <= thresholds.lowConfidenceMaxScore
+          ? "Low"
+          : score <= thresholds.mediumConfidenceMaxScore
+            ? "Medium"
+            : "High";
+      return { score, label, reasons };
     }
 
     function diagnoseMacro(perOp, ctx, thresholdsInput) {
       const thresholds = normalizeThresholds(thresholdsInput);
       const iam = perOp && perOp.IAM;
-      const refs = selectMacroReferences(perOp, thresholds);
-      const cTput = refs.bestThroughputCompetitor;
-      const cTech = refs.bestTechnicalCompetitor || cTput;
+      const refs = selectMacroReferences(perOp);
+      const bestThroughput = refs.bestThroughputCompetitor;
+      const bestTechnical = refs.bestTechnicalCompetitor || bestThroughput;
       const iamDl = dlThroughput(iam);
-      const tputDl = dlThroughput(cTput);
-      const deficitPct =
-        iamDl !== null && tputDl !== null && tputDl > 0
-          ? ((tputDl - iamDl) / tputDl) * 100
+      const refDl = dlThroughput(bestThroughput);
+      const gapPct =
+        iamDl !== null && refDl !== null && refDl > 0
+          ? round1(((refDl - iamDl) / refDl) * 100)
           : null;
-      const gapPct = deficitPct === null ? null : round1(deficitPct);
-      const deltaMbps =
-        iamDl !== null && tputDl !== null ? round1(iamDl - tputDl) : null;
+      const gapMbps =
+        iamDl !== null && refDl !== null
+          ? round1(refDl - iamDl)
+          : null;
+      const severity = labelForSeverity(gapPct, thresholds);
+      const evidence = [];
+      const secondary = [];
+      const blockedCauses = [];
+      const warnings = [];
+      const actions = [];
       const matches = [];
-      const addMatch = (code, evidence) => {
+
+      function addMatch(code, detail) {
+        const rule = ruleDefinition(code);
         matches.push({
           code,
-          ...ruleDefinition(code),
-          evidence: evidence.filter(Boolean),
+          label: rule.label,
+          action: rule.action,
+          detail: detail || "",
         });
-      };
+      }
 
-      if (!iam || iamDl === null) {
-        addMatch("NO_DL", ["IAM has no valid steady or byte-based download throughput in this scope."]);
-      } else if (gapPct !== null && gapPct <= thresholds.atParGapPct) {
-        addMatch("AT_PAR", [
-          "IAM steady download is within " +
-            thresholds.atParGapPct +
-            "% of " +
-            (cTput ? cTput.operator : "the best competitor") +
-            ".",
-        ]);
-      } else {
-        const iamN78 = asNumber(iam.nrBandDwellPct && iam.nrBandDwellPct.n78) || 0;
-        const techN78 = asNumber(cTech && cTech.nrBandDwellPct && cTech.nrBandDwellPct.n78) || 0;
-        const sinrGap =
-          asNumber(cTech && cTech.ssSinrMean) !== null && asNumber(iam.ssSinrMean) !== null
-            ? cTech.ssSinrMean - iam.ssSinrMean
-            : null;
-        const rsrpGap =
-          asNumber(cTech && cTech.ssRsrpMean) !== null && asNumber(iam.ssRsrpMean) !== null
-            ? cTech.ssRsrpMean - iam.ssRsrpMean
-            : null;
-        const coverageMatch =
-          (sinrGap !== null && sinrGap > thresholds.sinrGapDb) ||
-          (rsrpGap !== null && rsrpGap > thresholds.rsrpGapDb);
+      function addBlockedCause(code, message) {
+        blockedCauses.push({ code, message });
+      }
+
+      function addWarning(code, message, operator) {
+        warnings.push({ code, message, operator: operator || null });
+      }
+
+      const routeN78 = asNumber(iam && iam.nrBandDwellPct && iam.nrBandDwellPct.n78) || 0;
+      const refN78 =
+        asNumber(bestTechnical && bestTechnical.nrBandDwellPct && bestTechnical.nrBandDwellPct.n78) ||
+        0;
+      const sinrGap =
+        asNumber(bestTechnical && bestTechnical.ssSinrMean) !== null &&
+        asNumber(iam && iam.ssSinrMean) !== null
+          ? bestTechnical.ssSinrMean - iam.ssSinrMean
+          : null;
+      const rsrpGap =
+        asNumber(bestTechnical && bestTechnical.ssRsrpMean) !== null &&
+        asNumber(iam && iam.ssRsrpMean) !== null
+          ? bestTechnical.ssRsrpMean - iam.ssRsrpMean
+          : null;
+      const rfComparable =
+        sinrGap !== null &&
+        rsrpGap !== null &&
+        Math.abs(sinrGap) <= thresholds.sinrGapDb &&
+        Math.abs(rsrpGap) <= thresholds.rsrpGapDb;
+      const iamRfPoor =
+        (asNumber(iam && iam.ssSinrMean) !== null &&
+          iam.ssSinrMean < thresholds.poorSinrDb) ||
+        (asNumber(iam && iam.ssRsrpMean) !== null &&
+          iam.ssRsrpMean < thresholds.poorRsrpDbm);
+      const iamRfWorse =
+        (sinrGap !== null && sinrGap > thresholds.sinrGapDb) ||
+        (rsrpGap !== null && rsrpGap > thresholds.rsrpGapDb);
+      const iamRfAtLeastAsGood =
+        asNumber(iam && iam.ssSinrMean) !== null &&
+        asNumber(iam && iam.ssRsrpMean) !== null &&
+        asNumber(bestTechnical && bestTechnical.ssSinrMean) !== null &&
+        asNumber(bestTechnical && bestTechnical.ssRsrpMean) !== null &&
+        iam.ssSinrMean >= bestTechnical.ssSinrMean &&
+        iam.ssRsrpMean >= bestTechnical.ssRsrpMean;
+      const allRows = Object.values(perOp || {}).filter(Boolean);
+      const allZeroScells =
+        allRows.length > 0 &&
+        allRows.every((row) => (asNumber(row.scellCount) || 0) === 0);
+      const bwGapPct =
+        asNumber(iam && iam.aggBwMhz) !== null &&
+        asNumber(bestTechnical && bestTechnical.aggBwMhz) !== null &&
+        bestTechnical.aggBwMhz > 0
+          ? round1(
+              ((bestTechnical.aggBwMhz - iam.aggBwMhz) / bestTechnical.aggBwMhz) *
+                100,
+            )
+          : null;
+      const scellGap =
+        asNumber(iam && iam.scellCount) !== null &&
+        asNumber(bestTechnical && bestTechnical.scellCount) !== null
+          ? round1(bestTechnical.scellCount - iam.scellCount)
+          : null;
+      const rankGap =
+        asNumber(bestTechnical && bestTechnical.avgRank) !== null &&
+        asNumber(iam && iam.avgRank) !== null
+          ? round1(bestTechnical.avgRank - iam.avgRank)
+          : null;
+      const qamGap =
+        asNumber(bestTechnical && bestTechnical.mod256Pct) !== null &&
+        asNumber(iam && iam.mod256Pct) !== null
+          ? round1(bestTechnical.mod256Pct - iam.mod256Pct)
+          : null;
+      const seGapPct =
+        asNumber(bestThroughput && bestThroughput.spectralEffMbpsPerMhz) !== null &&
+        asNumber(iam && iam.spectralEffMbpsPerMhz) !== null &&
+        bestThroughput.spectralEffMbpsPerMhz > 0
+          ? round1(
+              ((bestThroughput.spectralEffMbpsPerMhz - iam.spectralEffMbpsPerMhz) /
+                bestThroughput.spectralEffMbpsPerMhz) *
+                100,
+            )
+          : null;
+      const goodRf =
+        asNumber(iam && iam.ssSinrMean) !== null &&
+        asNumber(iam && iam.ssRsrpMean) !== null &&
+        iam.ssSinrMean >= thresholds.poorSinrDb &&
+        iam.ssRsrpMean >= thresholds.poorRsrpDbm;
+
+      if (iam) {
         if (
-          asNumber(iam.nrDwellPct) !== null &&
-          iam.nrDwellPct < thresholds.no5gDwellPct &&
-          asNumber(iam.nrRoutePresencePct) !== null &&
-          iam.nrRoutePresencePct < thresholds.no5gDwellPct
-        ) {
-          addMatch("NO_5G", [
-            "NR dwell is only " + formatNumber(iam.nrDwellPct, 1) + "% during DL.",
-            "Route-wide NR presence is only " + formatNumber(iam.nrRoutePresencePct, 1) + "%.",
-          ]);
-        }
-        if (
-          asNumber(iam.nrRoutePresencePct) !== null &&
-          asNumber(iam.nrDwellPct) !== null &&
-          iam.nrRoutePresencePct - iam.nrDwellPct > thresholds.retentionDropPts
-        ) {
-          addMatch("ENDC_RETENTION", [
-            "Route NR presence is " +
-              formatNumber(iam.nrRoutePresencePct, 1) +
-              "% but DL-window NR dwell drops to " +
-              formatNumber(iam.nrDwellPct, 1) +
-              "%.",
-          ]);
-        }
-        if (iamN78 < thresholds.noN78DwellPct) {
-          addMatch("NO_N78", [
-            "IAM n78 dwell is only " + formatNumber(iamN78, 1) + "%.",
-          ]);
-        }
-        if (techN78 - iamN78 > thresholds.n78UnderusePts) {
-          addMatch("N78_UNDERUSE", [
-            "IAM n78 dwell is " +
-              formatNumber(iamN78, 1) +
-              "% versus " +
-              formatNumber(techN78, 1) +
-              "% for " +
-              (cTech ? cTech.operator : "the technical reference") +
-              ".",
-          ]);
-        }
-        if (coverageMatch) {
-          addMatch("COVERAGE", [
-            asNumber(iam.ssSinrMean) !== null && asNumber(cTech && cTech.ssSinrMean) !== null
-              ? "SINR " + formatNumber(iam.ssSinrMean, 1) + " dB vs " + formatNumber(cTech.ssSinrMean, 1) + " dB."
-              : "",
-            asNumber(iam.ssRsrpMean) !== null && asNumber(cTech && cTech.ssRsrpMean) !== null
-              ? "RSRP " + formatNumber(iam.ssRsrpMean, 1) + " dBm vs " + formatNumber(cTech.ssRsrpMean, 1) + " dBm."
-              : "",
-          ]);
-        }
-        if (
-          cTech &&
-          ((asNumber(iam.aggBwMhz) !== null &&
-            asNumber(cTech.aggBwMhz) !== null &&
-            iam.aggBwMhz < cTech.aggBwMhz * (1 - thresholds.caBwGapPct / 100)) ||
-            (asNumber(iam.scellCount) !== null &&
-              asNumber(cTech.scellCount) !== null &&
-              iam.scellCount + 0.05 < cTech.scellCount))
-        ) {
-          addMatch("CA_BW", [
-            "Active BW " +
-              formatNumber(iam.aggBwMhz, 1) +
-              " MHz vs " +
-              formatNumber(cTech.aggBwMhz, 1) +
-              " MHz.",
-            "Avg SCells " +
-              formatNumber(iam.scellCount, 1) +
-              " vs " +
-              formatNumber(cTech.scellCount, 1) +
-              ".",
-          ]);
-        }
-        if (
-          !coverageMatch &&
-          cTech &&
-          asNumber(iam.avgRank) !== null &&
-          asNumber(cTech.avgRank) !== null &&
-          cTech.avgRank - iam.avgRank > thresholds.rankGap
-        ) {
-          addMatch("MIMO", [
-            "Avg rank " +
-              formatNumber(iam.avgRank, 1) +
-              " vs " +
-              formatNumber(cTech.avgRank, 1) +
-              ".",
-          ]);
-        }
-        if (
-          !coverageMatch &&
-          cTech &&
-          asNumber(iam.mod256Pct) !== null &&
-          asNumber(cTech.mod256Pct) !== null &&
-          cTech.mod256Pct - iam.mod256Pct > thresholds.mod256GapPts
-        ) {
-          addMatch("MODULATION", [
-            "256QAM share " +
-              formatNumber(iam.mod256Pct, 1) +
-              "% vs " +
-              formatNumber(cTech.mod256Pct, 1) +
-              "%.",
-          ]);
-        }
-        if (asNumber(iam.prbPct) !== null && iam.prbPct > thresholds.prbHighPct) {
-          addMatch("LOAD", [
-            "PRB utilization is high at " + formatNumber(iam.prbPct, 1) + "%.",
-          ]);
-        }
-        const goodRf =
-          (asNumber(iam.ssSinrMean) === null || iam.ssSinrMean >= 5) &&
-          (asNumber(iam.ssRsrpMean) === null || iam.ssRsrpMean >= -105);
-        const comparableSpectrum =
-          !cTech ||
-          asNumber(iam.aggBwMhz) === null ||
-          asNumber(cTech.aggBwMhz) === null ||
-          iam.aggBwMhz >= cTech.aggBwMhz * 0.8;
-        if (
-          goodRf &&
-          comparableSpectrum &&
+          asNumber(iam.dlSteadyMbps) !== null &&
           asNumber(iam.prbPct) !== null &&
-          iam.prbPct < thresholds.prbLowPct &&
-          gapPct !== null &&
-          gapPct > thresholds.atParGapPct
+          iam.dlSteadyMbps > 300 &&
+          iam.prbPct < 10
         ) {
-          addMatch("SCHEDULER", [
-            "PRB utilization is only " + formatNumber(iam.prbPct, 1) + "% with a remaining DL gap.",
-          ]);
-        }
-        if (
-          goodRf &&
-          comparableSpectrum &&
-          gapPct !== null &&
-          gapPct > thresholds.atParGapPct &&
-          (iam.slowStartDominated ||
-            (asNumber(iam.deliveryEfficiencyPct) !== null &&
-              iam.deliveryEfficiencyPct < 75))
-        ) {
-          addMatch("SERVER_TCP", [
-            iam.slowStartDominated
-              ? "The short transfer is slow-start dominated."
-              : "",
-            asNumber(iam.deliveryEfficiencyPct) !== null
-              ? "Delivery efficiency is " +
-                formatNumber(iam.deliveryEfficiencyPct, 1) +
-                "%."
-              : "",
-          ]);
-        }
-        if (!matches.length) {
-          addMatch("MIXED", ["No single macro rule dominated this DT slice."]);
+          addWarning(
+            "prbConsistencyWarning",
+            "High throughput with very low PRB — PRB may not be aggregated across carriers/RATs.",
+            "IAM",
+          );
         }
       }
 
-      let primary = matches[0];
-      const secondary = matches.slice(1).map((item) => ({
-        code: item.code,
-        label: item.label,
-      }));
-      const causalBreak =
-        (((ctx || {}).causalChain || {}).breakPoint) || "";
-      const suggestedCode = mapCausalBreakToMacroCode(
-        causalBreak,
-        iam,
-        refs,
-        thresholds,
-      );
-      let consistency = {
+      [bestThroughput, bestTechnical]
+        .filter(Boolean)
+        .filter(
+          (row, index, array) =>
+            array.findIndex((item) => upper(item.operator) === upper(row.operator)) ===
+            index,
+        )
+        .forEach((row) => {
+          if (
+            asNumber(row.dlSteadyMbps) !== null &&
+            asNumber(row.ssSinrMean) !== null &&
+            row.dlSteadyMbps > 400 &&
+            row.ssSinrMean < 0
+          ) {
+            addWarning(
+              "rfThroughputContradiction",
+              row.operator +
+                ": high throughput with negative SINR — verify RF export consistency.",
+              row.operator,
+            );
+          }
+        });
+
+      allRows.forEach((row) => {
+        if (
+          asNumber(row.aggBwMhz) !== null &&
+          asNumber(row.scellCount) !== null &&
+          row.aggBwMhz > 50 &&
+          row.scellCount === 0
+        ) {
+          addWarning(
+            "bandwidthScellContradiction",
+            row.operator +
+              ": active bandwidth is high while SCell count is zero — confirm CA export coverage.",
+            row.operator,
+          );
+        }
+      });
+
+      if (iamRfAtLeastAsGood) {
+        addBlockedCause(
+          "RF_COVERAGE_QUALITY_LIMITATION",
+          "RF limitation blocked: IAM RF ≥ reference.",
+        );
+        pushEvidence(
+          evidence,
+          "RF comparability",
+          iam.ssSinrMean,
+          bestTechnical && bestTechnical.ssSinrMean,
+          sinrGap == null ? null : -sinrGap,
+          "RF >= reference: IAM SS-SINR " +
+            formatNumber(iam.ssSinrMean, 1) +
+            " dB and SS-RSRP " +
+            formatNumber(iam.ssRsrpMean, 1) +
+            " dBm are at least as good as " +
+            ((bestTechnical && bestTechnical.operator) || "the technical reference") +
+            ".",
+        );
+      }
+
+      if (!iam || iamDl === null) {
+        addMatch(
+          "NO_VALID_DL_SESSION",
+          "IAM has no valid steady or byte-based download throughput in this scope.",
+        );
+      } else if (gapPct !== null && gapPct <= thresholds.atParGapPct) {
+        addMatch(
+          "IAM_AT_PAR_OR_LEADING",
+          "IAM is within " + thresholds.atParGapPct + "% of the best throughput reference.",
+        );
+        pushEvidence(
+          evidence,
+          "DL throughput gap",
+          iamDl,
+          refDl,
+          gapPct,
+          "IAM is at par or effectively leading within the directional tolerance band.",
+        );
+      } else {
+        const closeToBest =
+          gapPct !== null &&
+          gapPct > thresholds.atParGapPct &&
+          gapPct <= thresholds.closeGapPct;
+        if (closeToBest) {
+          addMatch(
+            "IAM_CLOSE_TO_BEST",
+            "Gap stays within the optimization-opportunity band; keep evaluating the reason.",
+          );
+        }
+
+        if (
+          asNumber(iam.nrDwellPct) !== null &&
+          asNumber(iam.nrRoutePresencePct) !== null &&
+          iam.nrDwellPct < thresholds.minNrDwellPct &&
+          iam.nrRoutePresencePct < thresholds.minNrDwellPct
+        ) {
+          addMatch(
+            "NO_5G_FOR_IAM",
+            "IAM has almost no 5G during the active download window or on the route context.",
+          );
+          pushEvidence(
+            evidence,
+            "5G dwell",
+            iam.nrDwellPct,
+            iam.nrRoutePresencePct,
+            iam.nrRoutePresencePct - iam.nrDwellPct,
+            "No effective 5G participation during the download.",
+          );
+        } else if (
+          asNumber(iam.nrDwellPct) !== null &&
+          asNumber(iam.nrRoutePresencePct) !== null &&
+          iam.nrDwellPct < thresholds.lowNrDwellPct &&
+          iam.nrRoutePresencePct >= thresholds.lowNrDwellPct
+        ) {
+          addMatch(
+            "LOW_5G_RETENTION",
+            "5G is present on the route but not retained through the active download.",
+          );
+          pushEvidence(
+            evidence,
+            "5G retention",
+            iam.nrDwellPct,
+            iam.nrRoutePresencePct,
+            iam.nrRoutePresencePct - iam.nrDwellPct,
+            "Route NR presence exceeds active-download NR dwell, pointing to retention loss.",
+          );
+        }
+
+        if (routeN78 < thresholds.minN78DwellPct) {
+          addMatch(
+            "NO_N78_CBAND",
+            "IAM shows effectively no n78 usage during the active download.",
+          );
+          pushEvidence(
+            evidence,
+            "n78 dwell",
+            routeN78,
+            refN78,
+            refN78 - routeN78,
+            "n78 C-Band is absent during the active download.",
+          );
+        } else if (refN78 - routeN78 > thresholds.n78GapPts) {
+          addMatch(
+            "N78_UNDER_USED",
+            "IAM under-uses n78 compared with the best technical reference.",
+          );
+          pushEvidence(
+            evidence,
+            "n78 dwell",
+            routeN78,
+            refN78,
+            refN78 - routeN78,
+            "n78 dwell " +
+              formatNumber(routeN78, 1) +
+              "% vs " +
+              formatNumber(refN78, 1) +
+              "% shows under-used C-Band.",
+          );
+        }
+
+        if (iamRfPoor || iamRfWorse) {
+          if (iamRfAtLeastAsGood) {
+            addBlockedCause(
+              "RF_COVERAGE_QUALITY_LIMITATION",
+              "RF limitation blocked: IAM RF ≥ reference.",
+            );
+          } else {
+            addMatch(
+              "RF_COVERAGE_QUALITY_LIMITATION",
+              "IAM RF quality is materially worse or objectively poor during download.",
+            );
+            pushEvidence(
+              evidence,
+              "RF quality",
+              iam && iam.ssSinrMean,
+              bestTechnical && bestTechnical.ssSinrMean,
+              sinrGap,
+              "RF gap indicates coverage / quality limitation.",
+            );
+          }
+        }
+
+        if (bwGapPct !== null && bwGapPct >= thresholds.bandwidthGapPct) {
+          addMatch(
+            "ACTIVE_BANDWIDTH_LIMITATION",
+            "IAM active bandwidth materially trails the technical reference.",
+          );
+          pushEvidence(
+            evidence,
+            "Active bandwidth",
+            iam && iam.aggBwMhz,
+            bestTechnical && bestTechnical.aggBwMhz,
+            bwGapPct,
+            "Active BW " +
+              formatNumber(iam && iam.aggBwMhz, 1) +
+              " MHz vs " +
+              formatNumber(bestTechnical && bestTechnical.aggBwMhz, 1) +
+              " MHz.",
+          );
+        }
+
+        if (
+          !allZeroScells &&
+          scellGap !== null &&
+          scellGap >= thresholds.scellGapCount
+        ) {
+          addMatch(
+            "CA_LIMITATION",
+            "Reference activates materially more SCells than IAM.",
+          );
+          pushEvidence(
+            evidence,
+            "SCell count",
+            iam && iam.scellCount,
+            bestTechnical && bestTechnical.scellCount,
+            scellGap,
+            "CA gap remains visible in active-download SCell count.",
+          );
+        }
+
+        if (rankGap !== null && rankGap > thresholds.rankGap) {
+          if (rfComparable) {
+            addMatch(
+              "MIMO_RANK_LIMITATION",
+              "Average rank trails the technical reference while RF is comparable.",
+            );
+            pushEvidence(
+              evidence,
+              "Average rank",
+              iam && iam.avgRank,
+              bestTechnical && bestTechnical.avgRank,
+              rankGap,
+              "MIMO rank gap persists after RF comparability check.",
+            );
+          } else {
+            addBlockedCause(
+              "MIMO_RANK_LIMITATION",
+              "MIMO limitation blocked: RF is not comparable enough for a fair rank verdict.",
+            );
+          }
+        }
+
+        if (qamGap !== null && qamGap > thresholds.qam256GapPts) {
+          if (rfComparable) {
+            addMatch(
+              "MODULATION_LIMITATION",
+              "256QAM usage trails the technical reference while RF is comparable.",
+            );
+            pushEvidence(
+              evidence,
+              "256QAM share",
+              iam && iam.mod256Pct,
+              bestTechnical && bestTechnical.mod256Pct,
+              qamGap,
+              "Modulation gap remains after the RF comparability check.",
+            );
+          } else {
+            addBlockedCause(
+              "MODULATION_LIMITATION",
+              "Modulation limitation blocked: RF is not comparable enough for a fair modulation verdict.",
+            );
+          }
+        }
+
+        const prbWarningActive = warnings.some(
+          (item) => item.code === "prbConsistencyWarning",
+        );
+        if (asNumber(iam && iam.prbPct) !== null && iam.prbPct >= thresholds.highPrbPct) {
+          if (prbWarningActive) {
+            addBlockedCause(
+              "CAPACITY_LOAD_LIMITATION",
+              "Capacity/load blocked: PRB warning says the PRB metric may not aggregate across all carriers.",
+            );
+          } else {
+            addMatch(
+              "CAPACITY_LOAD_LIMITATION",
+              "IAM PRB utilization is high enough to indicate capacity/load pressure.",
+            );
+            pushEvidence(
+              evidence,
+              "PRB utilization",
+              iam && iam.prbPct,
+              null,
+              null,
+              "High PRB suggests capacity or load limitation.",
+            );
+          }
+        }
+
+        if (
+          goodRf &&
+          asNumber(iam && iam.prbPct) !== null &&
+          iam.prbPct < thresholds.lowPrbPct &&
+          gapPct !== null &&
+          gapPct > thresholds.closeGapPct
+        ) {
+          if (prbWarningActive) {
+            addBlockedCause(
+              "SCHEDULER_ALLOCATION_LIMITATION",
+              "Scheduler limitation blocked: PRB may not be aggregated across carriers/RATs.",
+            );
+          } else {
+            addMatch(
+              "SCHEDULER_ALLOCATION_LIMITATION",
+              "Gap remains with good RF but low PRB utilization, pointing to scheduler yield/allocation.",
+            );
+            pushEvidence(
+              evidence,
+              "Scheduler yield",
+              iam && iam.schedulerYield,
+              null,
+              null,
+              "Low PRB load with a remaining DL gap points to allocation efficiency rather than raw load.",
+            );
+          }
+        }
+
+        if (
+          gapPct !== null &&
+          gapPct > thresholds.atParGapPct &&
+          (
+            (asNumber(iam && iam.byteVsCurveDeltaPct) !== null &&
+              iam.byteVsCurveDeltaPct > thresholds.maxByteVsCurveDeltaPct) ||
+            iam.slowStartDominated ||
+            (asNumber(iam && iam.deliveryEfficiencyPct) !== null &&
+              iam.deliveryEfficiencyPct < 75)
+          )
+        ) {
+          addMatch(
+            "SERVER_TCP_APPLICATION_LIMITATION",
+            "Application-layer behavior suggests the file transfer itself depresses the byte-based result.",
+          );
+          pushEvidence(
+            evidence,
+            "Byte vs curve delta",
+            iam && iam.byteVsCurveDeltaPct,
+            thresholds.maxByteVsCurveDeltaPct,
+            null,
+            "Large byte-vs-curve delta / slow start points to transfer-method effects.",
+          );
+        }
+
+        if (!matches.length) {
+          addMatch(
+            "MIXED_OR_INCONCLUSIVE",
+            "No single upstream macro cause dominated after the available checks.",
+          );
+        }
+      }
+
+      let primary = matches[0] || {
+        code: "MIXED_OR_INCONCLUSIVE",
+        ...ruleDefinition("MIXED_OR_INCONCLUSIVE"),
+      };
+
+      if (
+        primary.code === "IAM_CLOSE_TO_BEST" &&
+        matches.length > 1
+      ) {
+        primary = matches
+          .slice(1)
+          .sort((a, b) => ruleIndex(a.code) - ruleIndex(b.code))[0];
+      }
+
+      matches
+        .filter((item) => item.code !== primary.code)
+        .sort((a, b) => ruleIndex(a.code) - ruleIndex(b.code))
+        .forEach((item) => {
+          if (item.code === "IAM_CLOSE_TO_BEST" && primary.code !== "IAM_CLOSE_TO_BEST") {
+            return;
+          }
+          secondary.push({
+            code: item.code,
+            label: item.label,
+            detail: item.detail,
+          });
+        });
+
+      const causalBreak = (((ctx || {}).causalChain || {}).breakPoint) || "";
+      const suggestedCode = mapCausalBreakToMacroCode(causalBreak, iam, thresholds);
+      const consistency = {
         aligned: true,
         causalBreak,
         note: "Macro verdict aligns with the detailed causal chain.",
       };
       if (
         suggestedCode &&
-        primary &&
-        suggestedCode !== primary.code &&
+        primary.code &&
         ruleIndex(suggestedCode) < ruleIndex(primary.code)
       ) {
-        secondary.unshift({ code: primary.code, label: primary.label });
+        secondary.unshift({
+          code: primary.code,
+          label: primary.label,
+          detail: "Kept as secondary after the causal-chain guard promoted an upstream cause.",
+        });
         primary = {
           code: suggestedCode,
           ...ruleDefinition(suggestedCode),
-          evidence: primary.evidence,
+          detail:
+            "Promoted upstream so the macro verdict does not contradict the detailed causal-chain break.",
         };
-        consistency = {
-          aligned: false,
-          causalBreak,
-          note:
-            "Macro verdict was pulled upstream to stay consistent with the detailed causal-chain break.",
-        };
+        consistency.aligned = false;
+        consistency.note =
+          "Macro verdict was pulled upstream to stay consistent with the detailed causal-chain break.";
       }
 
-      const confidence = scoreMacroConfidence(perOp, ctx, thresholds);
-      const dtType = (ctx && ctx.dtType) || "Static";
-      return {
-        bestThroughputCompetitor: cTput ? cTput.operator : "",
-        bestTechnicalCompetitor: cTech ? cTech.operator : "",
-        gapPct,
-        deltaMbps,
-        primary: {
-          code: primary.code,
-          label: primary.label,
-          action: primary.action,
+      const sameLocationMeters = distanceScore(iam, bestTechnical || bestThroughput);
+      const confidence = scoreMacroConfidence(
+        {
+          iam,
+          warnings,
+          devicesComparable: ctx.devicesComparable,
+          sameLocationKnown: sameLocationMeters !== null,
         },
-        evidence: primary.evidence || [],
+        thresholds,
+      );
+      const efficiencyInsight =
+        asNumber(iam && iam.spectralEffMbpsPerMhz) !== null &&
+        asNumber(bestThroughput && bestThroughput.spectralEffMbpsPerMhz) !== null
+          ? {
+              iamValue: round1(iam.spectralEffMbpsPerMhz),
+              referenceValue: round1(bestThroughput.spectralEffMbpsPerMhz),
+              referenceOperator: bestThroughput && bestThroughput.operator,
+              interpretation:
+                iam.spectralEffMbpsPerMhz >
+                bestThroughput.spectralEffMbpsPerMhz
+                  ? "IAM extracts more Mbps per MHz than the throughput leader, so the gap points upstream to band/bandwidth usage rather than raw spectral efficiency."
+                  : "IAM extracts fewer Mbps per MHz than the throughput leader, so spectral efficiency still contributes to the gap.",
+            }
+          : null;
+      const diagnosis = {
+        primaryCode: primary.code,
+        primaryLabel: ruleDefinition(primary.code).label,
+        severity,
+        gapPct,
+        gapMbps,
+        evidence,
         secondary,
+        blockedCauses,
+        action: [ruleDefinition(primary.code).action],
         confidence,
-        dtType,
-        interpretationNote: DT_TYPE_NOTES[dtType] || "",
+        efficiencyInsight,
+        warnings,
         consistency,
+        conclusionText: "",
+      };
+      diagnosis.conclusionText = buildConclusion(
+        {
+          iam,
+          bestThroughput,
+          bestTechnical,
+          devicesComparable: ctx.devicesComparable,
+        },
+        diagnosis,
+      );
+      return {
+        references: {
+          bestThroughput,
+          bestTechnical,
+        },
+        diagnosis,
       };
     }
 
-    function round1(value) {
-      return value == null ? null : Number(Number(value).toFixed(1));
+    function inferScope(dataset) {
+      const explicit = String(
+        (dataset && dataset.scopeLabel) ||
+          (dataset && dataset.scope) ||
+          "",
+      ).trim();
+      if (explicit) return explicit;
+      const windowMode = String((dataset && dataset.windowMode) || "").trim();
+      if (windowMode === "all_dt_session") return "All DTs";
+      if (windowMode === "session_dl_active") return "Session DL active";
+      if (windowMode === "download_only") return "Download only";
+      return "All DTs";
     }
 
     function buildBenchmarkNemoMacroModel(dataset, options) {
@@ -738,30 +1344,46 @@
       );
       const validity = (dataset && dataset.benchmarkValidity) || {};
       const dtType = detectDtType(perOp, options && options.dtTypeOverride);
-      const verdict = diagnoseMacro(perOp, {
-        causalChain:
-          ((dataset && dataset.macroContext) || {}).causalChain ||
-          (((dataset && dataset.deepBenchmark) || {}).execSummary || {}).causalChain ||
-          {},
-        validity,
+      const diagnosis = diagnoseMacro(
+        perOp,
+        {
+          causalChain:
+            ((dataset && dataset.macroContext) || {}).causalChain ||
+            (((dataset && dataset.deepBenchmark) || {}).execSummary || {}).causalChain ||
+            {},
+          devicesComparable: validity.devicesComparable,
+        },
+        thresholds,
+      );
+      const references = diagnosis.references || {};
+      const verdict = {
+        dtId:
+          (dataset && dataset.currentDtId) ||
+          (dataset && dataset.dtId) ||
+          null,
         dtType,
-      }, thresholds);
-      const rows = Object.values(perOp)
-        .sort((a, b) => operatorOrder(a.operator) - operatorOrder(b.operator))
-        .map((row) => ({
-          ...row,
-          role:
-            upper(row.operator) === upper(verdict.bestThroughputCompetitor) &&
-            upper(row.operator) === upper(verdict.bestTechnicalCompetitor)
-              ? "throughput+technical"
-              : upper(row.operator) === upper(verdict.bestThroughputCompetitor)
-                ? "throughput"
-                : upper(row.operator) === upper(verdict.bestTechnicalCompetitor)
-                  ? "technical"
-                  : upper(row.operator) === "IAM"
-                    ? "iam"
-                    : "reference",
-        }));
+        scope: inferScope(dataset),
+        operators: Object.values(perOp)
+          .filter(Boolean)
+          .sort((a, b) => operatorOrder(a.operator) - operatorOrder(b.operator)),
+        references,
+        diagnosis: diagnosis.diagnosis,
+        warnings: diagnosis.diagnosis.warnings,
+      };
+      const rows = verdict.operators.map((row) => ({
+        ...row,
+        role:
+          upper(row.operator) === upper(references.bestThroughput && references.bestThroughput.operator) &&
+          upper(row.operator) === upper(references.bestTechnical && references.bestTechnical.operator)
+            ? "throughput+technical"
+            : upper(row.operator) === upper(references.bestThroughput && references.bestThroughput.operator)
+              ? "throughput"
+              : upper(row.operator) === upper(references.bestTechnical && references.bestTechnical.operator)
+                ? "technical"
+                : upper(row.operator) === "IAM"
+                  ? "iam"
+                  : "reference",
+      }));
       return {
         available: rows.length > 0,
         perOp,
