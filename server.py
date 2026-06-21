@@ -15718,7 +15718,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 58
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 59
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15763,6 +15763,50 @@ def _benchmark_nemo_build_dataset(
     window_fallback = window_mode == "active_dl_session" and any(
         of.get("_windowFallback") for of in prepared_operator_files
     )
+    # ── Cross-operator GPS backfill ─────────────────────────────────────────────
+    # Each DT is driven at the same location for every operator, so an operator whose GPS
+    # failed (e.g. Kenitra IAM logs lat/lon = -999) borrows the matched DT's coordinate from
+    # a donor operator that has a fix. Matched by Measurement Title with the trailing .<n>
+    # suffix stripped (same key as the location win-rate). Cross-operator timestamps don't
+    # align, so we use one representative (the donor DT centroid) per DT — enough for the DL
+    # centroid / map placement that would otherwise read "GPS unavailable".
+    def _nemo_valid_gps(_lat, _lon):
+        return (
+            isinstance(_lat, (int, float)) and isinstance(_lon, (int, float))
+            and -90.0 <= _lat <= 90.0 and -180.0 <= _lon <= 180.0
+            and not (_lat == 0 and _lon == 0)
+        )
+
+    _gps_by_dt: dict = {}  # stripped DT title -> {"lat", "lon", "n"} from the richest donor
+    for _of in prepared_operator_files:
+        _acc: dict = {}
+        for _r in _of.get("rows") or []:
+            _lat, _lon = _r.get("lat"), _r.get("lon")
+            if _nemo_valid_gps(_lat, _lon):
+                _k = _nemo_matchable_measurement_title(_r.get("measurementTitle"))
+                if not _k:
+                    continue
+                _a = _acc.setdefault(_k, [0.0, 0.0, 0])
+                _a[0] += _lat; _a[1] += _lon; _a[2] += 1
+        for _k, (_sla, _slo, _n) in _acc.items():
+            _best = _gps_by_dt.get(_k)
+            if _best is None or _n > _best["n"]:
+                _gps_by_dt[_k] = {"lat": _sla / _n, "lon": _slo / _n, "n": _n}
+    if _gps_by_dt:
+        for _of in prepared_operator_files:
+            _filled = 0
+            for _r in _of.get("rows") or []:
+                if _nemo_valid_gps(_r.get("lat"), _r.get("lon")):
+                    continue
+                _donor = _gps_by_dt.get(_nemo_matchable_measurement_title(_r.get("measurementTitle")))
+                if _donor:
+                    _r["lat"] = _donor["lat"]
+                    _r["lon"] = _donor["lon"]
+                    _r["gpsBorrowed"] = True
+                    _filled += 1
+            if _filled:
+                _of["gpsBackfilledRows"] = _filled
+
     for operator_file in prepared_operator_files:
         _nemo_reapply_throughput_normalization(operator_file)
         operator_file["dlMetricKey"] = operator_file.get("_dlMetricKeyOverride") or _nemo_select_dl_metric_key(operator_file.get("rows") or [])
