@@ -113,7 +113,7 @@ BENCHMARK_NEMO_LIBRARY_DB_PATH = os.environ.get(
 # dataset cache key, so a bump misses the SQLite cache and forces a fresh re-parse of the
 # TXT files. (Analysis-only changes use _BENCHMARK_NEMO_ANALYSIS_VERSION, which rebuilds KPIs
 # from the already-parsed rows without re-parsing.)
-_BENCHMARK_NEMO_PARSER_VERSION = 8
+_BENCHMARK_NEMO_PARSER_VERSION = 9
 _BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP = int(
     os.environ.get("OPTIM_BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP", "50000")
 )
@@ -2425,6 +2425,89 @@ def _nemo_active_download_intervals(rows: list[dict], gap_tolerance_sec: float =
     return intervals
 
 
+def _nemo_aggregate_download_sessions(sessions: list[dict]) -> dict | None:
+    """Aggregate N per-DT download sessions into one cumulative download dict.
+
+    A single Nemo export can hold many DTs (one download each). `_nemo_extract_dl_events`
+    segments them by DAA→DAD and classifies each; for the cumulative ("Tous les DT") scope we
+    must combine ALL download-classified sessions instead of reporting one. Aggregation method
+    per KPI matches the benchmark methodology (CODEX_CUMUL_AGGREGATION_PLAN):
+      • DT-weighted mean (each download = one vote): throughput / duration / peaks / bandwidth /
+        spectral-eff / per-band 5G dwell.
+      • Pooled mean weighted by per-session sample count: RF (ss-RSRP/SINR/PRB) and the
+        radio-time metrics (256QAM %, rank, CQI, MCS, PDSCH legs).
+      • Sum: sample counts, bytes. Rate: DL success = successes / #downloads.
+    Categorical/notes are taken from the highest-sample representative session.
+    """
+    sessions = [s for s in (sessions or []) if s]
+    if not sessions:
+        return None
+    if len(sessions) == 1:
+        return sessions[0]
+
+    def _nums(key):
+        return [s.get(key) for s in sessions if isinstance(s.get(key), (int, float))]
+
+    def _dtw(key):  # DT-weighted simple mean (one vote per download)
+        vals = _nums(key)
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    def _pooled(key, wkey):  # sample-weighted mean; falls back to DT-weighted
+        num = den = 0.0
+        for s in sessions:
+            x, w = s.get(key), s.get(wkey)
+            if isinstance(x, (int, float)) and isinstance(w, (int, float)) and w > 0:
+                num += x * w
+                den += w
+        return round(num / den, 3) if den > 0 else _dtw(key)
+
+    def _sum(key):
+        vals = _nums(key)
+        return sum(vals) if vals else None
+
+    rep = max(sessions, key=lambda s: (s.get("throughputSamples") or 0))
+    agg = dict(rep)  # categorical/notes inherited from the representative download
+
+    for k in (
+        "avgRateMbps", "steadyStateMbps", "peakMbps", "effTransferTimeS", "downloadDurationS",
+        "downloadTimeKpiS", "startDelayS", "timeToConnectMs", "sessionDurationS",
+        "spectralEfficiencyBpsHz", "spectralEffMbpsPerMhz", "deliveryEfficiencyPct",
+        "schedulerYield", "schedulerYieldMbpsPerPrbPct", "mbpsPerMHz", "mbpsPerPrbPct",
+        "aggBwMhz", "bwMHz", "scellCount", "slowStartLossPct", "rampUpSeconds",
+        "peakToAvgRatio", "byteVsCurveDeltaPct", "nrDwellPct", "nrRoutePresencePct",
+    ):
+        agg[k] = _dtw(k)
+    for k in ("ssRsrpMean", "ssSinrMean", "prbUtilMean", "mod256Pct", "avgRank", "cqiMean", "avgMcs"):
+        agg[k] = _pooled(k, "rfSamples")
+    for k in ("nrPdschTput", "ltePdschTput", "macDlTput"):
+        agg[k] = _pooled(k, "throughputSamples")
+    for k in ("throughputSamples", "rfSamples", "rfSampleCount", "activeSlotCount",
+              "bytesDl", "fileSizeBytes", "steadyStateSampleCount"):
+        agg[k] = _sum(k)
+
+    band_keys: set = set()
+    for s in sessions:
+        b = s.get("nrBandDwellPct")
+        if isinstance(b, dict):
+            band_keys |= set(b.keys())
+    if band_keys:
+        bagg = {}
+        for bk in band_keys:
+            bv = [(s.get("nrBandDwellPct") or {}).get(bk) for s in sessions]
+            bv = [x for x in bv if isinstance(x, (int, float))]
+            if bv:
+                bagg[bk] = round(sum(bv) / len(bv), 1)
+        agg["nrBandDwellPct"] = bagg
+
+    succ = sum(1 for s in sessions if s.get("success"))
+    agg["success"] = succ > len(sessions) / 2.0
+    agg["status"] = "success" if agg["success"] else (rep.get("status") or "")
+    agg["dlSuccessCount"] = succ
+    agg["dtCount"] = len(sessions)
+    agg["aggregated"] = True
+    return agg
+
+
 def _nemo_extract_dl_events(rows: list[dict]) -> dict:
     """Extract download session events from Event ID column (DAA/DAC/DREQ/DCOMP/DAD).
 
@@ -3189,16 +3272,26 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "rfConsistencyNote": rf_consistency_note,
         })
 
-    # Identify the operations (the DT runs ping ×2, one upload, one download).
+    # Identify the operations. A single-DT export runs ping ×2 + one upload + one download;
+    # a cumulative ("Tous les DT") export holds one download per DT — collect them ALL.
+    download_list = [s for s in sessions_raw if s.get("kind") == "download"]
     download_sess = (
-        next((s for s in sessions_raw if s.get("kind") == "download" and s.get("success")), None)
-        or next((s for s in sessions_raw if s.get("kind") == "download"), None)
+        next((s for s in download_list if s.get("success")), None)
+        or (download_list[0] if download_list else None)
     )
+    # For the cumulative scope, fold every per-DT download into one aggregate (DT-weighted
+    # throughput/duration, pooled RF/rank/modulation) so the macro/scorecard reflect all DTs
+    # instead of one. Single-DT exports are unchanged (returns that one session).
+    download_agg = _nemo_aggregate_download_sessions(download_list)
+    upload_list = [s for s in sessions_raw if s.get("kind") == "upload"]
     upload_sess = (
-        next((s for s in sessions_raw if s.get("kind") == "upload" and s.get("success")), None)
-        or next((s for s in sessions_raw if s.get("kind") == "upload"), None)
+        next((s for s in upload_list if s.get("success")), None)
+        or (upload_list[0] if upload_list else None)
     )
     ping_sessions = [s for s in sessions_raw if s.get("kind") == "ping"]
+    # Download-only export (e.g. DL-session-extracted file): no upload/ping operations were
+    # logged, so latency/reliability panels must show "n/a", not "Fail".
+    download_only = not upload_list and not ping_sessions
 
     # Markers + scoping windows are built for the DOWNLOAD session only — the timeline
     # shows exactly the download (ping/upload windows are excluded).
@@ -3221,8 +3314,11 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 "tSec": dt_val.strftime("%H:%M:%S"),
                 "sessionIdx": 0,
             })
-        dreq_dt = download_sess.get("_dreq_dt"); dcomp_dt = download_sess.get("_dcomp_dt")
-        daa_dt = download_sess.get("_daa_dt"); dad_dt = download_sess.get("_dad_dt")
+    # Scoping windows cover EVERY download session so the cumulative timeline shows all DTs'
+    # download curves (single-DT export → just the one window).
+    for _ds in download_list:
+        dreq_dt = _ds.get("_dreq_dt"); dcomp_dt = _ds.get("_dcomp_dt")
+        daa_dt = _ds.get("_daa_dt"); dad_dt = _ds.get("_dad_dt")
         if dreq_dt and dcomp_dt and dcomp_dt > dreq_dt:
             download_intervals.append({"start": dreq_dt, "end": dcomp_dt})
         if daa_dt and dad_dt and dad_dt > daa_dt:
@@ -3238,10 +3334,12 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
     # old bug that made IAM's "download" read 13.7s instead of 4.7s).
     ping_ok = sum(1 for p in ping_sessions if p.get("success"))
     kpis: dict = {}
-    if download_sess:
-        ds = download_sess
+    if download_agg:
+        ds = download_agg
         kpis = {
-            "sessionCount": 1,
+            "sessionCount": len(download_list) or 1,
+            "dlSuccessCount": sum(1 for s in download_list if s.get("success")),
+            "downloadOnly": download_only,
             # DAC−DAA: data connection establishment time
             "timeToConnectAvgMs": ds.get("timeToConnectMs"),
             "timeToConnectMedianMs": ds.get("timeToConnectMs"),
@@ -3323,9 +3421,10 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         "downloadIntervals": download_intervals,
         "sessionIntervals": session_intervals,
         "downloadWindow": download_window,
-        "download": _clean(download_sess),
+        "download": _clean(download_agg),
         "upload": _clean(upload_sess),
         "pings": [_clean(p) for p in ping_sessions],
+        "downloadOnly": download_only,
         "kpis": kpis,
     }
 
@@ -4555,6 +4654,119 @@ def _nemo_dt_in_intervals(dt_value, intervals: list[tuple]) -> bool:
     return False
 
 
+def _nemo_has_valid_coordinates(lat_value, lon_value) -> bool:
+    try:
+        lat_num = float(lat_value)
+        lon_num = float(lon_value)
+    except Exception:
+        return False
+    if not math.isfinite(lat_num) or not math.isfinite(lon_num):
+        return False
+    if lat_num == -999.0 or lon_num == -999.0:
+        return False
+    return -90.0 <= lat_num <= 90.0 and -180.0 <= lon_num <= 180.0
+
+
+def _nemo_windowed_relevant_indices(headers: list[str]) -> list[int]:
+    header_map = _nemo_header_index_map(headers)
+    resolve = _nemo_resolve_indices
+    indices = set()
+    for names in (
+        ("Cell type",),
+        ("Band", "Serving band"),
+        ("System",),
+        ("LTE channel number", "Downlink EARFCN", "EARFCN"),
+        ("NR channel number", "NR-ARFCN"),
+        ("LTE PCI",),
+        ("NR PCI",),
+        ("PCI",),
+        ("Serving technology",),
+        ("Packet technology",),
+        ("RRC State", "E-RRC State", "Generic RRC State"),
+        ("Application protocol",),
+        ("Transf. status", "Data Transfer Status", "Nemo status"),
+        ("Data transfer direction",),
+        ("Filename",),
+        ("Download time",),
+        ("Bytes DL",),
+        ("Bytes UL",),
+        ("File size",),
+        ("Event ID",),
+        ("Event",),
+        ("RSRP",),
+        ("RSRQ",),
+        ("SINR",),
+        ("RI",),
+        ("WB CQI",),
+        ("PDSCH scheduled rank",),
+        ("PDSCH PRBs",),
+        ("PDSCH modulation codeword 0", "Modulation 0"),
+        ("PDSCH modulation codeword 1", "Modulation 1"),
+        ("PDSCH MCS index for codeword 0",),
+        ("PDSCH MCS index for codeword 1",),
+        ("PDSCH transport block size for codeword 0",),
+        ("PDSCH transport block size for codeword 1",),
+        (
+            "PDSCH slot %",
+            "PDSCH scheduling ratio",
+            "NR PDSCH scheduling ratio",
+            "PDSCH DL scheduling ratio",
+            "Scheduling ratio DL",
+            "PDSCH scheduled slots %",
+        ),
+        ("PDSCH bit/s/Hz",),
+        ("Max PDSCH bit/s/Hz",),
+        ("App. rate DL",),
+        ("App rate DL avg",),
+        ("App. rate UL",),
+        ("MAC DL throughput (LTE)",),
+        ("MAC DL throughput (5G)",),
+        ("Total MAC DL throughput",),
+        ("PDSCH DL scheduled throughput (5G)",),
+        ("PDSCH DL throughput (5G)",),
+        ("PDSCH DL throughput (LTE)",),
+        ("Lon.", "Lon", "Longitude"),
+        ("Lat.", "Lat", "Latitude"),
+    ):
+        indices.update(resolve(header_map, names))
+    return sorted(indices)
+
+
+def _nemo_windowed_row_signature(row: list[str], relevant_indices: list[int]) -> tuple[tuple[int, str], ...]:
+    n = len(row)
+    signature = []
+    for idx in relevant_indices:
+        if idx >= n:
+            continue
+        value = str(row[idx] or "").strip()
+        if not value:
+            continue
+        signature.append((idx, value))
+    return tuple(signature)
+
+
+def _nemo_compact_windowed_rows(headers: list[str], data_rows: list[list[str]]) -> list[list[str]]:
+    if not data_rows:
+        return []
+    time_indices = (_nemo_header_index_map(headers).get("Time") or [])
+    relevant_indices = _nemo_windowed_relevant_indices(headers)
+    seen_signatures_by_dt: dict[_dt, set[tuple[tuple[int, str], ...]]] = {}
+    compacted = []
+    for row in data_rows:
+        n = len(row)
+        dt_value = _nemo_pick_time_resolved(row, time_indices, n)
+        signature = _nemo_windowed_row_signature(row, relevant_indices)
+        if not signature:
+            continue
+        if isinstance(dt_value, _dt):
+            seen = seen_signatures_by_dt.setdefault(dt_value, set())
+            if signature in seen:
+                continue
+            seen.add(signature)
+        compacted.append(row)
+    return compacted
+
+
 def _nemo_parse_operator_file_uncached_windowed(path: str) -> dict:
     _benchmark_nemo_set_load_state(
         phase="pass1",
@@ -4668,20 +4880,51 @@ def _nemo_parse_operator_file_uncached_windowed(path: str) -> dict:
     handle, delimiter, headers, reader = _nemo_open_tabular_reader(path)
     try:
         time_indices = _nemo_header_index_map(headers).get("Time") or []
+        relevant_indices = _nemo_windowed_relevant_indices(headers)
         selected_rows = []
         sampled_second = None
+        sampled_best_row = None
+        sampled_best_score = -1
+        seen_signatures_by_dt: dict[_dt, set[tuple[tuple[int, str], ...]]] = {}
         for row in reader:
             n = len(row)
             event_time = _nemo_pick_time_resolved(row, time_indices, n)
+            second_bucket = event_time.replace(microsecond=0) if isinstance(event_time, _dt) else None
+            if sampled_second is not None and second_bucket != sampled_second:
+                if sampled_best_row is not None:
+                    selected_rows.append(sampled_best_row)
+                sampled_best_row = None
+                sampled_best_score = -1
+                sampled_second = None
             if _nemo_dt_in_intervals(event_time, retain_intervals):
+                signature = _nemo_windowed_row_signature(row, relevant_indices)
+                if not signature:
+                    continue
+                if isinstance(event_time, _dt):
+                    seen = seen_signatures_by_dt.setdefault(event_time, set())
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
                 selected_rows.append(row)
+                if second_bucket is not None:
+                    sampled_second = second_bucket
+                    sampled_best_row = None
+                    sampled_best_score = -1
                 continue
             if not isinstance(event_time, _dt):
                 continue
-            second_bucket = event_time.replace(microsecond=0)
+            signature = _nemo_windowed_row_signature(row, relevant_indices)
+            score = len(signature)
             if second_bucket != sampled_second:
-                selected_rows.append(row)
                 sampled_second = second_bucket
+                sampled_best_row = row
+                sampled_best_score = score
+                continue
+            if score > sampled_best_score:
+                sampled_best_row = row
+                sampled_best_score = score
+        if sampled_best_row is not None:
+            selected_rows.append(sampled_best_row)
     finally:
         handle.close()
 
@@ -4689,7 +4932,7 @@ def _nemo_parse_operator_file_uncached_windowed(path: str) -> dict:
         path,
         delimiter,
         headers,
-        selected_rows,
+        _nemo_compact_windowed_rows(headers, selected_rows),
         precomputed_transfer_sessions=transfer_sessions,
         session_stats_rows=light_rows,
         windowed_parse=True,
@@ -8198,7 +8441,7 @@ def _nemo_build_operator_serving_cells(
 
     op_name = operator_data.get("operator", "UNKNOWN").upper()
     rows = operator_data.get("rows") or []
-    gps_rows = [r for r in rows if r.get("lat") is not None and r.get("lon") is not None]
+    gps_rows = [r for r in rows if _nemo_has_valid_coordinates(r.get("lat"), r.get("lon"))]
     if not gps_rows:
         return {"available": False, "message": f"No GPS coordinates found in {op_name} Nemo export."}
     dominant_arfcn_by_tech_pci = _nemo_resolve_dominant_arfcn_by_tech_pci(rows)
@@ -8351,7 +8594,7 @@ def _nemo_build_operator_serving_cells(
     for dt_key, bucket in ts_buckets.items():
         lat_val = lon_val = None
         for r in bucket:
-            if r.get("lat") is not None and r.get("lon") is not None:
+            if _nemo_has_valid_coordinates(r.get("lat"), r.get("lon")):
                 lat_val, lon_val = float(r["lat"]), float(r["lon"])
                 last_known_lat, last_known_lon, last_known_dt = lat_val, lon_val, dt_key
                 break
@@ -10164,7 +10407,7 @@ def _nemo_build_validation_warnings(operators: list[dict], diagnosis: dict) -> d
     for item in operators or []:
         op = item.get("operator") or "UNKNOWN"
         raw_rows = item.get("rows") or []
-        gps_count = sum(1 for r in raw_rows if r.get("lat") is not None and r.get("lon") is not None)
+        gps_count = sum(1 for r in raw_rows if _nemo_has_valid_coordinates(r.get("lat"), r.get("lon")))
         if gps_count == 0:
             warnings.append({
                 "type": "missing_gps",
@@ -15475,7 +15718,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 57
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 58
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15742,7 +15985,12 @@ def _benchmark_nemo_build_dataset(
         op_name  = item.get("operator") or "UNKNOWN"
         op_rows  = item.get("rows") or []
         op_entry: dict = {"selectedKey": item.get("dlMetricKey") or ""}
+        # Event reconstruction needs the Event-ID time-series rows (DAA/DAC/DREQ/DCOMP/DAD).
+        # The windowed parse's _sessionStatsRows is a light transfer-KPI-only scan that OMITS
+        # eventId, so it yields zero sessions — fall back to the full rows when it lacks events.
         session_rows = item.get("_sessionStatsRows") or op_rows
+        if not any(r.get("eventId") for r in session_rows):
+            session_rows = op_rows
         # Reconstruct the download / upload / ping operations from the time-series Event IDs
         # + per-row transfer KPIs (Bytes DL, Download time, direction, protocol, status).
         # This isolates the real HTTP download session and yields its authoritative timing &
@@ -15800,6 +16048,7 @@ def _benchmark_nemo_build_dataset(
             "download": dl_events.get("download"),
             "upload": dl_events.get("upload"),
             "pings": dl_events.get("pings") or [],
+            "downloadOnly": dl_events.get("downloadOnly", False),
         }
         if any(cat in op_entry for cat in _TL_CATS):
             dl_timeline_by_metric[op_name] = op_entry
