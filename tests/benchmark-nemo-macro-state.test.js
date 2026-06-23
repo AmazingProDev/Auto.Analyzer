@@ -599,19 +599,21 @@ test("profile import and reload round-trip through localStorage for v4 threshold
   assert.equal(thresholds.lowPrbPct, 15);
 });
 
-test("acceptance-style Mohammedia fixture yields n78 under-use with blocked RF and warnings", () => {
+test("acceptance-style Mohammedia fixture yields n78 retention / active-BW limitation with blocked RF and warnings", () => {
   const model = buildBenchmarkNemoMacroModel(makeMohammediaAcceptanceDataset());
   const diagnosis = model.verdict.diagnosis;
 
   assert.equal(model.verdict.scope, "All DTs");
   assert.equal(model.verdict.references.bestThroughput.operator, "INWI");
   assert.equal(model.verdict.references.bestTechnical.operator, "INWI");
-  assert.equal(diagnosis.primaryCode, "N78_UNDER_USED");
+  assert.equal(diagnosis.primaryCode, "N78_RETENTION_BANDWIDTH_LIMITATION");
   assert.equal(diagnosis.severity, "Optimization opportunity");
   assert.ok(Math.abs(diagnosis.gapPct - 12.8) < 0.2);
   assert.ok(Math.abs(diagnosis.gapMbps - 67) < 1);
+  assert.equal(model.verdict.references.bestCapacity.operator, "INWI");
+  // standalone n78-under-used / active-BW are folded into the combined primary
   assert.ok(
-    diagnosis.secondary.some((item) => item.code === "ACTIVE_BANDWIDTH_LIMITATION"),
+    !diagnosis.secondary.some((item) => item.code === "ACTIVE_BANDWIDTH_LIMITATION"),
   );
   assert.ok(
     diagnosis.blockedCauses.some((item) =>
@@ -727,7 +729,7 @@ test("server/TCP fires only when RF is good and no upstream radio cause explains
   );
 });
 
-test("short DL session yields Low confidence and directional wording", () => {
+test("short DL session yields Medium confidence (methodology floor) and directional wording", () => {
   const mk = (operator, dl) => ({
     operator,
     dlSteadyMbps: dl,
@@ -758,7 +760,8 @@ test("short DL session yields Low confidence and directional wording", () => {
     {},
   ).diagnosis;
   assert.equal(d.directional, true);
-  assert.equal(d.confidence.label, "Low");
+  // methodology-only caveats (short DL, few samples) floor confidence at Medium, not Low
+  assert.equal(d.confidence.label, "Medium");
   assert.match(d.conclusionText, /directional/i);
 });
 

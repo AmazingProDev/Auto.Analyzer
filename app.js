@@ -3434,6 +3434,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const references = verdict.references || {};
     const bestThroughput = references.bestThroughput || {};
     const bestTechnical = references.bestTechnical || {};
+    const bestCapacity = references.bestCapacity || {};
+    const bestRf = references.bestRf || {};
+    const bestBler = references.bestBler || {};
     const primaryCode = String(diagnosis.primaryCode || "").toUpperCase();
     const highlightColumns = {
       NO_VALID_DL_SESSION: ["dl"],
@@ -3594,6 +3597,20 @@ document.addEventListener("DOMContentLoaded", () => {
                     (item.interpretation || ""),
                 ),
               "No structured evidence.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Context</div>' +
+            renderList(
+              diagnosis.context || [],
+              (item) => escapeHtml(item.message || item.code || ""),
+              "No special context.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Symptoms (not root cause)</div>' +
+            renderList(
+              diagnosis.symptoms || [],
+              (item) => escapeHtml((item.label ? item.label + " — " : "") + (item.message || "")),
+              "No symptom-level findings.",
             ) +
             "</div>" +
             '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Blocked causes</div>' +
@@ -3833,6 +3850,12 @@ document.addEventListener("DOMContentLoaded", () => {
       escapeHtml(bestThroughput.operator || "—") +
       " · Best technical ref: " +
       escapeHtml(bestTechnical.operator || "—") +
+      " · Best capacity ref: " +
+      escapeHtml(bestCapacity.operator || "—") +
+      " · Best RF ref: " +
+      escapeHtml(bestRf.operator || "—") +
+      " · Best BLER ref: " +
+      escapeHtml(bestBler.operator || "—") +
       (Array.isArray(diagnosis.confidence?.reasons) && diagnosis.confidence.reasons.length
         ? " · confidence reasons: " +
           escapeHtml(diagnosis.confidence.reasons.join("; "))

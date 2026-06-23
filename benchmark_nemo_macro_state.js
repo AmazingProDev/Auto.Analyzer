@@ -22,6 +22,7 @@
       "NO_5G_FOR_IAM",
       "LOW_5G_RETENTION",
       "NO_N78_CBAND",
+      "N78_RETENTION_BANDWIDTH_LIMITATION",
       "N78_UNDER_USED",
       "RF_COVERAGE_QUALITY_LIMITATION",
       "LTE_RF_COVERAGE_QUALITY_LIMITATION",
@@ -31,6 +32,7 @@
       "MODULATION_LIMITATION",
       "CAPACITY_LOAD_LIMITATION",
       "SCHEDULER_ALLOCATION_LIMITATION",
+      "NR_BLER_RETX_LIMITATION",
       "SERVER_TCP_APPLICATION_LIMITATION",
       "LTE_ONLY_IAM_UNDERPERFORMANCE",
       "MIXED_OR_INCONCLUSIVE",
@@ -351,6 +353,10 @@
           serverIp: download.serverIp || evt.serverIp || null,
           handoverCount: firstNumber(download.handoverCount, evt.handoverCount),
           cellChangeCount: firstNumber(download.cellChangeCount, evt.cellChangeCount),
+          nrPdschTput: firstNumber(download.nrPdschTput, evt.nrPdschTput),
+          ltePdschTput: firstNumber(download.ltePdschTput, evt.ltePdschTput),
+          schedBitratePerPrb: firstNumber(download.schedBitratePerPrb, evt.schedBitratePerPrb),
+          nrBlerPct: firstNumber(download.nrBlerPct, evt.nrBlerPct),
           dlCentroid: download.dlCentroid || evt.dlCentroid || null,
           dlMedianSpeedKmh: firstNumber(
             download.dlMedianSpeedKmh,
@@ -459,7 +465,55 @@
             .slice()
             .sort((a, b) => (b._macroTechScore || 0) - (a._macroTechScore || 0))[0]
         : bestThroughputCompetitor;
-      return { bestThroughputCompetitor, bestTechnicalCompetitor };
+
+      // Best CAPACITY reference — n78 share + NR active BW + scheduled-5G (NR PDSCH) +
+      // scheduled bitrate/PRB + DL throughput. Identifies who sustains the widest grant.
+      const normN78Cap = metricNormalize(allRows, (row) => (row.nrBandDwellPct || {}).n78);
+      const normActiveBw = metricNormalize(
+        allRows,
+        (row) => row.nrActiveBwMhz != null ? row.nrActiveBwMhz : row.aggBwMhz,
+      );
+      const normSched5g = metricNormalize(allRows, (row) => row.nrPdschTput);
+      const normSchedPrb = metricNormalize(allRows, (row) => row.schedBitratePerPrb);
+      const normCapDl = metricNormalize(allRows, (row) => dlThroughput(row));
+      competitors.forEach((row) => {
+        row._macroCapScore =
+          0.3 * normN78Cap(row) +
+          0.25 * normActiveBw(row) +
+          0.2 * normSched5g(row) +
+          0.15 * normSchedPrb(row) +
+          0.1 * normCapDl(row);
+      });
+      const bestCapacityCompetitor = competitors.length
+        ? competitors
+            .slice()
+            .sort((a, b) => (b._macroCapScore || 0) - (a._macroCapScore || 0))[0]
+        : bestThroughputCompetitor;
+
+      // Best RF reference — strongest SINR then RSRP (across all operators, incl. IAM).
+      const rfRanked = allRows
+        .filter((row) => asNumber(row.ssSinrMean) !== null || asNumber(row.ssRsrpMean) !== null)
+        .slice()
+        .sort((a, b) => {
+          const sa = asNumber(a.ssSinrMean), sb = asNumber(b.ssSinrMean);
+          if (sa !== null && sb !== null && sa !== sb) return sb - sa;
+          return (asNumber(b.ssRsrpMean) || -999) - (asNumber(a.ssRsrpMean) || -999);
+        });
+      const bestRfOperator = rfRanked[0] || null;
+
+      // Best BLER reference — lowest NR DL BLER among competitors.
+      const blerComp = competitors.filter((row) => asNumber(row.nrBlerPct) !== null);
+      const bestBlerCompetitor = blerComp.length
+        ? blerComp.slice().sort((a, b) => a.nrBlerPct - b.nrBlerPct)[0]
+        : null;
+
+      return {
+        bestThroughputCompetitor,
+        bestTechnicalCompetitor,
+        bestCapacityCompetitor,
+        bestRfOperator,
+        bestBlerCompetitor,
+      };
     }
 
     function detectDtType(perOp, manualOverride) {
@@ -542,6 +596,11 @@
           action:
             "Enable or recover n78 usage on the tested path before downstream capacity tuning.",
         },
+        N78_RETENTION_BANDWIDTH_LIMITATION: {
+          label: "n78 retention / active bandwidth limitation",
+          action:
+            "IAM holds less n78 C-Band and aggregates less NR bandwidth than the capacity reference. Improve n78 retention (SCG stability, B1/B3-to-n78 reselection) and recover active NR bandwidth / CA so IAM sustains the wider grant during the download.",
+        },
         N78_UNDER_USED: {
           label: "n78 C-Band under-used",
           action:
@@ -591,6 +650,11 @@
           label: "Scheduler / allocation limitation",
           action:
             "Investigate scheduler allocation yield, PRB grant behavior, and active-layer policy.",
+        },
+        NR_BLER_RETX_LIMITATION: {
+          label: "NR BLER / retransmission limitation",
+          action:
+            "Severe NR DL BLER is wasting transmissions and HARQ. Investigate interference, CQI-to-MCS aggressiveness and link-adaptation on the NR carrier.",
         },
         SERVER_TCP_APPLICATION_LIMITATION: {
           label: "Server / TCP / application limitation",
@@ -786,6 +850,10 @@
             "%",
         );
       }
+      if (iam && iam.slowStartDominated) {
+        score -= 10;
+        reasons.push("slow-start-dominated transfer");
+      }
       if (iam && iam.metricsUnavailable) {
         score -= 25;
         reasons.push("NR/PHY resource metrics unavailable or invalid (CQI/MCS/rank/BW/PRB)");
@@ -817,13 +885,21 @@
         reasons.push("same-location comparability unknown");
       }
       score = Math.max(0, Math.min(100, score));
+      // "Hard" penalties (data contradictions / missing PHY) can force Low and override the
+      // methodology floor below.
+      const hardPenalty =
+        Boolean(prbWarning) || Boolean(rfWarning) || Boolean(iam && iam.metricsUnavailable);
       if (prbWarning || rfWarning) {
         score = Math.min(score, thresholds.lowConfidenceMaxScore);
       }
-      // Missing/invalid PHY metrics cap confidence at Medium — the throughput gap can be
-      // clear while the detailed technical attribution stays uncertain.
       if (iam && iam.metricsUnavailable) {
         score = Math.min(score, thresholds.mediumConfidenceMaxScore);
+      }
+      // Methodology-only caveats (short DL, few samples, byte-vs-curve, slow-start, device/
+      // location) reduce confidence but floor at Medium — the gap is real, only the precision
+      // of the attribution is limited. Hard penalties bypass this floor.
+      if (!hardPenalty && reasons.length) {
+        score = Math.max(score, thresholds.lowConfidenceMaxScore + 1);
       }
       const label =
         score <= thresholds.lowConfidenceMaxScore
@@ -840,6 +916,17 @@
       const refs = selectMacroReferences(perOp);
       const bestThroughput = refs.bestThroughputCompetitor;
       const bestTechnical = refs.bestTechnicalCompetitor || bestThroughput;
+      const bestCapacity = refs.bestCapacityCompetitor || bestTechnical;
+      const bestRf = refs.bestRfOperator || null;
+      const bestBler = refs.bestBlerCompetitor || null;
+      const symptoms = [];
+      function addSymptom(code, message) {
+        symptoms.push({ code, label: ruleDefinition(code).label, message });
+      }
+      const contributors = []; // secondary contributors that are not primary-eligible
+      function addContributor(code, message) {
+        contributors.push({ code, label: ruleDefinition(code).label, detail: message });
+      }
       const iamDl = dlThroughput(iam);
       const refDl = dlThroughput(bestThroughput);
       const gapPct =
@@ -964,6 +1051,11 @@
       const competitorHas5g = allRows.some(
         (row) => upper(row.operator) !== "IAM" && operatorHas5g(row),
       );
+      // Additional context labels (point 2).
+      const anyN78 = allRows.some(
+        (row) => (asNumber((row.nrBandDwellPct || {}).n78) || 0) >= thresholds.minN78DwellPct,
+      );
+      const nrDominantIam = (asNumber(iam && iam.nrTrafficSharePct) || 0) >= 70;
       // NR/PHY resource KPIs are unavailable (all zero) yet IAM downloaded data → the
       // zeros are "not exported", not real. Don't let them drive MIMO/modulation/load.
       const phyUnavailable =
@@ -985,6 +1077,20 @@
           message:
             "LTE-only benchmark: no operator used 5G/n78 on this DT segment, so 5G/n78 absence is shared context, not an IAM root cause.",
         });
+      } else {
+        context.push({
+          code: anyN78 ? "FIVEG_N78_SEGMENT" : "FIVEG_ENDC_SEGMENT",
+          message: anyN78
+            ? "5G / n78 segment: at least one operator used C-Band n78 — diagnose on NR capacity (n78 retention, active BW, scheduling)."
+            : "5G / EN-DC segment: at least one operator used 5G NR (no n78 detected).",
+        });
+        if (nrDominantIam) {
+          context.push({
+            code: "NR_DOMINANT_IAM",
+            message:
+              "NR-dominant: IAM carries ≥70% of its DL traffic on NR, so the LTE anchor is a minor contributor; weight NR capacity causes.",
+          });
+        }
       }
       if (phyUnavailable) {
         context.push({
@@ -992,6 +1098,22 @@
           message:
             "NR/PHY resource KPIs (CQI/MCS/rank/BW/PRB) were not exported for IAM in this segment; shown as “—” and excluded from the root-cause logic.",
         });
+      }
+      // EN-DC stability warning from n78 drops / serving-cell changes during the download.
+      if (!lteOnly && iam) {
+        const _drops = asNumber(iam.n78DropCount) || 0;
+        const _chg = asNumber(iam.cellChangeCount) || 0;
+        if (_drops >= 2 || _chg >= 6) {
+          addWarning(
+            "enDcStability",
+            "EN-DC / n78 stability: " +
+              _drops +
+              " n78 drop(s) and " +
+              _chg +
+              " serving-cell change(s) during the download.",
+            "IAM",
+          );
+        }
       }
 
       if (iam) {
@@ -1189,6 +1311,56 @@
                 "% shows under-used C-Band.",
             );
           }
+          // Combined n78-retention + active-bandwidth limitation (promotion, point 6): IAM
+          // holds materially less n78 AND aggregates materially less NR bandwidth than the
+          // capacity reference. Supersedes standalone n78-under-used / active-BW causes.
+          const capN78 =
+            asNumber(bestCapacity && bestCapacity.nrBandDwellPct && bestCapacity.nrBandDwellPct.n78) || 0;
+          const capActiveBw = asNumber(
+            bestCapacity && (bestCapacity.nrActiveBwMhz != null ? bestCapacity.nrActiveBwMhz : bestCapacity.aggBwMhz),
+          );
+          const iamActiveBw = asNumber(
+            iam && (iam.nrActiveBwMhz != null ? iam.nrActiveBwMhz : iam.aggBwMhz),
+          );
+          if (
+            routeN78 >= thresholds.minN78DwellPct &&
+            capN78 - routeN78 >= thresholds.n78GapPts &&
+            capActiveBw !== null &&
+            iamActiveBw !== null &&
+            iamActiveBw > 0 &&
+            capActiveBw >= iamActiveBw * 1.2
+          ) {
+            addMatch(
+              "N78_RETENTION_BANDWIDTH_LIMITATION",
+              "IAM holds less n78 and aggregates less NR bandwidth than the capacity reference.",
+            );
+            pushEvidence(
+              evidence,
+              "n78 share",
+              routeN78,
+              capN78,
+              capN78 - routeN78,
+              "n78 " +
+                formatNumber(routeN78, 1) +
+                "% vs " +
+                formatNumber(capN78, 1) +
+                "% (capacity ref " +
+                ((bestCapacity && bestCapacity.operator) || "?") +
+                ").",
+            );
+            pushEvidence(
+              evidence,
+              "NR active BW",
+              iamActiveBw,
+              capActiveBw,
+              capActiveBw - iamActiveBw,
+              "Active NR BW " +
+                formatNumber(iamActiveBw, 0) +
+                " MHz vs " +
+                formatNumber(capActiveBw, 0) +
+                " MHz.",
+            );
+          }
         }
 
         if (iamRfPoor || iamRfWorse) {
@@ -1282,8 +1454,11 @@
           }
         }
 
+        const n78BwLimited = matches.some(
+          (m) => m.code === "N78_RETENTION_BANDWIDTH_LIMITATION",
+        );
         if (!phyUnavailable && qamGap !== null && qamGap > thresholds.qam256GapPts) {
-          if (rfComparable) {
+          if (rfComparable && !n78BwLimited) {
             addMatch(
               "MODULATION_LIMITATION",
               "256QAM usage trails the technical reference while RF is comparable.",
@@ -1297,9 +1472,17 @@
               "Modulation gap remains after the RF comparability check.",
             );
           } else {
-            addBlockedCause(
+            // Modulation is a symptom, not a root cause, when RF is not comparable or an
+            // n78/active-BW limitation already explains the gap (point 10).
+            addSymptom(
               "MODULATION_LIMITATION",
-              "Modulation limitation blocked: RF is not comparable enough for a fair modulation verdict.",
+              "256QAM " +
+                formatNumber(iam && iam.mod256Pct, 1) +
+                "% vs " +
+                formatNumber(bestTechnical && bestTechnical.mod256Pct, 1) +
+                "% — link-adaptation symptom of the " +
+                (n78BwLimited ? "n78/active-BW limitation" : "non-comparable RF") +
+                ", not a primary cause.",
             );
           }
         }
@@ -1354,6 +1537,60 @@
               null,
               null,
               "Low PRB load with a remaining DL gap points to allocation efficiency rather than raw load.",
+            );
+          }
+        }
+
+        // NR scheduled-capacity contributor (point 12): IAM scheduled bitrate/PRB (or NR
+        // PDSCH throughput, or PDSCH scheduled-time %) materially below the capacity reference.
+        if (!phyUnavailable && !matches.some((m) => m.code === "SCHEDULER_ALLOCATION_LIMITATION")) {
+          const capPrb = asNumber(bestCapacity && bestCapacity.schedBitratePerPrb);
+          const iamPrb = asNumber(iam && iam.schedBitratePerPrb);
+          const capSched5g = asNumber(bestCapacity && bestCapacity.nrPdschTput);
+          const iamSched5g = asNumber(iam && iam.nrPdschTput);
+          const prbBelow = capPrb !== null && iamPrb !== null && capPrb > 0 && iamPrb < capPrb * 0.8;
+          const sched5gBelow =
+            capSched5g !== null && iamSched5g !== null && capSched5g > 0 && iamSched5g < capSched5g * 0.8;
+          if (prbBelow || sched5gBelow) {
+            addContributor(
+              "SCHEDULER_ALLOCATION_LIMITATION",
+              "Scheduled NR capacity below the capacity reference" +
+                (prbBelow
+                  ? " — bitrate/PRB " + formatNumber(iamPrb, 2) + " vs " + formatNumber(capPrb, 2)
+                  : "") +
+                (sched5gBelow
+                  ? " — scheduled-5G " + formatNumber(iamSched5g, 0) + " vs " + formatNumber(capSched5g, 0) + " Mbps"
+                  : "") +
+                ".",
+            );
+          }
+        }
+
+        // NR BLER / retransmission (point 11): primary-eligible only when severe (>10%),
+        // otherwise a secondary contributor when IAM is notably worse than the BLER reference.
+        const iamBler = asNumber(iam && iam.nrBlerPct);
+        if (iamBler !== null) {
+          const blerRefVal = asNumber(bestBler && bestBler.nrBlerPct);
+          if (iamBler > 10) {
+            addMatch(
+              "NR_BLER_RETX_LIMITATION",
+              "Severe NR DL BLER (" + formatNumber(iamBler, 1) + "%) is wasting transmissions.",
+            );
+            pushEvidence(evidence, "NR BLER", iamBler, blerRefVal, blerRefVal == null ? null : iamBler - blerRefVal, "Severe NR BLER (>10%).");
+          } else if (
+            blerRefVal !== null &&
+            iamBler - blerRefVal >= 1 &&
+            iamBler >= 1
+          ) {
+            addContributor(
+              "NR_BLER_RETX_LIMITATION",
+              "NR DL BLER " +
+                formatNumber(iamBler, 2) +
+                "% vs " +
+                formatNumber(blerRefVal, 2) +
+                "% (ref " +
+                ((bestBler && bestBler.operator) || "?") +
+                ") — minor retransmission overhead.",
             );
           }
         }
@@ -1423,20 +1660,24 @@
         }
       }
 
-      let primary = matches[0] || {
-        code: "MIXED_OR_INCONCLUSIVE",
-        ...ruleDefinition("MIXED_OR_INCONCLUSIVE"),
-      };
+      // Primary = the most-upstream matched cause (lowest RULE_ORDER index). IAM_CLOSE_TO_BEST
+      // is a severity framing flag, not a root cause, so it never wins when a real cause matched.
+      const realMatches = matches.filter((m) => m.code !== "IAM_CLOSE_TO_BEST");
+      let primary =
+        (realMatches.length
+          ? realMatches.slice().sort((a, b) => ruleIndex(a.code) - ruleIndex(b.code))[0]
+          : matches[0]) || {
+          code: "MIXED_OR_INCONCLUSIVE",
+          ...ruleDefinition("MIXED_OR_INCONCLUSIVE"),
+        };
 
-      if (
-        primary.code === "IAM_CLOSE_TO_BEST" &&
-        matches.length > 1
-      ) {
-        primary = matches
-          .slice(1)
-          .sort((a, b) => ruleIndex(a.code) - ruleIndex(b.code))[0];
-      }
-
+      // When the combined n78-retention/active-BW limitation is primary, fold the standalone
+      // n78-under-used and active-bandwidth causes into it (don't repeat as secondary).
+      const foldedIntoPrimary =
+        primary.code === "N78_RETENTION_BANDWIDTH_LIMITATION"
+          ? new Set(["N78_UNDER_USED", "ACTIVE_BANDWIDTH_LIMITATION"])
+          : new Set();
+      const secondaryCodes = new Set([primary.code]);
       matches
         .filter((item) => item.code !== primary.code)
         .sort((a, b) => ruleIndex(a.code) - ruleIndex(b.code))
@@ -1444,12 +1685,24 @@
           if (item.code === "IAM_CLOSE_TO_BEST" && primary.code !== "IAM_CLOSE_TO_BEST") {
             return;
           }
+          if (foldedIntoPrimary.has(item.code) || secondaryCodes.has(item.code)) {
+            return;
+          }
+          secondaryCodes.add(item.code);
           secondary.push({
             code: item.code,
             label: item.label,
             detail: item.detail,
           });
         });
+      // Append non-primary-eligible contributors (scheduler/BLER) not already listed.
+      contributors.forEach((item) => {
+        if (foldedIntoPrimary.has(item.code) || secondaryCodes.has(item.code)) {
+          return;
+        }
+        secondaryCodes.add(item.code);
+        secondary.push({ code: item.code, label: item.label, detail: item.detail });
+      });
 
       const causalBreak = (((ctx || {}).causalChain || {}).breakPoint) || "";
       const suggestedCode = mapCausalBreakToMacroCode(causalBreak, iam, thresholds);
@@ -1524,6 +1777,7 @@
         gapMbps,
         evidence,
         secondary,
+        symptoms,
         blockedCauses,
         context,
         directional,
@@ -1547,6 +1801,9 @@
         references: {
           bestThroughput,
           bestTechnical,
+          bestCapacity,
+          bestRf,
+          bestBler,
         },
         diagnosis,
       };

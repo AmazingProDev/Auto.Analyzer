@@ -18,17 +18,22 @@ Operator order is fixed **IAM → Orange → INWI**. Tests:
 - **PHY/resource:** `mod256Pct`, `avgRank`, `aggBwMhz`, `scellCount`, `prbPct`, `cqiMean`, `avgMcs`, `spectralEffMbpsPerMhz`, `schedulerYield`, `deliveryEfficiencyPct`.
 - **Quality/validity:** `dlDurationS`, `throughputSamples`, `rfSamples`, `byteVsCurveDeltaPct`, `slowStartDominated`, `dlCentroid`, `deviceModel`.
 
-## 2. Reference selection
+## 2. Reference selection (four references)
 - **Best-throughput reference** = competitor with the highest `dlThroughput`.
 - **Best-technical reference** = competitor with the highest normalised (0–1) weighted score:
   - **EN-DC mode** (≥1 operator has 5G): `0.30·nrDwell + 0.25·n78 + 0.15·aggBw + 0.10·SINR + 0.10·rank + 0.10·256QAM`.
   - **LTE-only mode** (no operator ≥5% 5G): `0.35·SINR + 0.25·RSRP + 0.20·DL + 0.10·CQI + 0.10·256QAM`.
     CQI/256QAM read as **≤0 are treated as not-exported and ignored** — the term is dropped and the
-    weights are renormalised over the available metrics, so a stronger operator can't lose on a
-    phantom zero. SINR/RSRP/DL are always included (negatives are valid).
+    weights are renormalised over the available metrics. SINR/RSRP/DL are always included.
+- **Best-capacity reference** = competitor with the highest `0.30·n78 + 0.25·NR-active-BW +
+  0.20·NR-PDSCH-tput + 0.15·sched-bitrate/PRB + 0.10·DL`. Drives the n78-retention/active-BW promotion.
+- **Best-RF reference** = operator (incl. IAM) with the strongest SS-SINR, then SS-RSRP.
+- **Best-BLER reference** = competitor with the lowest NR DL BLER.
 
 ## 3. Context flags
 - **`lteOnly`** — no operator reaches `minNrDwellPct` (5%) on active **or** route 5G.
+- **5G/EN-DC vs 5G/n78** — non-LTE-only segments emit `FIVEG_N78_SEGMENT` (a operator used n78 ≥5%) or `FIVEG_ENDC_SEGMENT`.
+- **`nrDominantIam`** — IAM carries ≥70% of DL traffic on NR → `NR_DOMINANT_IAM` (LTE anchor weighted as minor).
 - **`competitorHas5g`** — a non-IAM operator reaches the 5G floor.
 - **`phyUnavailable`** (IAM) — `aggBw=0 & prb=0 & rank=0 & mcs=0` while `DL>0` → zeros are "not exported", not real.
 - **RF** vs best-technical ref: `sinrGap=ref−IAM`, `rsrpGap=ref−IAM`
@@ -37,7 +42,9 @@ Operator order is fixed **IAM → Orange → INWI**. Tests:
   - `iamRfAtLeastAsGood` = IAM SINR ≥ ref **and** RSRP ≥ ref → **blocks** any RF cause
   - `goodRf` = IAM SINR ≥ 5 dB **and** RSRP ≥ −110 dBm
 
-`context[]` is populated with `LTE_ONLY_SEGMENT` and/or `PHY_METRICS_UNAVAILABLE` when those hold.
+`context[]` carries `LTE_ONLY_SEGMENT`, `FIVEG_N78_SEGMENT`/`FIVEG_ENDC_SEGMENT`, `NR_DOMINANT_IAM`
+and/or `PHY_METRICS_UNAVAILABLE`. Context describes the segment and is kept **separate** from the
+root cause, secondary contributors, symptoms, blocked causes and warnings.
 
 ## 4. Gap & severity
 `gapPct = (refDL − iamDL)/refDL × 100` against the best-throughput reference.
@@ -61,6 +68,9 @@ Operator order is fixed **IAM → Orange → INWI**. Tests:
        NO_5G_FOR_IAM    if IAM 5G<5% AND a competitor has 5G
        LOW_5G_RETENTION if IAM dwell<30% but route≥30%
        NO_N78_CBAND     if IAM n78<5% AND competitor has 5G AND ref n78>0
+       N78_RETENTION_BANDWIDTH_LIMITATION  (combined, promoted) if
+            (capRef.n78 − iamN78 ≥ 10 pts) AND (capRef NR-active-BW ≥ 1.2× IAM's).
+            Supersedes N78_UNDER_USED + ACTIVE_BANDWIDTH (folded into it, not repeated).
        N78_UNDER_USED   if (refN78 − iamN78) > 10 pts
 
    ── RF ──
@@ -73,9 +83,15 @@ Operator order is fixed **IAM → Orange → INWI**. Tests:
    ACTIVE_BANDWIDTH_LIMITATION      if bwGap ≥ 20%
    CA_LIMITATION                    if SCells not all-zero AND scellGap ≥ 1
    MIMO_RANK_LIMITATION             if rankGap > 0.5  → only if rfComparable, else BLOCK
-   MODULATION_LIMITATION            if 256QAM gap > 15 pts → only if rfComparable, else BLOCK
+   MODULATION_LIMITATION            if 256QAM gap > 15 pts AND rfComparable AND no n78/BW cause
+                                    → else → SYMPTOM (link-adaptation symptom, not a root cause)
    CAPACITY_LOAD_LIMITATION         if PRB ≥ 80%  → BLOCK on PRB-consistency warning
-   SCHEDULER_ALLOCATION_LIMITATION  if goodRF AND PRB<15% AND gap>20% → BLOCK on PRB warning
+   SCHEDULER_ALLOCATION_LIMITATION  primary-path: goodRF AND PRB<15% AND gap>20% (BLOCK on PRB warn);
+                                    contributor-path: IAM sched-bitrate/PRB OR NR-PDSCH tput >20%
+                                    below the capacity reference → secondary contributor.
+   NR_BLER_RETX_LIMITATION          primary-eligible only if NR BLER > 10% (severe); otherwise a
+                                    secondary contributor when IAM BLER ≥ ref + 1 pt. (DL HARQ retx
+                                    and BLER>10%-share are not exported → BLER-avg only.)
 
    ── application (last resort) ──
    SERVER_TCP_APPLICATION_LIMITATION  fires ONLY if gap>10% AND
@@ -102,16 +118,19 @@ contradicts the detailed causal chain. Remaining matches → **secondary** (sort
 | few throughput samples (<10) | −20 |
 | few RF samples (<10) | −20 |
 | byte-vs-curve delta >15% | −15 |
-| **PHY metrics unavailable** | −25, **cap ≤ Medium** |
-| prbConsistencyWarning | −20, cap ≤ Low |
-| rfThroughputContradiction | −15, cap ≤ Low |
+| slow-start-dominated transfer | −10 |
+| **PHY metrics unavailable** (hard) | −25, **cap ≤ Medium** |
+| prbConsistencyWarning (hard) | −20, cap ≤ Low |
+| rfThroughputContradiction (hard) | −15, cap ≤ Low |
 | devices mismatched (`false`) **or** unknown | −10 |
 | not co-located (`false`) **or** location unknown | −15 |
 
-Device/location penalties apply **only** when parity/co-location is mismatched or genuinely unknown —
-never when known-good (`=== true`). Co-location is tri-state from the DT centroid distance
-(≤250 m = co-located, >250 m = apart, no GPS = unknown). Label: **≤45 Low · ≤75 Medium · else High**.
-Reasons are always rendered as **"penalties: …"**, never "High because <negative>".
+Device/location penalties apply **only** when parity/co-location is mismatched or genuinely unknown.
+Co-location is tri-state from the DT centroid distance (≤250 m = co-located, >250 m = apart, no GPS =
+unknown). **Methodology floor:** when *only* soft penalties apply (no hard contradiction), confidence
+floors at **Medium** — the gap is real, only the attribution precision is limited; hard penalties
+(PHY-unavailable, PRB/RF contradictions) bypass the floor and can force **Low**. Label:
+**≤45 Low · ≤75 Medium · else High**. Reasons render as **"penalties: …"**, never "High because <negative>".
 
 ## 8. Directional flag
 `directional = true` when the download is short (`<minDlDurationSec`) **or** throughput/RF samples are
@@ -120,18 +139,25 @@ directional by nature; see CLAUDE.md gotcha #6.)
 
 ## 9. Output schema (`diagnoseMacro` → `{ references, diagnosis }`)
 ```
+references: { bestThroughput, bestTechnical, bestCapacity, bestRf, bestBler }
 diagnosis: {
   primaryCode, primaryLabel, severity, gapPct, gapMbps,
   context[      {code, message} ],   // segment conditions — NOT a root cause
   evidence[     {kpi, iamValue, refValue, diff, interpretation} ],
-  secondary[    {code, label, detail} ],
+  secondary[    {code, label, detail} ],   // contributors (incl. scheduler/BLER)
+  symptoms[     {code, label, message} ],  // e.g. modulation when explained upstream
   blockedCauses[{code, message} ],   // rules deliberately not fired, with reason
-  warnings[     {code, message, operator} ],
+  warnings[     {code, message, operator} ],  // incl. enDcStability, PRB/RF contradictions
   directional,  action[],
   confidence{ label, score, reasons[] },
   efficiencyInsight, consistency, conclusionText
 }
 ```
+
+## 9b. Expanded-KPI acceptance (5G/n78 segment, e.g. Mohammedia)
+Primary **N78_RETENTION_BANDWIDTH_LIMITATION**, Optimization opportunity, capacity ref = INWI, RF ref =
+IAM (→ RF blocked), scheduler secondary, Server/TCP blocked. Confidence **Low** on the real data (PRB
+contradiction is a hard penalty); a segment without that contradiction floors at **Medium**.
 
 ## 10. Worked example — DT7 Kenitra (LTE-only)
 `lteOnly` → `context = [LTE_ONLY_SEGMENT, PHY_METRICS_UNAVAILABLE]`; 5G/n78 blocked; RF fires

@@ -2699,12 +2699,12 @@ def _nemo_aggregate_download_sessions(sessions: list[dict]) -> dict | None:
         "aggBwMhz", "bwMHz", "scellCount", "slowStartLossPct", "rampUpSeconds",
         "peakToAvgRatio", "byteVsCurveDeltaPct", "nrDwellPct", "nrRoutePresencePct",
         "nrConfiguredBwMhz", "nrActiveBwMhz", "nrCaActiveSharePct", "nrTrafficSharePct",
-        "pdschScheduledPct", "n78ContinuousSec", "n78AvgRetentionSec",
+        "pdschScheduledPct", "n78ContinuousSec", "n78AvgRetentionSec", "schedBitratePerPrb",
     ):
         agg[k] = _dtw(k)
     for k in ("ssRsrpMean", "ssSinrMean", "prbUtilMean", "mod256Pct", "avgRank", "cqiMean", "avgMcs"):
         agg[k] = _pooled(k, "rfSamples")
-    for k in ("nrPdschTput", "ltePdschTput", "macDlTput"):
+    for k in ("nrPdschTput", "ltePdschTput", "macDlTput", "nrBlerPct"):
         agg[k] = _pooled(k, "throughputSamples")
     for k in ("throughputSamples", "rfSamples", "rfSampleCount", "activeSlotCount",
               "bytesDl", "fileSizeBytes", "steadyStateSampleCount",
@@ -2897,6 +2897,8 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         win_scell_rows = 0
         win_scell_active = 0       # rows where ≥1 SCell is active (NR-CA active)
         win_pdsch_slot = []        # PDSCH scheduled-time % samples
+        win_bler = []              # NR/MAC DL BLER % samples
+        win_sched_bitrate = []     # scheduled bitrate per PRB samples
         win_cfg_bw = []            # primary / configured BW MHz
         win_active_bw = []         # CA total active BW MHz
         win_nr_pci_counts = {}
@@ -3037,6 +3039,8 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                     _append_sample(win_rank, rdt, _rk, positive=True)
                     # ── New per-window KPI collection ──
                     _append_sample(win_pdsch_slot, rdt, row.get("pdschSlotPct"), positive=True)
+                    _append_sample(win_bler, rdt, row.get("macDlBler"))
+                    _append_sample(win_sched_bitrate, rdt, row.get("schBitratePerPrb"), positive=True)
                     _append_sample(win_cfg_bw, rdt, _ff_primary_bw, positive=True)
                     _append_sample(win_active_bw, rdt, _ff_active_bw, positive=True)
                     _sc = row.get("scellsCount")
@@ -3524,6 +3528,8 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             if _tot > 0:
                 nr_traffic_share_pct = round((nr_pdsch_mean or 0) / _tot * 100.0, 1)
         pdsch_scheduled_pct = _avg_series(win_pdsch_slot, min_points=1)
+        nr_bler_pct = _avg_series(win_bler, min_points=1)
+        sched_bitrate_per_prb = _avg_series(win_sched_bitrate, min_points=1)
         _band_stats = _nemo_band_window_stats(win_band_seq, win_end)
         serving_pci = _nemo_mode_key(win_nr_pci_counts) or _nemo_mode_key(win_lte_pci_counts)
         serving_pci_rat = "NR" if win_nr_pci_counts else ("LTE" if win_lte_pci_counts else None)
@@ -3547,6 +3553,8 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             "nrCaActiveSharePct": nr_ca_active_share_pct,
             "nrTrafficSharePct": nr_traffic_share_pct,
             "pdschScheduledPct": pdsch_scheduled_pct,
+            "nrBlerPct": nr_bler_pct,
+            "schedBitratePerPrb": sched_bitrate_per_prb,
             "n78ContinuousSec": _band_stats["n78ContinuousSec"],
             "n78AvgRetentionSec": _band_stats["n78AvgRetentionSec"],
             "n78DropCount": _band_stats["n78DropCount"],
@@ -16957,7 +16965,7 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 # source-file deduplication). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 68
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 69
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
