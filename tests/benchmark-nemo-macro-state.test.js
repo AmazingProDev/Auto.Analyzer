@@ -660,8 +660,106 @@ test("LTE-only DT (no operator has 5G): LTE RF limitation, 5G/n78/server blocked
   assert.ok(!d.secondary.some((s) => s.code === "NO_5G_FOR_IAM"));
   assert.ok(!d.secondary.some((s) => s.code === "SERVER_TCP_APPLICATION_LIMITATION"));
   assert.equal(perOp.IAM.metricsUnavailable, true);
+  // context is separate from root cause / secondary / blocked / warnings
+  assert.ok(d.context.some((c) => c.code === "LTE_ONLY_SEGMENT"));
+  assert.ok(d.context.some((c) => c.code === "PHY_METRICS_UNAVAILABLE"));
+  assert.ok(!d.secondary.some((s) => s.code === "LTE_ONLY_SEGMENT"));
+  // few RF samples -> directional
+  assert.equal(d.directional, true);
+  assert.match(d.conclusionText, /Context:/);
+  assert.match(d.conclusionText, /directional/i);
   assert.match(d.conclusionText, /LTE-only|LTE RF quality/i);
   assert.match(d.conclusionText, /penalties:/i);
+});
+
+test("server/TCP fires only when RF is good and no upstream radio cause explains the gap", () => {
+  const mk = (operator, dl) => ({
+    operator,
+    dlSteadyMbps: dl,
+    dlByteMbps: operator === "IAM" ? dl * 0.55 : dl * 0.9,
+    dlAppRateMbps: operator === "IAM" ? dl * 0.55 : dl * 0.9,
+    nrDwellPct: 80,
+    nrRoutePresencePct: 85,
+    nrBandDwellPct: { n78: 70 },
+    mod256Pct: 60,
+    avgRank: 2,
+    aggBwMhz: 90,
+    scellCount: 2,
+    prbPct: 40,
+    cqiMean: 12,
+    avgMcs: 20,
+    ssRsrpMean: -85,
+    ssSinrMean: 20,
+    spectralEffMbpsPerMhz: 4,
+    byteVsCurveDeltaPct: operator === "IAM" ? 40 : 5,
+    deliveryEfficiencyPct: operator === "IAM" ? 60 : 90,
+    throughputSamples: 50,
+    rfSamples: 40,
+    dlDurationS: 30,
+  });
+  // RF good + comparable, 5G/n78/BW/rank/PRB all matched -> NO radio sub-cause; only the
+  // application-layer signature differs, so server/TCP is allowed to fire.
+  const d = diagnoseMacro(
+    { IAM: mk("IAM", 60), ORANGE: mk("Orange", 80), INWI: mk("INWI", 150) },
+    {},
+    {},
+  ).diagnosis;
+  assert.ok(
+    d.primaryCode === "SERVER_TCP_APPLICATION_LIMITATION" ||
+      d.secondary.some((s) => s.code === "SERVER_TCP_APPLICATION_LIMITATION"),
+  );
+  assert.ok(
+    !d.blockedCauses.some((b) => b.code === "SERVER_TCP_APPLICATION_LIMITATION"),
+  );
+
+  // Now make IAM RF clearly worse -> server/TCP must be blocked behind the radio cause.
+  const rfWorse = {
+    IAM: Object.assign(mk("IAM", 60), { ssSinrMean: 4, ssRsrpMean: -112 }),
+    ORANGE: mk("Orange", 80),
+    INWI: mk("INWI", 150),
+  };
+  const d2 = diagnoseMacro(rfWorse, {}, {}).diagnosis;
+  assert.ok(
+    d2.blockedCauses.some((b) => b.code === "SERVER_TCP_APPLICATION_LIMITATION"),
+  );
+  assert.ok(
+    !d2.secondary.some((s) => s.code === "SERVER_TCP_APPLICATION_LIMITATION"),
+  );
+});
+
+test("short DL session yields Low confidence and directional wording", () => {
+  const mk = (operator, dl) => ({
+    operator,
+    dlSteadyMbps: dl,
+    dlByteMbps: dl,
+    dlAppRateMbps: dl,
+    nrDwellPct: 80,
+    nrRoutePresencePct: 85,
+    nrBandDwellPct: { n78: 70 },
+    mod256Pct: 50,
+    avgRank: 2,
+    aggBwMhz: 90,
+    scellCount: 2,
+    prbPct: 40,
+    cqiMean: 12,
+    avgMcs: 20,
+    ssRsrpMean: -85,
+    ssSinrMean: 18,
+    spectralEffMbpsPerMhz: 4,
+    byteVsCurveDeltaPct: 5,
+    deliveryEfficiencyPct: 85,
+    throughputSamples: 5,
+    rfSamples: 5,
+    dlDurationS: 6,
+  });
+  const d = diagnoseMacro(
+    { IAM: mk("IAM", 60), ORANGE: mk("Orange", 80), INWI: mk("INWI", 150) },
+    {},
+    {},
+  ).diagnosis;
+  assert.equal(d.directional, true);
+  assert.equal(d.confidence.label, "Low");
+  assert.match(d.conclusionText, /directional/i);
 });
 
 test("NO_5G_FOR_IAM fires only when a competitor actually has 5G", () => {

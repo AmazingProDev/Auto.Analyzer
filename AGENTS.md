@@ -28,4 +28,7 @@ Frontend `app.js` (~74k lines, vanilla JS, no build) + `index.html`. Run: `pytho
   alone and computes download-only KPIs. The "Data transfer session statistics" file is optional/secondary.
 - DL avg (byte-based) = `Bytes DL × 8 / Download time`; avg app DL = per-second curve mean. Both are shown.
 - Working data: single DT per operator → keep "directional, n=1" framing in summaries.
+- Macro DL diagnosis (IAM-focused root-cause engine, `benchmark_nemo_macro_state.js`): full decision
+  tree, context-vs-cause split, LTE-only handling, confidence scoring and KPI table are documented in
+  **`MACRO_LOGIC.md`**.
 - Active spec for in-progress upgrades: `CODEX_BENCHMARK_PLAN.md`.
