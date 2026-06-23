@@ -46,6 +46,7 @@ import os
 import hashlib
 import math
 import csv
+import io
 import re
 import shlex
 import shutil
@@ -59,6 +60,8 @@ import traceback
 import uuid
 import pickle
 import zlib
+import multiprocessing as _mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime as _dt, timedelta as _td
 from functools import lru_cache
 from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -113,12 +116,28 @@ BENCHMARK_NEMO_LIBRARY_DB_PATH = os.environ.get(
 # dataset cache key, so a bump misses the SQLite cache and forces a fresh re-parse of the
 # TXT files. (Analysis-only changes use _BENCHMARK_NEMO_ANALYSIS_VERSION, which rebuilds KPIs
 # from the already-parsed rows without re-parsing.)
-_BENCHMARK_NEMO_PARSER_VERSION = 9
+_BENCHMARK_NEMO_PARSER_VERSION = 11
 _BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP = int(
     os.environ.get("OPTIM_BENCHMARK_NEMO_OPERATOR_FILES_BLOB_ROW_CAP", "50000")
 )
 _BENCHMARK_NEMO_WINDOWED_PARSE_FILE_SIZE_BYTES = int(
     os.environ.get("OPTIM_BENCHMARK_NEMO_WINDOWED_PARSE_FILE_SIZE_BYTES", str(40 * 1024 * 1024))
+)
+_BENCHMARK_NEMO_PARSE_WORKERS = max(
+    1,
+    int(
+        os.environ.get(
+            "OPTIM_BENCHMARK_NEMO_PARSE_WORKERS",
+            str(min(3, max(1, os.cpu_count() or 1))),
+        )
+        or "1"
+    ),
+)
+_BENCHMARK_NEMO_PARALLEL_PARSE_TOTAL_SIZE_BYTES = int(
+    os.environ.get(
+        "OPTIM_BENCHMARK_NEMO_PARALLEL_PARSE_TOTAL_SIZE_BYTES",
+        str(150 * 1024 * 1024),
+    )
 )
 _BENCHMARK_NEMO_WINDOW_MARGIN_SECONDS = float(
     os.environ.get("OPTIM_BENCHMARK_NEMO_WINDOW_MARGIN_SECONDS", "5.0")
@@ -921,6 +940,15 @@ def _benchmark_nemo_collect_file_meta(paths: list[str], uploaded_hashes: dict | 
     return metas
 
 
+def _benchmark_nemo_should_parallel_parse(file_metas: list[dict]) -> bool:
+    if _BENCHMARK_NEMO_PARSE_WORKERS <= 1:
+        return False
+    if len(file_metas or []) <= 1:
+        return False
+    total_size = sum(int(meta.get("sizeBytes") or 0) for meta in (file_metas or []))
+    return total_size >= _BENCHMARK_NEMO_PARALLEL_PARSE_TOTAL_SIZE_BYTES
+
+
 def _benchmark_nemo_dataset_key(
     file_metas: list[dict],
     dl_mode: str | None = None,
@@ -1702,6 +1730,115 @@ def _nemo_pdsch_active_row(row: dict) -> bool:
     return bool(_nemo_clean_modulation(row.get("pdschModulationCw0")) or _nemo_clean_modulation(row.get("pdschModulationCw1")))
 
 
+def _nemo_row_has_positive_metric(row: dict, keys: tuple[str, ...]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            if float(value) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _nemo_lte_row_filter(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _nemo_row_has_positive_metric(
+        row,
+        ("pdschDlLteMbps", "pdschDlLteCw0Mbps", "pdschDlLteCw1Mbps", "macDlLteMbps"),
+    ):
+        return True
+    band = str(row.get("band") or "").strip().lower()
+    if band.startswith("b"):
+        return True
+    if row.get("lteChannelNumber") is not None:
+        return True
+    cell_types_upper = {
+        str(cell or "").strip().upper()
+        for cell in (row.get("cellTypes") or [])
+    }
+    if cell_types_upper & {"LTE SERVING", "LTE ANCHOR"}:
+        return True
+    serving_upper = str(row.get("servingTechnology") or "").upper()
+    packet_upper = str(row.get("packetTechnology") or "").upper()
+    if "LTE" in serving_upper or "LTE" in packet_upper:
+        return True
+    return False
+
+
+def _nemo_pdsch_nr_active_row(row: dict) -> bool:
+    if not _nemo_pdsch_active_row(row):
+        return False
+    if _nemo_row_has_positive_metric(row, ("pdschDl5gMbps", "pdschSched5gMbps", "macDl5gMbps")):
+        return True
+    return _nemo_band_row_filter(row)
+
+
+def _nemo_pdsch_lte_active_row(row: dict) -> bool:
+    if not _nemo_pdsch_active_row(row):
+        return False
+    if _nemo_row_has_positive_metric(
+        row,
+        ("pdschDlLteMbps", "pdschDlLteCw0Mbps", "pdschDlLteCw1Mbps", "macDlLteMbps"),
+    ):
+        return True
+    return _nemo_lte_row_filter(row) and not _nemo_band_row_filter(row)
+
+
+def _nemo_prbs_to_bandwidth_mhz(prbs) -> float | None:
+    value = _benchmark_float(prbs)
+    if value is None or value <= 0:
+        return None
+    # Common LTE/NR PRB-to-channel-bandwidth anchors. SCS can shift exact NR values,
+    # so this is a conservative configured-bandwidth inference when no MHz column exists.
+    anchors = (
+        (11, 5.0), (24, 10.0), (25, 5.0), (50, 10.0), (52, 20.0),
+        (75, 15.0), (100, 20.0), (106, 40.0), (133, 50.0),
+        (162, 60.0), (216, 80.0), (217, 80.0), (270, 100.0), (273, 100.0),
+    )
+    nearest_prb, mhz = min(anchors, key=lambda item: abs(float(item[0]) - value))
+    return mhz if abs(float(nearest_prb) - value) <= 4 else None
+
+
+def _nemo_nr_band_mobility_stats(rows: list[dict]) -> dict:
+    seconds: list[tuple] = []
+    for row in rows or []:
+        dt_val = row.get("_dt")
+        band = str(row.get("band") or "").strip().lower()
+        if dt_val is None or not band.startswith("n") or not _nemo_band_row_filter(row):
+            continue
+        sec = dt_val.replace(microsecond=0)
+        if not seconds or seconds[-1] != (sec, band):
+            seconds.append((sec, band))
+    if not seconds:
+        return {}
+    segments = []
+    cur_band = seconds[0][1]
+    cur_count = 1
+    transitions = 0
+    for _, band in seconds[1:]:
+        if band == cur_band:
+            cur_count += 1
+            continue
+        segments.append((cur_band, cur_count))
+        transitions += 1
+        cur_band = band
+        cur_count = 1
+    segments.append((cur_band, cur_count))
+    n78_segments = [count for band, count in segments if band == "n78"]
+    return {
+        "n78ContinuousTimeSec": float(max(n78_segments)) if n78_segments else None,
+        "n78AvgRetentionSec": round(sum(n78_segments) / float(len(n78_segments)), 1) if n78_segments else None,
+        "n78DropCountDuringDl": sum(1 for idx, (band, _) in enumerate(segments[:-1]) if band == "n78" and segments[idx + 1][0] != "n78"),
+        "nrBandTransitionCount": transitions,
+    }
+
+
 def _nemo_spectral_efficiency_insight(iam_kpis: dict, cmp_kpis: dict) -> dict:
     iam_mod = iam_kpis.get("pdschModulation") or {}
     cmp_mod = cmp_kpis.get("pdschModulation") or {}
@@ -2425,6 +2562,92 @@ def _nemo_active_download_intervals(rows: list[dict], gap_tolerance_sec: float =
     return intervals
 
 
+def _nemo_band_window_stats(band_seq, win_end):
+    """From an ordered [(dt, band)] sequence of band rows inside a download window, derive the
+    NR-band timeline: n78 continuous-time / average-retention / drop-count and the NR
+    band-transition count.
+
+    EN-DC logs the LTE anchor band and the NR band on *alternating* rows, so a raw row-by-row
+    forward-fill sees a transition on every row. We bucket by **second**, taking the NR (n*)
+    band when any NR row appears that second (else an LTE-only marker ""), and compute the stats
+    on that per-second NR timeline."""
+    out = {
+        "n78ContinuousSec": None,
+        "n78AvgRetentionSec": None,
+        "n78DropCount": None,
+        "nrBandTransitionCount": None,
+    }
+    by_sec = {}  # second -> (dt, nr_band or "" for LTE-only)
+    for dt, b in (band_seq or []):
+        if dt is None or not b:
+            continue
+        sec = dt.replace(microsecond=0)
+        bl = str(b).lower()
+        nr = bl if bl.startswith("n") else ""
+        cur = by_sec.get(sec)
+        if cur is None or (nr and not cur[1]):
+            by_sec[sec] = (dt, nr)
+    if not by_sec:
+        return out
+    items = [by_sec[s] for s in sorted(by_sec)]
+    collapsed = []  # collapse consecutive identical NR states
+    for dt, b in items:
+        if not collapsed or collapsed[-1][1] != b:
+            collapsed.append((dt, b))
+    intervals = []  # (nr_band, duration_sec) forward-filled to next change / window end
+    for i, (dt, b) in enumerate(collapsed):
+        nxt = collapsed[i + 1][0] if i + 1 < len(collapsed) else win_end
+        dur = max(0.0, (nxt - dt).total_seconds()) if nxt is not None else 0.0
+        intervals.append((b, dur))
+    bands = [b for b, _ in intervals]
+    is78 = lambda b: "n78" in b
+    # NR band transitions = changes between two NR bands (ignore NR↔LTE-gap toggles)
+    out["nrBandTransitionCount"] = sum(
+        1
+        for i in range(1, len(bands))
+        if bands[i] and bands[i - 1] and bands[i] != bands[i - 1]
+    )
+    out["n78DropCount"] = sum(
+        1 for i in range(1, len(bands)) if is78(bands[i - 1]) and not is78(bands[i])
+    )
+    n78_runs = []
+    run = 0.0
+    in78 = False
+    for b, dur in intervals:
+        if is78(b):
+            run += dur
+            in78 = True
+        elif in78:
+            n78_runs.append(run)
+            run = 0.0
+            in78 = False
+    if in78:
+        n78_runs.append(run)
+    if n78_runs:
+        out["n78ContinuousSec"] = round(max(n78_runs), 1)
+        out["n78AvgRetentionSec"] = round(sum(n78_runs) / len(n78_runs), 1)
+    return out
+
+
+def _nemo_persecond_change_count(seq):
+    """Count value changes in a [(dt, value)] sequence after bucketing to one value per second
+    (last write wins) — serving-cell (PCI) changes without EN-DC row-alternation noise."""
+    by_sec = {}
+    for dt, val in (seq or []):
+        if dt is None or val in (None, ""):
+            continue
+        by_sec[dt.replace(microsecond=0)] = val
+    if not by_sec:
+        return None
+    vals = [by_sec[s] for s in sorted(by_sec)]
+    return sum(1 for i in range(1, len(vals)) if vals[i] != vals[i - 1])
+
+
+def _nemo_mode_key(counts):
+    """Most frequent key in a {key: count} dict (None when empty)."""
+    return max(counts.items(), key=lambda kv: kv[1])[0] if counts else None
+
+
 def _nemo_aggregate_download_sessions(sessions: list[dict]) -> dict | None:
     """Aggregate N per-DT download sessions into one cumulative download dict.
 
@@ -2475,6 +2698,8 @@ def _nemo_aggregate_download_sessions(sessions: list[dict]) -> dict | None:
         "schedulerYield", "schedulerYieldMbpsPerPrbPct", "mbpsPerMHz", "mbpsPerPrbPct",
         "aggBwMhz", "bwMHz", "scellCount", "slowStartLossPct", "rampUpSeconds",
         "peakToAvgRatio", "byteVsCurveDeltaPct", "nrDwellPct", "nrRoutePresencePct",
+        "nrConfiguredBwMhz", "nrActiveBwMhz", "nrCaActiveSharePct", "nrTrafficSharePct",
+        "pdschScheduledPct", "n78ContinuousSec", "n78AvgRetentionSec",
     ):
         agg[k] = _dtw(k)
     for k in ("ssRsrpMean", "ssSinrMean", "prbUtilMean", "mod256Pct", "avgRank", "cqiMean", "avgMcs"):
@@ -2482,7 +2707,8 @@ def _nemo_aggregate_download_sessions(sessions: list[dict]) -> dict | None:
     for k in ("nrPdschTput", "ltePdschTput", "macDlTput"):
         agg[k] = _pooled(k, "throughputSamples")
     for k in ("throughputSamples", "rfSamples", "rfSampleCount", "activeSlotCount",
-              "bytesDl", "fileSizeBytes", "steadyStateSampleCount"):
+              "bytesDl", "fileSizeBytes", "steadyStateSampleCount",
+              "n78DropCount", "nrBandTransitionCount", "handoverCount", "cellChangeCount"):
         agg[k] = _sum(k)
 
     band_keys: set = set()
@@ -2666,6 +2892,22 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
         win_mod256 = 0
         win_mod_total = 0
         win_rank = []
+        # New KPI accumulators (over the DREQ→DCOMP transfer window).
+        win_band_seq = []          # (dt, band) change-events for n78/transition derivation
+        win_scell_rows = 0
+        win_scell_active = 0       # rows where ≥1 SCell is active (NR-CA active)
+        win_pdsch_slot = []        # PDSCH scheduled-time % samples
+        win_cfg_bw = []            # primary / configured BW MHz
+        win_active_bw = []         # CA total active BW MHz
+        win_nr_pci_counts = {}
+        win_lte_pci_counts = {}
+        win_band_name_counts = {}
+        win_nr_earfcn_counts = {}
+        win_lte_earfcn_counts = {}
+        win_server_ips = {}
+        win_ho_count = 0
+        win_nr_pci_seq = []        # (dt, NR PCI) for serving-cell change count
+        win_lte_pci_seq = []       # (dt, LTE PCI) fallback when no NR
         measurement_title = None
 
         def _append_sample(bucket, when, value, positive=False, weight=None):
@@ -2738,9 +2980,21 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
             return _nemo_numeric_median([val for _, val, _ in chosen])
 
         if win_start and win_end:
+            # Primary / CA-total BW (MHz) are ultra-sparse config columns (logged once per
+            # change), so forward-fill the last value seen at/before each in-window row.
+            _ff_primary_bw = None
+            _ff_active_bw = None
             for row in rows:
                 rdt = row.get("_dt")
-                if rdt is None or rdt < win_start or rdt > win_end:
+                if rdt is None or rdt > win_end:
+                    continue
+                _pb = row.get("primaryBwMhz")
+                if _pb not in (None, ""):
+                    _ff_primary_bw = _pb
+                _ab = row.get("caTotalBwMhz")
+                if _ab not in (None, ""):
+                    _ff_active_bw = _ab
+                if rdt < win_start:
                     continue
                 # SS-RSRP / SS-SINR / PRB are logged on DIFFERENT rows than the per-second
                 # throughput samples (sparse change-event columns), so the two practically
@@ -2758,6 +3012,10 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                     if _nemo_is_valid_band(_band_text):
                         win_banded_rows += 1
                         _bk = _band_text.lower()
+                        win_band_seq.append((rdt, _bk))
+                        win_band_name_counts[_band_text] = (
+                            win_band_name_counts.get(_band_text, 0) + 1
+                        )
                         _tech = (
                             str(row.get("servingTechnology") or "").upper()
                             + " "
@@ -2777,6 +3035,40 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                     if _rk in (None, ""):
                         _rk = row.get("ri")
                     _append_sample(win_rank, rdt, _rk, positive=True)
+                    # ── New per-window KPI collection ──
+                    _append_sample(win_pdsch_slot, rdt, row.get("pdschSlotPct"), positive=True)
+                    _append_sample(win_cfg_bw, rdt, _ff_primary_bw, positive=True)
+                    _append_sample(win_active_bw, rdt, _ff_active_bw, positive=True)
+                    _sc = row.get("scellsCount")
+                    if _sc is not None and _sc != "":
+                        try:
+                            _scn = float(_sc)
+                            win_scell_rows += 1
+                            if _scn > 0:
+                                win_scell_active += 1
+                        except (TypeError, ValueError):
+                            pass
+                    _nrpci = row.get("nrPci")
+                    if _nrpci not in (None, ""):
+                        win_nr_pci_counts[_nrpci] = win_nr_pci_counts.get(_nrpci, 0) + 1
+                    _ltepci = row.get("ltePci")
+                    if _ltepci not in (None, ""):
+                        win_lte_pci_counts[_ltepci] = win_lte_pci_counts.get(_ltepci, 0) + 1
+                    _nrearf = row.get("nrChannelNumber")
+                    if _nrearf not in (None, ""):
+                        win_nr_earfcn_counts[_nrearf] = win_nr_earfcn_counts.get(_nrearf, 0) + 1
+                    _ltearf = row.get("lteChannelNumber")
+                    if _ltearf not in (None, ""):
+                        win_lte_earfcn_counts[_ltearf] = win_lte_earfcn_counts.get(_ltearf, 0) + 1
+                    _ip = str(row.get("serverIp") or "").strip()
+                    if _ip:
+                        win_server_ips[_ip] = win_server_ips.get(_ip, 0) + 1
+                    if str(row.get("handoverType") or "").strip():
+                        win_ho_count += 1
+                    if _nrpci not in (None, ""):
+                        win_nr_pci_seq.append((rdt, _nrpci))
+                    if _ltepci not in (None, ""):
+                        win_lte_pci_seq.append((rdt, _ltepci))
                 if not measurement_title:
                     measurement_title = str(row.get("measurementTitle") or "").strip() or None
                 d = str(row.get("dataTransferDirection") or "").strip()
@@ -3216,9 +3508,57 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
                 f"({slow_start_loss_pct:.1f}% lower). Network capacity is better represented by "
                 "the steady-state figure."
             )
+        # ── New KPI derivations (over the transfer window) ──
+        nr_configured_bw_mhz = _avg_series(win_cfg_bw, min_points=1)
+        nr_active_bw_mhz = _avg_series(win_active_bw, min_points=1)
+        if nr_active_bw_mhz is None:
+            nr_active_bw_mhz = agg_bw_mhz
+        nr_ca_active_share_pct = (
+            round(win_scell_active / float(win_scell_rows) * 100.0, 1)
+            if win_scell_rows
+            else None
+        )
+        nr_traffic_share_pct = None
+        if nr_pdsch_mean is not None and lte_pdsch_mean is not None:
+            _tot = (nr_pdsch_mean or 0) + (lte_pdsch_mean or 0)
+            if _tot > 0:
+                nr_traffic_share_pct = round((nr_pdsch_mean or 0) / _tot * 100.0, 1)
+        pdsch_scheduled_pct = _avg_series(win_pdsch_slot, min_points=1)
+        _band_stats = _nemo_band_window_stats(win_band_seq, win_end)
+        serving_pci = _nemo_mode_key(win_nr_pci_counts) or _nemo_mode_key(win_lte_pci_counts)
+        serving_pci_rat = "NR" if win_nr_pci_counts else ("LTE" if win_lte_pci_counts else None)
+        serving_band = _nemo_mode_key(win_band_name_counts)
+        serving_earfcn = (
+            _nemo_mode_key(win_nr_earfcn_counts) or _nemo_mode_key(win_lte_earfcn_counts)
+        )
+        server_ip = _nemo_mode_key(win_server_ips)
+        server_ip_count = len(win_server_ips)
+        handover_count = win_ho_count or 0
+        cell_change_count = (
+            _nemo_persecond_change_count(win_nr_pci_seq)
+            if win_nr_pci_seq
+            else _nemo_persecond_change_count(win_lte_pci_seq)
+        ) or 0
         sess.update({
             "kind": kind, "direction": direction, "protocol": protocol, "status": status,
             "success": status.lower().startswith("success"),
+            "nrConfiguredBwMhz": nr_configured_bw_mhz,
+            "nrActiveBwMhz": nr_active_bw_mhz,
+            "nrCaActiveSharePct": nr_ca_active_share_pct,
+            "nrTrafficSharePct": nr_traffic_share_pct,
+            "pdschScheduledPct": pdsch_scheduled_pct,
+            "n78ContinuousSec": _band_stats["n78ContinuousSec"],
+            "n78AvgRetentionSec": _band_stats["n78AvgRetentionSec"],
+            "n78DropCount": _band_stats["n78DropCount"],
+            "nrBandTransitionCount": _band_stats["nrBandTransitionCount"],
+            "servingPci": serving_pci,
+            "servingPciRat": serving_pci_rat,
+            "servingBand": serving_band,
+            "servingEarfcn": serving_earfcn,
+            "serverIp": server_ip,
+            "serverIpDistinctCount": server_ip_count,
+            "handoverCount": handover_count,
+            "cellChangeCount": cell_change_count,
             "bytesDl": bytes_dl, "bytesUl": bytes_ul, "fileSizeBytes": file_size,
             "downloadTimeKpiS": dl_time_kpi, "effTransferTimeS": eff_time,
             "avgRateMbps": avg_rate,
@@ -3429,6 +3769,20 @@ def _nemo_extract_dl_events(rows: list[dict]) -> dict:
     }
 
 
+def _nemo_extract_dl_events_for_operator(operator_data: dict | None, rows: list[dict] | None = None) -> dict:
+    if not isinstance(operator_data, dict):
+        return _nemo_extract_dl_events(rows or [])
+    source_rows = rows if rows is not None else (operator_data.get("rows") or [])
+    cache = operator_data.setdefault("_dlEventsCache", {})
+    cache_key = id(source_rows)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    cached = _nemo_extract_dl_events(source_rows)
+    cache[cache_key] = cached
+    return cached
+
+
 def _nemo_uplink_transfer_intervals(sessions: list[dict]) -> list[dict]:
     from datetime import datetime as _datetime
 
@@ -3536,6 +3890,22 @@ def _nemo_radio_presence_breakdown_from_episodes(episodes: list[dict]) -> dict:
     if totals["4G"] > 0:
         breakdown["4G"] = round(totals["4G"] / total * 100.0, 1)
     return breakdown
+
+
+def _nemo_choose_radio_presence_breakdown(
+    timeline_breakdown: dict | None,
+    episode_breakdown: dict | None,
+    cell_breakdown: dict | None = None,
+) -> dict:
+    timeline = dict(timeline_breakdown or {})
+    episode = dict(episode_breakdown or {})
+    cells = dict(cell_breakdown or {})
+    # Sparse packet/serving-technology exports can forward-fill LTE across a sub-second
+    # EN-DC burst. If the serving-cell episode sequence saw NR, keep that authoritative
+    # episode split so the summary matches the chronological table.
+    if (episode.get("5G") or 0) > 0 and not ((timeline.get("5G") or 0) > 0):
+        return episode
+    return timeline or episode or cells
 
 
 def _nemo_tech_presence_from_timeline(
@@ -4191,6 +4561,10 @@ def _nemo_parse_operator_file_rows(
     pci_indices = resolve(header_map, ("NR PCI", "LTE PCI", "PCI"))
     lte_channel_indices = resolve(header_map, ("LTE channel number", "Downlink EARFCN", "EARFCN"))
     nr_channel_indices = resolve(header_map, ("NR channel number", "NR-ARFCN"))
+    lte_pci_indices = resolve(header_map, ("LTE PCI",))
+    nr_pci_indices = resolve(header_map, ("NR PCI",))
+    server_ip_indices = resolve(header_map, ("Server IP", "Destination IP", "Server address", "IP"))
+    handover_type_indices = resolve(header_map, ("Handover type",))
     rrc_state_indices = resolve(header_map, ("RRC State", "E-RRC State", "Generic RRC State"))
     app_dl_indices = resolve(header_map, ("App. rate DL",))
     app_dl_avg_indices = resolve(header_map, ("App rate DL avg",))
@@ -4243,6 +4617,8 @@ def _nemo_parse_operator_file_rows(
     mac_dl_bler_indices = resolve(header_map, ("MAC DL BLER",))
     mac_ul_retx_5g_indices = resolve(header_map, ("MAC UL retransmission rate (5G)",))
     tcp_handshake_indices = resolve(header_map, ("TCP handshake time (ms)",))
+    tcp_rtt_indices = resolve(header_map, ("TCP RTT", "TCP RTT (ms)", "TCP round trip time", "TCP round trip time (ms)"))
+    tcp_retransmission_indices = resolve(header_map, ("TCP retransmission %", "TCP retransmission rate", "TCP retransmissions %"))
     lost_packet_indices = resolve(header_map, ("Lost packet",))
     ping_status_indices = resolve(header_map, ("Ping status",))
     # ── Additional capacity / reliability / CA / UL metrics ──
@@ -4263,6 +4639,10 @@ def _nemo_parse_operator_file_rows(
     ho_uplane_interruption_indices = resolve(header_map, ("HO U-plane interruption",))
     ppp_rate_dl_indices = resolve(header_map, ("PPP rate DL",))
     recv_ppp_bytes_indices = resolve(header_map, ("Recv. PPP bytes",))
+    rlc_dl_total_indices = resolve(header_map, ("RLC DL throughput", "RLC DL throughput total", "Total RLC DL throughput"))
+    rlc_dl_nr_indices = resolve(header_map, ("RLC DL throughput (5G)", "RLC DL throughput (NR)", "NR RLC DL throughput"))
+    rlc_dl_lte_indices = resolve(header_map, ("RLC DL throughput (LTE)", "LTE RLC DL throughput"))
+    dl_grant_rate_indices = resolve(header_map, ("DL grant rate", "PDSCH DL grant rate", "DL grants/s", "DL grants per second"))
     device_model_indices = resolve(header_map, (
         "Device name",
         "Device label",
@@ -4279,7 +4659,6 @@ def _nemo_parse_operator_file_rows(
     event_id_indices = resolve(header_map, ("Event ID",))
     event_text_indices = resolve(header_map, ("Event",))
 
-    normalized_rows = []
     raw_rows = []
     measurement_titles = set()
     ordered_dt_titles = []
@@ -4399,8 +4778,12 @@ def _nemo_parse_operator_file_rows(
             "lteCaStatus": _nemo_pick_text_resolved(row, lte_ca_status_indices, n),
             "nrCaStatus": _nemo_pick_text_resolved(row, nr_ca_status_indices, n),
             "pci": _nemo_pick_float_resolved(row, pci_indices, n),
+            "ltePci": _nemo_pick_float_resolved(row, lte_pci_indices, n),
+            "nrPci": _nemo_pick_float_resolved(row, nr_pci_indices, n),
             "lteChannelNumber": _nemo_pick_float_resolved(row, lte_channel_indices, n),
             "nrChannelNumber": nr_channel_number,
+            "serverIp": _nemo_pick_text_resolved(row, server_ip_indices, n),
+            "handoverType": _nemo_pick_text_resolved(row, handover_type_indices, n),
             "appDlRaw": app_dl_raw,
             "appDlAvgRaw": app_dl_avg_raw,
             "downloadTimeS": _nemo_pick_float_resolved(row, download_time_indices, n),
@@ -4459,7 +4842,13 @@ def _nemo_parse_operator_file_rows(
             "pppRateDl": _nemo_pick_float_resolved(row, ppp_rate_dl_indices, n),
             "recvPppBytes": _nemo_pick_float_resolved(row, recv_ppp_bytes_indices, n),
             "tcpHandshakeMs": _nemo_pick_float_resolved(row, tcp_handshake_indices, n),
+            "tcpRttMs": _nemo_pick_float_resolved(row, tcp_rtt_indices, n),
+            "tcpRetransmissionPct": _nemo_pick_float_resolved(row, tcp_retransmission_indices, n),
             "lostPacket": _nemo_pick_float_resolved(row, lost_packet_indices, n),
+            "rlcDlTotalMbps": _nemo_pick_float_resolved(row, rlc_dl_total_indices, n),
+            "rlcDlNrMbps": _nemo_pick_float_resolved(row, rlc_dl_nr_indices, n),
+            "rlcDlLteMbps": _nemo_pick_float_resolved(row, rlc_dl_lte_indices, n),
+            "dlGrantRate": _nemo_pick_float_resolved(row, dl_grant_rate_indices, n),
             "pingStatus": _nemo_pick_text_resolved(row, ping_status_indices, n),
             "eventId": _nemo_pick_text_resolved(row, event_id_indices, n),
             "eventText": _nemo_pick_text_resolved(row, event_text_indices, n),
@@ -4514,7 +4903,7 @@ def _nemo_parse_operator_file_rows(
         if payload.get("pdschDlLteCw1Raw") is not None:
             payload["pdschDlLteCw1Mbps"] = round(float(payload.get("pdschDlLteCw1Raw")) / throughput_scales["pdschDlLteCw1Mbps"], 3)
         payload["family"] = _nemo_classify_family(payload)
-        normalized_rows.append(payload)
+    normalized_rows = raw_rows
 
     for payload in normalized_rows:
         event_time = payload.get("_dt")
@@ -4725,6 +5114,12 @@ def _nemo_windowed_relevant_indices(headers: list[str]) -> list[int]:
         ("PDSCH DL scheduled throughput (5G)",),
         ("PDSCH DL throughput (5G)",),
         ("PDSCH DL throughput (LTE)",),
+        ("#SCells",),
+        ("CA total BW (MHz)",),
+        ("Primary BW (MHz)",),
+        ("Sum Secondary BWs (MHz)",),
+        ("Server IP", "Destination IP", "Server address", "IP"),
+        ("Handover type",),
         ("Lon.", "Lon", "Longitude"),
         ("Lat.", "Lat", "Latitude"),
     ):
@@ -5740,6 +6135,10 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         float(row.get(key)) for row in rows
         if row.get(key) is not None and (not positive or float(row.get(key)) > 0)
     ]
+    metric_on_rows = lambda subset, key, positive=False: [
+        float(row.get(key)) for row in (subset or [])
+        if row.get(key) is not None and (not positive or float(row.get(key)) > 0)
+    ]
     app_dl_all_values = [
         float(row.get("appDlMbps")) for row in rows
         if row.get("appDlMbps") is not None and math.isfinite(float(row.get("appDlMbps")))
@@ -5825,6 +6224,31 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
     _mac_sum = sum(v for v in (mac_lte_avg, mac_5g_avg) if v is not None)
     nr_throughput_contrib_pct = round(mac_5g_avg / _mac_sum * 100.0, 1) if mac_5g_avg is not None and _mac_sum else None
     lte_throughput_contrib_pct = round(mac_lte_avg / _mac_sum * 100.0, 1) if mac_lte_avg is not None and _mac_sum else None
+    pdsch_nr_total = sum(metric("pdschDl5gMbps", positive=True))
+    pdsch_lte_total = sum(metric("pdschDlLteMbps", positive=True))
+    pdsch_total = pdsch_nr_total + pdsch_lte_total
+    nr_pdsch_split_pct = round(pdsch_nr_total / pdsch_total * 100.0, 1) if pdsch_total > 0 else None
+    lte_pdsch_split_pct = round(pdsch_lte_total / pdsch_total * 100.0, 1) if pdsch_total > 0 else None
+
+    nr_rows_for_bw = [row for row in rows if _nemo_band_row_filter(row)]
+    nr_bw_candidates = [
+        _nemo_prbs_to_bandwidth_mhz(row.get("bandwidthPrbs"))
+        for row in nr_rows_for_bw
+    ]
+    nr_bw_candidates = [value for value in nr_bw_candidates if value is not None]
+    nr_configured_bw_mhz = max(nr_bw_candidates) if nr_bw_candidates else None
+    nr_total_active_bandwidth_mhz = nr_configured_bw_mhz
+    nr_scells_values = [
+        float(row.get("scellsCount"))
+        for row in nr_rows_for_bw
+        if row.get("scellsCount") is not None and float(row.get("scellsCount")) >= 0
+    ]
+    nr_scell_count = max(nr_scells_values) if nr_scells_values else None
+    nr_ca_values = [str(row.get("nrCaStatus") or "").strip() for row in rows if str(row.get("nrCaStatus") or "").strip()]
+    nr_ca_active_share = _nemo_active_status_share(nr_ca_values)
+    if nr_ca_active_share is None and nr_scells_values:
+        nr_ca_active_share = round((sum(1 for value in nr_scells_values if value > 0) / float(len(nr_scells_values))) * 100.0, 1)
+    nr_band_mobility = _nemo_nr_band_mobility_stats(rows)
 
     prbs_stats = _nemo_metric_stats(metric("pdschPrbs", positive=True))
     pdsch_slot_stats = _nemo_metric_stats(metric("pdschSlotPct", positive=True))
@@ -5843,7 +6267,11 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
     scheduled_mbps_per_slot = round(sched5g_avg / (pdsch_slot_avg / 100.0), 1) if sched5g_avg not in (None, 0) and pdsch_slot_avg not in (None, 0) else None
 
     pdsch_rows = [row for row in rows if _nemo_pdsch_active_row(row)]
+    pdsch_nr_rows = [row for row in rows if _nemo_pdsch_nr_active_row(row)]
+    pdsch_lte_rows = [row for row in rows if _nemo_pdsch_lte_active_row(row)]
     mcs_values = []
+    mcs_nr_values = []
+    mcs_lte_values = []
     tbs_values = []
     pdsch_dl_lte_total_sum = 0.0
     pdsch_dl_lte_cw1_sum = 0.0
@@ -5880,6 +6308,24 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
                             pdsch_dl_lte_cw1_sum += lte_cw1_f
             except Exception:
                 pass
+    for row in pdsch_nr_rows:
+        for key in ("pdschMcsCw0", "pdschMcsCw1"):
+            val = row.get(key)
+            if val is None:
+                continue
+            try:
+                mcs_nr_values.append(float(val))
+            except Exception:
+                pass
+    for row in pdsch_lte_rows:
+        for key in ("pdschMcsCw0", "pdschMcsCw1"):
+            val = row.get(key)
+            if val is None:
+                continue
+            try:
+                mcs_lte_values.append(float(val))
+            except Exception:
+                pass
 
     # Modulation is a sparse change-event column (logged only on transitions, like serving/packet
     # technology). Raw non-empty count badly misrepresents time-based shares. Forward-fill across
@@ -5891,6 +6337,16 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         for row in pdsch_rows
         if row.get("_dt") is not None
     }
+    _pdsch_nr_active_secs = {
+        row["_dt"].replace(microsecond=0)
+        for row in pdsch_nr_rows
+        if row.get("_dt") is not None
+    }
+    _pdsch_lte_active_secs = {
+        row["_dt"].replace(microsecond=0)
+        for row in pdsch_lte_rows
+        if row.get("_dt") is not None
+    }
     _rank2_active_secs = {
         row["_dt"].replace(microsecond=0)
         for row in pdsch_rows
@@ -5900,15 +6356,35 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
             or (row.get("scheduledRank") is not None and float(row.get("scheduledRank") or 0) >= 2)
         )
     }
+    _rank2_nr_active_secs = {
+        row["_dt"].replace(microsecond=0)
+        for row in pdsch_nr_rows
+        if row.get("_dt") is not None
+        and (
+            row.get("pdschMcsCw1") is not None
+            or (row.get("scheduledRank") is not None and float(row.get("scheduledRank") or 0) >= 2)
+        )
+    }
+    _rank2_lte_active_secs = {
+        row["_dt"].replace(microsecond=0)
+        for row in pdsch_lte_rows
+        if row.get("_dt") is not None
+        and (
+            row.get("pdschMcsCw1") is not None
+            or (row.get("scheduledRank") is not None and float(row.get("scheduledRank") or 0) >= 2)
+        )
+    }
 
-    def _ff_modulation_counts(field: str, active_seconds: set) -> dict:
+    def _ff_modulation_counts(field: str, active_seconds: set, row_filter=None) -> dict:
         """Forward-fill a sparse modulation column and return per-modulation second counts,
         restricted to the supplied active-second set."""
         timeline = sorted(
             (
                 (r["_dt"], _nemo_clean_modulation(r.get(field)))
                 for r in rows
-                if r.get("_dt") is not None and _nemo_clean_modulation(r.get(field))
+                if r.get("_dt") is not None
+                and _nemo_clean_modulation(r.get(field))
+                and (row_filter is None or row_filter(r))
             ),
             key=lambda x: x[0],
         )
@@ -5928,20 +6404,42 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
 
     cw0_counts = _ff_modulation_counts("pdschModulationCw0", _pdsch_active_secs)
     cw1_counts = _ff_modulation_counts("pdschModulationCw1", _rank2_active_secs)
+    cw0_nr_counts = _ff_modulation_counts("pdschModulationCw0", _pdsch_nr_active_secs, _nemo_pdsch_nr_active_row)
+    cw1_nr_counts = _ff_modulation_counts("pdschModulationCw1", _rank2_nr_active_secs, _nemo_pdsch_nr_active_row)
+    cw0_lte_counts = _ff_modulation_counts("pdschModulationCw0", _pdsch_lte_active_secs, _nemo_pdsch_lte_active_row)
+    cw1_lte_counts = _ff_modulation_counts("pdschModulationCw1", _rank2_lte_active_secs, _nemo_pdsch_lte_active_row)
     combined_counts: dict = {}
     for val, cnt in cw0_counts.items():
         combined_counts[val] = combined_counts.get(val, 0) + cnt
     for val, cnt in cw1_counts.items():
         combined_counts[val] = combined_counts.get(val, 0) + cnt
+    combined_nr_counts: dict = {}
+    for val, cnt in cw0_nr_counts.items():
+        combined_nr_counts[val] = combined_nr_counts.get(val, 0) + cnt
+    for val, cnt in cw1_nr_counts.items():
+        combined_nr_counts[val] = combined_nr_counts.get(val, 0) + cnt
+    combined_lte_counts: dict = {}
+    for val, cnt in cw0_lte_counts.items():
+        combined_lte_counts[val] = combined_lte_counts.get(val, 0) + cnt
+    for val, cnt in cw1_lte_counts.items():
+        combined_lte_counts[val] = combined_lte_counts.get(val, 0) + cnt
     modulation_distribution = _nemo_distribution_from_counts(combined_counts)
+    modulation_distribution_nr = _nemo_distribution_from_counts(combined_nr_counts)
+    modulation_distribution_lte = _nemo_distribution_from_counts(combined_lte_counts)
     mod_cw0_dist = _nemo_distribution_from_counts(cw0_counts)
     mod_cw1_dist = _nemo_distribution_from_counts(cw1_counts)
+    mod_nr_cw0_dist = _nemo_distribution_from_counts(cw0_nr_counts)
+    mod_nr_cw1_dist = _nemo_distribution_from_counts(cw1_nr_counts)
+    mod_lte_cw0_dist = _nemo_distribution_from_counts(cw0_lte_counts)
+    mod_lte_cw1_dist = _nemo_distribution_from_counts(cw1_lte_counts)
     rank2_util_pct = (
         round(pdsch_dl_lte_cw1_sum / pdsch_dl_lte_total_sum * 100.0, 1)
         if pdsch_dl_lte_total_sum > 0
         else None
     )
     pdsch_mcs_stats = _nemo_metric_stats(mcs_values)
+    pdsch_mcs_nr_stats = _nemo_metric_stats(mcs_nr_values)
+    pdsch_mcs_lte_stats = _nemo_metric_stats(mcs_lte_values)
     pdsch_tbs_stats = _nemo_metric_stats(tbs_values)
     pdsch_dl_lte_stats = _nemo_metric_stats(metric("pdschDlLteMbps", positive=True))
     pdsch_dl_lte_cw0_stats = _nemo_metric_stats(metric("pdschDlLteCw0Mbps", positive=True))
@@ -5949,6 +6447,10 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
     pdsch_bits_hz_stats = _nemo_metric_stats(metric("pdschBitsPerHz", positive=True))
     pdsch_max_bits_hz_stats = _nemo_metric_stats(metric("pdschMaxBitsPerHz", positive=True))
     scheduled_rank_stats = _nemo_metric_stats(metric("scheduledRank", positive=True))
+    scheduled_rank_nr_stats = _nemo_metric_stats(metric_on_rows(pdsch_nr_rows, "scheduledRank", positive=True))
+    scheduled_rank_lte_stats = _nemo_metric_stats(metric_on_rows(pdsch_lte_rows, "scheduledRank", positive=True))
+    ri_nr_stats = _nemo_metric_stats(metric_on_rows(pdsch_nr_rows, "ri", positive=True))
+    ri_lte_stats = _nemo_metric_stats(metric_on_rows(pdsch_lte_rows, "ri", positive=True))
     lte_anchor_sinr_values = []
     for row in rows:
         sinr_value = row.get("sinr")
@@ -6048,6 +6550,8 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         "prbs": _nemo_tag_metric_stats(_nemo_metric_stats(metric("pdschPrbs", positive=True)), "pooled"),
         "pdschSlotPct": _nemo_tag_metric_stats(pdsch_slot_stats, "pooled"),
         "scheduledRank": _nemo_tag_metric_stats(scheduled_rank_stats, "pooled"),
+        "scheduledRankNr": _nemo_tag_metric_stats(scheduled_rank_nr_stats, "pooled"),
+        "scheduledRankLte": _nemo_tag_metric_stats(scheduled_rank_lte_stats, "pooled"),
         "availableBandwidthPrbs": _nemo_tag_metric_stats(_nemo_metric_stats(available_prbs_values), "pooled"),
         "rsrp": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rsrp")), "pooled"),
         "rsrq": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rsrq")), "pooled"),
@@ -6061,6 +6565,8 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         "rfNrLte": rf_nr_lte,
         "cqi": _nemo_tag_metric_stats(_nemo_metric_stats(metric("wbCqi", positive=True)), "pooled"),
         "ri": _nemo_tag_metric_stats(_nemo_metric_stats(ri_values), "pooled"),
+        "riNr": _nemo_tag_metric_stats(ri_nr_stats, "pooled"),
+        "riLte": _nemo_tag_metric_stats(ri_lte_stats, "pooled"),
         "riGe3Share": round((sum(1 for value in ri_values if value >= 3) / float(len(ri_values))) * 100.0, 1) if ri_values else None,
         "ri1Share": round((sum(1 for value in ri_values if value <= 1) / float(len(ri_values))) * 100.0, 1) if ri_values else None,
         "bler": _nemo_tag_metric_stats(_nemo_metric_stats(metric("macDlBler")), "pooled"),
@@ -6086,16 +6592,37 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         "totalMacDl": _nemo_tag_metric_stats(total_mac_stats, "pooled"),
         "transportRatio": transport_ratio,
         "tcpHandshake": _nemo_tag_metric_stats(_nemo_metric_stats(metric("tcpHandshakeMs", positive=True)), "pooled"),
+        "tcpRtt": _nemo_tag_metric_stats(_nemo_metric_stats(metric("tcpRttMs", positive=True)), "pooled"),
+        "tcpRetransmission": _nemo_tag_metric_stats(_nemo_metric_stats(metric("tcpRetransmissionPct", positive=True)), "pooled"),
         "lostPacket": _nemo_tag_metric_stats(_nemo_metric_stats(metric("lostPacket", positive=True)), "pooled"),
+        "rlcDlTotal": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rlcDlTotalMbps", positive=True)), "pooled"),
+        "rlcDlNr": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rlcDlNrMbps", positive=True)), "pooled"),
+        "rlcDlLte": _nemo_tag_metric_stats(_nemo_metric_stats(metric("rlcDlLteMbps", positive=True)), "pooled"),
+        "dlGrantRate": _nemo_metric_stats(metric("dlGrantRate", positive=True)).get("average"),
         "n78Share": n78_share,  # over all rows with band field
         "n78ShareNrOnly": n78_share_nr_only,  # over NR-only rows
         "n28ShareNrOnly": nr_band_shares.get("n28"),  # over NR-only rows
         "nrBandShares": nr_band_shares,  # {band(lower): share%} over NR-only rows
+        "nrConfiguredBwMhz": nr_configured_bw_mhz,
+        "nrTotalActiveBandwidthMhz": nr_total_active_bandwidth_mhz,
+        "nrScellCount": nr_scell_count,
+        "nrCaActiveShare": nr_ca_active_share,
+        "nrTrafficSharePct": nr_pdsch_split_pct if nr_pdsch_split_pct is not None else nr_throughput_contrib_pct,
+        "lteTrafficSharePct": lte_pdsch_split_pct if lte_pdsch_split_pct is not None else lte_throughput_contrib_pct,
+        "nrLtePdschSplitPct": nr_pdsch_split_pct,
+        "n78ContinuousTimeSec": nr_band_mobility.get("n78ContinuousTimeSec"),
+        "n78AvgRetentionSec": nr_band_mobility.get("n78AvgRetentionSec"),
+        "n78DropCountDuringDl": nr_band_mobility.get("n78DropCountDuringDl"),
+        "nrBandTransitionCount": nr_band_mobility.get("nrBandTransitionCount"),
         "blerAbove10Share": bler_above_10_share,
         "blerAbove20Share": bler_above_20_share,
         "prbUtilPct": prb_util_pct,
         "pdschModulationCw0": {"distribution": mod_cw0_dist, "dominant": mod_cw0_dist[0]["label"] if mod_cw0_dist else None},
         "pdschModulationCw1": {"distribution": mod_cw1_dist, "dominant": mod_cw1_dist[0]["label"] if mod_cw1_dist else None},
+        "pdschModulationNrCw0": {"distribution": mod_nr_cw0_dist, "dominant": mod_nr_cw0_dist[0]["label"] if mod_nr_cw0_dist else None},
+        "pdschModulationNrCw1": {"distribution": mod_nr_cw1_dist, "dominant": mod_nr_cw1_dist[0]["label"] if mod_nr_cw1_dist else None},
+        "pdschModulationLteCw0": {"distribution": mod_lte_cw0_dist, "dominant": mod_lte_cw0_dist[0]["label"] if mod_lte_cw0_dist else None},
+        "pdschModulationLteCw1": {"distribution": mod_lte_cw1_dist, "dominant": mod_lte_cw1_dist[0]["label"] if mod_lte_cw1_dist else None},
         "rank2UtilPct": rank2_util_pct,
         "pdschDlLte": _nemo_tag_metric_stats(pdsch_dl_lte_stats, "pooled"),
         "pdschDlLteCw0": _nemo_tag_metric_stats(pdsch_dl_lte_cw0_stats, "pooled"),
@@ -6113,6 +6640,7 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
         "caActiveShare": ca_active_share,
         "prbEfficiency": prb_efficiency,
         "scheduledEfficiency": scheduled_efficiency,
+        "pdschScheduledTimePct": pdsch_slot_avg,
         "resourceAllocationIndex": resource_allocation_index,
         "prbsPerScheduledSlot": prbs_per_scheduled_slot,
         "scheduledMbpsPerSlot": scheduled_mbps_per_slot,
@@ -6144,7 +6672,63 @@ def _nemo_operator_kpis(operator_data: dict) -> dict:
                 "qam256Share": _nemo_distribution_share(mod_cw1_dist, "256QAM"),
             },
         },
+        "pdschModulationNr": {
+            "dominant": modulation_distribution_nr[0]["label"] if modulation_distribution_nr else None,
+            "distribution": modulation_distribution_nr,
+            "sampleCount": sum(combined_nr_counts.values()),
+            "qpskShare": _nemo_distribution_share(modulation_distribution_nr, "QPSK"),
+            "qam16Share": _nemo_distribution_share(modulation_distribution_nr, "16QAM"),
+            "qam64Share": _nemo_distribution_share(modulation_distribution_nr, "64QAM"),
+            "qam256Share": _nemo_distribution_share(modulation_distribution_nr, "256QAM"),
+            "cw0": {
+                "dominant": mod_nr_cw0_dist[0]["label"] if mod_nr_cw0_dist else None,
+                "distribution": mod_nr_cw0_dist,
+                "sampleCount": sum(cw0_nr_counts.values()),
+                "qpskShare": _nemo_distribution_share(mod_nr_cw0_dist, "QPSK"),
+                "qam16Share": _nemo_distribution_share(mod_nr_cw0_dist, "16QAM"),
+                "qam64Share": _nemo_distribution_share(mod_nr_cw0_dist, "64QAM"),
+                "qam256Share": _nemo_distribution_share(mod_nr_cw0_dist, "256QAM"),
+            },
+            "cw1": {
+                "dominant": mod_nr_cw1_dist[0]["label"] if mod_nr_cw1_dist else None,
+                "distribution": mod_nr_cw1_dist,
+                "sampleCount": sum(cw1_nr_counts.values()),
+                "qpskShare": _nemo_distribution_share(mod_nr_cw1_dist, "QPSK"),
+                "qam16Share": _nemo_distribution_share(mod_nr_cw1_dist, "16QAM"),
+                "qam64Share": _nemo_distribution_share(mod_nr_cw1_dist, "64QAM"),
+                "qam256Share": _nemo_distribution_share(mod_nr_cw1_dist, "256QAM"),
+            },
+        },
+        "pdschModulationLte": {
+            "dominant": modulation_distribution_lte[0]["label"] if modulation_distribution_lte else None,
+            "distribution": modulation_distribution_lte,
+            "sampleCount": sum(combined_lte_counts.values()),
+            "qpskShare": _nemo_distribution_share(modulation_distribution_lte, "QPSK"),
+            "qam16Share": _nemo_distribution_share(modulation_distribution_lte, "16QAM"),
+            "qam64Share": _nemo_distribution_share(modulation_distribution_lte, "64QAM"),
+            "qam256Share": _nemo_distribution_share(modulation_distribution_lte, "256QAM"),
+            "cw0": {
+                "dominant": mod_lte_cw0_dist[0]["label"] if mod_lte_cw0_dist else None,
+                "distribution": mod_lte_cw0_dist,
+                "sampleCount": sum(cw0_lte_counts.values()),
+                "qpskShare": _nemo_distribution_share(mod_lte_cw0_dist, "QPSK"),
+                "qam16Share": _nemo_distribution_share(mod_lte_cw0_dist, "16QAM"),
+                "qam64Share": _nemo_distribution_share(mod_lte_cw0_dist, "64QAM"),
+                "qam256Share": _nemo_distribution_share(mod_lte_cw0_dist, "256QAM"),
+            },
+            "cw1": {
+                "dominant": mod_lte_cw1_dist[0]["label"] if mod_lte_cw1_dist else None,
+                "distribution": mod_lte_cw1_dist,
+                "sampleCount": sum(cw1_lte_counts.values()),
+                "qpskShare": _nemo_distribution_share(mod_lte_cw1_dist, "QPSK"),
+                "qam16Share": _nemo_distribution_share(mod_lte_cw1_dist, "16QAM"),
+                "qam64Share": _nemo_distribution_share(mod_lte_cw1_dist, "64QAM"),
+                "qam256Share": _nemo_distribution_share(mod_lte_cw1_dist, "256QAM"),
+            },
+        },
         "pdschMcs": _nemo_tag_metric_stats(pdsch_mcs_stats, "pooled"),
+        "pdschMcsNr": _nemo_tag_metric_stats(pdsch_mcs_nr_stats, "pooled"),
+        "pdschMcsLte": _nemo_tag_metric_stats(pdsch_mcs_lte_stats, "pooled"),
         "pdschBitPerHz": _nemo_tag_metric_stats(pdsch_bits_hz_stats, "pooled"),
         "pdschMaxBitPerHz": _nemo_tag_metric_stats(pdsch_max_bits_hz_stats, "pooled"),
         "pdschTbs": _nemo_tag_metric_stats(pdsch_tbs_stats, "pooled"),
@@ -8939,7 +9523,7 @@ def _nemo_build_operator_serving_cells(
 
     # Scope "during download" to the DREQ→DCOMP event window (exact transfer boundary).
     # Fall back to appDlMbps>0 seconds, then to session-level transfer windows.
-    _dl_events = _nemo_extract_dl_events(rows)
+    _dl_events = _nemo_extract_dl_events_for_operator(operator_data, rows)
     download_intervals = (
         _dl_events.get("downloadIntervals")
         or _nemo_active_download_intervals(rows)
@@ -9023,14 +9607,15 @@ def _nemo_build_operator_serving_cells(
         (r["_dt"], r.get("packetTechnology") or r.get("servingTechnology") or "")
         for r in rows if r.get("_dt") is not None
     ]
-    radio_presence_breakdown_all = (
-        _nemo_tech_presence_from_timeline(_tech_timeline)
-        or _nemo_radio_presence_breakdown_from_cells(cells_payload)
+    radio_presence_breakdown_all = _nemo_choose_radio_presence_breakdown(
+        _nemo_tech_presence_from_timeline(_tech_timeline),
+        _nemo_radio_presence_breakdown_from_episodes(episode_sources),
+        _nemo_radio_presence_breakdown_from_cells(cells_payload),
     )
     radio_presence_breakdown_download = (
-        (
-            _nemo_tech_presence_from_timeline(_tech_timeline, download_intervals)
-            or _nemo_radio_presence_breakdown_from_episodes(display_episode_sources)
+        _nemo_choose_radio_presence_breakdown(
+            _nemo_tech_presence_from_timeline(_tech_timeline, download_intervals),
+            _nemo_radio_presence_breakdown_from_episodes(display_episode_sources),
         )
         if download_intervals
         else {}
@@ -9208,29 +9793,45 @@ def _nemo_merge_technology_status_with_serving_cells(
     nr_pct = breakdown.get("5G")
     lte_pct = breakdown.get("4G")
     if nr_pct is not None:
-        merged["nrPresencePct"] = nr_pct
+        merged["nrCellPresencePct"] = nr_pct
     if lte_pct is not None:
+        # LTE serving-cell dwell is LTE-anchor/presence time. In EN-DC it can overlap
+        # NR, so it must not overwrite lteOnlyPresencePct (true no-NR time).
+        merged["ltePresencePct"] = lte_pct
+    if nr_pct is not None and merged.get("nrPresencePct") is None:
+        merged["nrPresencePct"] = nr_pct
+    if lte_pct is not None and merged.get("lteOnlyPresencePct") is None:
         merged["lteOnlyPresencePct"] = lte_pct
     exact_totals = _nemo_radio_presence_totals_from_cells(
         serving_cells.get("cells") or [],
         "dwellSecDownload" if active_dl_only else "dwellSec",
     )
     if exact_totals.get("5G") or exact_totals.get("4G"):
-        merged["nrPresenceSeconds"] = exact_totals.get("5G", 0.0)
-        merged["lteOnlySeconds"] = exact_totals.get("4G", 0.0)
-        merged["totalPresenceSeconds"] = round(
+        merged["nrCellPresenceSeconds"] = exact_totals.get("5G", 0.0)
+        merged["ltePresenceSeconds"] = exact_totals.get("4G", 0.0)
+        merged["totalCellPresenceSeconds"] = round(
             float(exact_totals.get("5G", 0.0)) + float(exact_totals.get("4G", 0.0)),
             0,
         )
+        if merged.get("nrPresenceSeconds") is None:
+            merged["nrPresenceSeconds"] = exact_totals.get("5G", 0.0)
+        if merged.get("lteOnlySeconds") is None:
+            merged["lteOnlySeconds"] = exact_totals.get("4G", 0.0)
+        if merged.get("totalPresenceSeconds") is None:
+            merged["totalPresenceSeconds"] = merged.get("totalCellPresenceSeconds")
     else:
         total_seconds = merged.get("totalPresenceSeconds")
         if total_seconds not in (None, 0):
             try:
                 total_num = float(total_seconds)
                 if nr_pct is not None:
-                    merged["nrPresenceSeconds"] = round(total_num * float(nr_pct) / 100.0, 0)
+                    merged["nrCellPresenceSeconds"] = round(total_num * float(nr_pct) / 100.0, 0)
+                    if merged.get("nrPresenceSeconds") is None:
+                        merged["nrPresenceSeconds"] = merged["nrCellPresenceSeconds"]
                 if lte_pct is not None:
-                    merged["lteOnlySeconds"] = round(total_num * float(lte_pct) / 100.0, 0)
+                    merged["ltePresenceSeconds"] = round(total_num * float(lte_pct) / 100.0, 0)
+                    if merged.get("lteOnlySeconds") is None:
+                        merged["lteOnlySeconds"] = merged["ltePresenceSeconds"]
             except Exception:
                 pass
     return merged
@@ -11184,6 +11785,41 @@ def _benchmark_nemo_parse_operator_files(paths: list[str]) -> list[dict]:
             continue
         parseable_paths.append(path)
     total = len(parseable_paths)
+    file_metas = _benchmark_nemo_collect_file_meta(parseable_paths)
+    if _benchmark_nemo_should_parallel_parse(file_metas):
+        ordered_results = [None] * total
+        try:
+            with ProcessPoolExecutor(
+                max_workers=min(_BENCHMARK_NEMO_PARSE_WORKERS, total),
+                mp_context=_mp.get_context("spawn"),
+            ) as executor:
+                futures = {}
+                for index, path in enumerate(parseable_paths, start=1):
+                    _benchmark_nemo_set_load_state(
+                        phase="parsing",
+                        message=f"Queueing {os.path.basename(path)} ({index}/{total})…",
+                        progressPct=round(((index - 1) / float(total)) * 100.0, 1) if total else 0.0,
+                        filesTotal=total,
+                        filesDone=index - 1,
+                        currentFile=os.path.basename(path),
+                    )
+                    futures[executor.submit(_nemo_parse_operator_file_uncached, path)] = (index - 1, path)
+                completed = 0
+                for future in as_completed(futures):
+                    list_index, path = futures[future]
+                    ordered_results[list_index] = future.result()
+                    completed += 1
+                    _benchmark_nemo_set_load_state(
+                        phase="parsing",
+                        message=f"Parsed {os.path.basename(path)} ({completed}/{total})",
+                        progressPct=round((completed / float(total)) * 100.0, 1) if total else 100.0,
+                        filesTotal=total,
+                        filesDone=completed,
+                        currentFile=os.path.basename(path),
+                    )
+            return [item for item in ordered_results if item is not None]
+        except Exception:
+            pass
     for index, path in enumerate(parseable_paths, start=1):
         _benchmark_nemo_set_load_state(
             phase="parsing",
@@ -11203,6 +11839,72 @@ def _benchmark_nemo_parse_operator_files(paths: list[str]) -> list[dict]:
             currentFile=os.path.basename(path),
         )
     return operator_files
+
+
+def _benchmark_nemo_operator_source_key(operator_file: dict, fallback_index: int):
+    operator = str((operator_file or {}).get("operator") or "").strip().upper()
+    titles = (
+        list((operator_file or {}).get("orderedDtTitles") or [])
+        or list((operator_file or {}).get("measurementTitles") or [])
+        or list(((operator_file or {}).get("rowsByMeasurementTitle") or {}).keys())
+        or _nemo_ordered_dt_titles((operator_file or {}).get("rows") or [])
+    )
+    normalized_titles = tuple(
+        _nemo_matchable_measurement_title(title) or _benchmark_text(title)
+        for title in titles
+        if _nemo_matchable_measurement_title(title) or _benchmark_text(title)
+    )
+    if not operator or not normalized_titles:
+        return ("__ordinal__", fallback_index)
+    return (operator, normalized_titles)
+
+
+def _benchmark_nemo_operator_source_rank(operator_file: dict) -> tuple:
+    coverage = (operator_file or {}).get("coverage") or {}
+    file_name = str((operator_file or {}).get("fileName") or "")
+    file_stem = os.path.splitext(file_name)[0].upper()
+    is_dl_extract = bool(re.search(r"(^|[-_])DL($|[-_])", file_stem))
+    non_empty_score = sum(
+        int(coverage.get(key) or 0)
+        for key in (
+            "nonEmptyAppDl",
+            "nonEmptyTransferStatus",
+            "nonEmptyMac5g",
+            "nonEmptyPdsch5g",
+            "nonEmptyNrChannel",
+            "nonEmptyRsrp",
+            "nonEmptySinr",
+            "nonEmptyRi",
+            "nonEmptyBler",
+        )
+    )
+    rows = (operator_file or {}).get("rows") or []
+    transfer_sessions = (operator_file or {}).get("transferSessions") or []
+    return (
+        0 if is_dl_extract else 1,
+        int(coverage.get("rowCount") or 0),
+        len(rows),
+        len(transfer_sessions),
+        non_empty_score,
+        len(file_name),
+    )
+
+
+def _benchmark_nemo_deduplicate_operator_sources(operator_files: list[dict]) -> list[dict]:
+    if not operator_files:
+        return []
+    chosen_by_key: dict = {}
+    key_order: list = []
+    for index, operator_file in enumerate(operator_files):
+        key = _benchmark_nemo_operator_source_key(operator_file, index)
+        current = chosen_by_key.get(key)
+        if current is None:
+            chosen_by_key[key] = operator_file
+            key_order.append(key)
+            continue
+        if _benchmark_nemo_operator_source_rank(operator_file) > _benchmark_nemo_operator_source_rank(current):
+            chosen_by_key[key] = operator_file
+    return [chosen_by_key[key] for key in key_order]
 
 
 def _nemo_build_dt_list(operator_files: list[dict]) -> list[dict]:
@@ -11675,14 +12377,16 @@ def _benchmark_optim_build_dt_analysis(operator_files: list[dict], dl_mode: str 
                 cells, of.get("technologyStatus"), _nemo_dominant_nr_serving_info(of.get("rows") or [])
             )
         serving_by_op[str(of.get("operator") or "").upper()] = cells
-        # Align 5G/4G presence KPIs with the dwell-based serving-cell breakdown (matches the UI).
+        # Keep true RAT presence from the Nemo technology status. Serving-cell dwell is useful
+        # separately as LTE/NR cell presence, but LTE anchor dwell can overlap NR in EN-DC and
+        # must not be written into lteOnlyPresencePct.
         breakdown = (cells or {}).get("radioPresenceBreakdownAll") or (cells or {}).get("radioPresenceBreakdown") or {}
         kpis = of.get("kpis")
         if isinstance(breakdown, dict) and breakdown and isinstance(kpis, dict):
-            if breakdown.get("5G") is not None:
-                kpis["nrPresencePct"] = breakdown.get("5G")
             if breakdown.get("4G") is not None:
-                kpis["lteOnlyPresencePct"] = breakdown.get("4G")
+                kpis["ltePresencePct"] = breakdown.get("4G")
+            if breakdown.get("5G") is not None:
+                kpis["nrCellPresencePct"] = breakdown.get("5G")
 
     return {
         "rfExclusionCheck": _nemo_build_rf_exclusion_check(operator_files, diagnosis),
@@ -12358,6 +13062,32 @@ def _deep_num(value):
         return None
 
 
+def _deep_flag(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "yes", "y", "1"):
+            return 1.0
+        if text in ("false", "no", "n", "0"):
+            return 0.0
+    num = _deep_num(value)
+    if num is None:
+        return None
+    return 1.0 if num != 0 else 0.0
+
+
+def _deep_first_present(mapping: dict, *keys):
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        if key in mapping and mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
+
+
 def _deep_best_competitor(values, higher_is_better=True):
     vals = [v for v in (values or []) if _deep_num(v) is not None]
     if not vals:
@@ -12372,22 +13102,86 @@ def _deep_gap_fraction(iam, best, higher_is_better=True):
     return (iam_n - best_n) / abs(best_n)
 
 
+def _deep_blank_nr_only_metrics(values: dict) -> dict:
+    if not isinstance(values, dict):
+        return values
+    fiveg_presence = _deep_num(values.get("fivegPresence"))
+    if fiveg_presence is None or fiveg_presence > 0:
+        return values
+    for key in (
+        "rsrpNr",
+        "sinrNr",
+        "rsrqNr",
+        "cqi",
+        "n78",
+        "n1",
+        "n28",
+        "mcs",
+        "mcsNr",
+        "qam256",
+        "qam64",
+        "qam16",
+        "qpsk",
+        "qam256Nr",
+        "qam64Nr",
+        "qam16Nr",
+        "qpskNr",
+        "medianRank",
+        "medianRankNr",
+        "ri1",
+        "ri2",
+        "riGe3",
+        "blerAvg",
+        "blerP90",
+        "blerAbove10",
+        "ulRetx",
+        "availableBandwidthPrbs",
+        "resourceAllocationIndex",
+        "pdschSlotPct",
+        "prbEfficiency",
+        "scheduled5gAvg",
+        "macDl5g",
+        "pdschDl5gMbps",
+        "nrThroughputContrib",
+    ):
+        if key in values:
+            values[key] = None
+    return values
+
+
 def _deep_extract(kpis, transfer_lookup, operator):
     """Flatten the per-operator kpis dict into the scalar metrics the engine needs."""
     kpis = kpis or {}
     def stat(key, field):
         return (kpis.get(key) or {}).get(field)
+    fiveg_presence = _deep_num(kpis.get("nrPresencePct"))
     def _rat_med_avg(nr_key, lte_key):
         # RAT-average of the two displayed medians, so "Total" stays consistent with the
         # NR/LTE rows (and equals the NR median when there is no LTE leg).
         vals = [v for v in (stat(nr_key, "median"), stat(lte_key, "median")) if v is not None]
         return round(sum(vals) / len(vals), 1) if vals else None
     mod = kpis.get("pdschModulation") or {}
+    mod_nr = kpis.get("pdschModulationNr") or {}
+    mod_lte = kpis.get("pdschModulationLte") or {}
     ri1 = _deep_num(kpis.get("ri1Share"))
     ri_ge3 = _deep_num(kpis.get("riGe3Share"))
     ri2 = round(100.0 - ri1 - ri_ge3, 1) if ri1 is not None and ri_ge3 is not None else None
     dl_tr = transfer_lookup.get((str(operator or "").upper(), "DL")) or {}
-    return {
+    def _split_share(split_mod, generic_mod, field, use_generic_when):
+        split_value = _deep_num(split_mod.get(field))
+        if split_value is not None:
+            return split_value
+        if use_generic_when:
+            return _deep_num(generic_mod.get(field))
+        return None
+    def _split_stat(split_key, generic_key, use_generic_when):
+        split_value = stat(split_key, "median")
+        if split_value is not None:
+            return _deep_num(split_value)
+        if use_generic_when:
+            return _deep_num(stat(generic_key, "median"))
+        return None
+    values = {
         "dlThroughput": stat("dl", "average"),
         "rsrp": stat("rsrp", "median"),
         "rsrq": stat("rsrq", "median"),
@@ -12402,7 +13196,7 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "rsrqLte": stat("rsrqLte", "median"),
         "cqi": stat("cqi", "median"),
         "mcs": stat("pdschMcs", "median"),
-        "fivegPresence": _deep_num(kpis.get("nrPresencePct")),
+        "fivegPresence": fiveg_presence,
         "fourgOnly": _deep_num(kpis.get("lteOnlyPresencePct")),
         "n78": _deep_num(kpis.get("n78ShareNrOnly")),
         "n1": _deep_num((kpis.get("nrBandShares") or {}).get("n1")),
@@ -12411,7 +13205,19 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "qam64": _deep_num(mod.get("qam64Share")),
         "qam16": _deep_num(mod.get("qam16Share")),
         "qpsk": _deep_num(mod.get("qpskShare")),
+        "mcsNr": _split_stat("pdschMcsNr", "pdschMcs", fiveg_presence not in (None, 0.0)),
+        "mcsLte": _split_stat("pdschMcsLte", "pdschMcs", fiveg_presence in (None, 0.0)),
+        "qam256Nr": _split_share(mod_nr, mod, "qam256Share", fiveg_presence not in (None, 0.0)),
+        "qam64Nr": _split_share(mod_nr, mod, "qam64Share", fiveg_presence not in (None, 0.0)),
+        "qam16Nr": _split_share(mod_nr, mod, "qam16Share", fiveg_presence not in (None, 0.0)),
+        "qpskNr": _split_share(mod_nr, mod, "qpskShare", fiveg_presence not in (None, 0.0)),
+        "qam256Lte": _split_share(mod_lte, mod, "qam256Share", fiveg_presence in (None, 0.0)),
+        "qam64Lte": _split_share(mod_lte, mod, "qam64Share", fiveg_presence in (None, 0.0)),
+        "qam16Lte": _split_share(mod_lte, mod, "qam16Share", fiveg_presence in (None, 0.0)),
+        "qpskLte": _split_share(mod_lte, mod, "qpskShare", fiveg_presence in (None, 0.0)),
         "medianRank": stat("ri", "median"),
+        "medianRankNr": _split_stat("riNr", "ri", fiveg_presence not in (None, 0.0)),
+        "medianRankLte": _split_stat("riLte", "ri", fiveg_presence in (None, 0.0)),
         "ri1": ri1,
         "ri2": ri2,
         "riGe3": ri_ge3,
@@ -12442,6 +13248,9 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "pdschDl5gMbps": stat("pdsch5g", "average"),
         "nrThroughputContrib": _deep_num(kpis.get("nrThroughputContribPct")),
         "lteThroughputContrib": _deep_num(kpis.get("lteThroughputContribPct")),
+        "nrTrafficSharePct": _deep_num(kpis.get("nrTrafficSharePct")),
+        "lteTrafficSharePct": _deep_num(kpis.get("lteTrafficSharePct")),
+        "nrLtePdschSplitPct": _deep_num(kpis.get("nrLtePdschSplitPct")),
         # Diagnosis-confidence inputs (sample sizes behind the conclusions).
         "testCount": kpis.get("testCount"),
         "nrRfSamples": (kpis.get("rfNrLte") or {}).get("rsrpNrSamples"),
@@ -12485,6 +13294,8 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "endcDropRate": _deep_num(kpis.get("endcDropRate")),
         "tcpHandshake": stat("tcpHandshake", "median"),
         "lostPacket": stat("lostPacket", "average"),
+        "testServer": kpis.get("testServer"),
+        "testServerParityFlag": _deep_flag(kpis.get("testServerParityFlag")),
         "dlCompletion": _deep_num(dl_tr.get("avgCompletionPct")),
         "dlSuccess": _deep_num(dl_tr.get("successRate")),
         # Extended metrics for the Detailed Analysis (full-KPI surface).
@@ -12507,6 +13318,122 @@ def _deep_extract(kpis, transfer_lookup, operator):
         "rrcStateShares": kpis.get("rrcStateShares") or [],
         "servingTechnologyShares": kpis.get("servingTechnologyShares") or [],
     }
+    values.update({
+        "steadyStateMbps": _deep_num(_deep_first_present(kpis, "steadyStateMbps", "steadyStateDlMbps", "dlSteadyStateMbps")),
+        "dlByteThroughput": _deep_num(_deep_first_present(kpis, "dlAppRateMbps", "dlByteThroughputMbps")),
+        "dlP10": stat("dl", "p10"),
+        "dlP50": stat("dl", "median"),
+        "dlP90": stat("dl", "p90"),
+        "dlPeak": stat("dl", "max"),
+        "dlSessionDurationSec": _deep_num(kpis.get("dlSessionTimeS") or kpis.get("dlTransferTimeS")),
+        "steadyStateDurationSec": _deep_num(kpis.get("steadyStateDurationSec")),
+        "throughputSamples": _deep_num(kpis.get("throughputSamples") or stat("dl", "sampleCount")),
+        "byteVsCurveDeltaPct": _deep_num(kpis.get("byteVsCurveDeltaPct")),
+        "curveVsAuthoritativeDeltaPct": _deep_num(kpis.get("curveVsAuthoritativeDeltaPct")),
+        "slowStartDominatedFlag": _deep_flag(_deep_first_present(kpis, "slowStartDominated", "dlSlowStartDominated")),
+        "downloadTimeSec": _deep_num(kpis.get("dlTransferTimeS")),
+        "fileSizeMb": (
+            _deep_num(_deep_first_present(kpis, "fileSizeMb", "fileSizeMB"))
+            if _deep_first_present(kpis, "fileSizeMb", "fileSizeMB") is not None
+            else (
+                round(float(kpis.get("dlFileSizeBytes")) / 1_000_000.0, 3)
+                if _deep_num(kpis.get("dlFileSizeBytes")) is not None
+                else (
+                    round(float(kpis.get("dlBytesDl")) / 1_000_000.0, 3)
+                    if _deep_num(kpis.get("dlBytesDl")) is not None
+                    else None
+                )
+            )
+        ),
+        "timeToFirstByteMs": _deep_num(kpis.get("timeToFirstByteMs")),
+        "tcpRttMedian": stat("tcpRtt", "median"),
+        "tcpRetransmissionPct": stat("tcpRetransmission", "average"),
+        "endcDwellPct": values.get("fivegPresence"),
+        "routeNrPresencePct": _deep_num(kpis.get("nrRoutePresencePct") or kpis.get("nrPresencePct")),
+        "routeN78PresencePct": _deep_num(kpis.get("routeN78PresencePct") or kpis.get("n78ShareNrOnly")),
+        "nrActiveDlDwellPct": _deep_num(kpis.get("nrDwellPct") or kpis.get("nrPresencePct")),
+        "lteActiveDlDwellPct": _deep_num(kpis.get("ltePresencePct") if kpis.get("ltePresencePct") is not None else kpis.get("lteOnlyPresencePct")),
+        "n3": _deep_num((kpis.get("nrBandShares") or {}).get("n3")),
+        "n7": _deep_num((kpis.get("nrBandShares") or {}).get("n7")),
+        "rsrpLteP10": stat("rsrpLte", "p10"),
+        "rsrpLteP90": stat("rsrpLte", "p90"),
+        "rsrqLteP10": stat("rsrqLte", "p10"),
+        "rsrqLteP90": stat("rsrqLte", "p90"),
+        "sinrLteP10": stat("sinrLte", "p10"),
+        "sinrLteP90": stat("sinrLte", "p90"),
+        "rsrpNrP10": stat("rsrpNr", "p10"),
+        "rsrpNrP90": stat("rsrpNr", "p90"),
+        "rsrqNrP10": stat("rsrqNr", "p10"),
+        "rsrqNrP90": stat("rsrqNr", "p90"),
+        "sinrNrP10": stat("sinrNr", "p10"),
+        "sinrNrP90": stat("sinrNr", "p90"),
+        "rsrqTotal": _rat_med_avg("rsrqNr", "rsrqLte"),
+        "bestAvailableRsrp": max(
+            [v for v in (stat("rsrpNr", "median"), stat("rsrpLte", "median")) if _deep_num(v) is not None],
+            default=None,
+        ),
+        "bestAvailableSinr": max(
+            [v for v in (stat("sinrNr", "median"), stat("sinrLte", "median")) if _deep_num(v) is not None],
+            default=None,
+        ),
+        "bestAvailableRsrq": max(
+            [v for v in (stat("rsrqNr", "median"), stat("rsrqLte", "median")) if _deep_num(v) is not None],
+            default=None,
+        ),
+        "rfSampleCount": _deep_num((kpis.get("rfNrLte") or {}).get("rsrpNrSamples") or (kpis.get("rfNrLte") or {}).get("rsrpLteSamples")),
+        "mcsNrP10": stat("pdschMcsNr", "p10"),
+        "mcsNrP90": stat("pdschMcsNr", "p90"),
+        "mcsLteP10": stat("pdschMcsLte", "p10"),
+        "mcsLteP90": stat("pdschMcsLte", "p90"),
+        "nrActiveBwMhz": _deep_num(kpis.get("activeBandwidthMhz") or kpis.get("bwMHz") or stat("caTotalBwMhz", "average")),
+        "nrConfiguredBwMhz": _deep_num(kpis.get("nrConfiguredBwMhz")),
+        "nrBwpBwMhz": _deep_num(kpis.get("nrBwpBwMhz") or stat("caTotalBwMhz", "average")),
+        "nrActiveCarriers": _deep_num(kpis.get("nrActiveCarriers")),
+        "nrCaActiveShare": _deep_num(kpis.get("nrCaActiveShare")),
+        "nrScellCount": _deep_num(kpis.get("nrScellCount")),
+        "nrTotalActiveBandwidthMhz": _deep_num(kpis.get("nrTotalActiveBandwidthMhz") or kpis.get("activeBandwidthMhz")),
+        "n78ContinuousTimeSec": _deep_num(kpis.get("n78ContinuousTimeSec")),
+        "n78AvgRetentionSec": _deep_num(kpis.get("n78AvgRetentionSec")),
+        "n78DropCountDuringDl": _deep_num(kpis.get("n78DropCountDuringDl")),
+        "nrBandTransitionCount": _deep_num(kpis.get("nrBandTransitionCount")),
+        "lteServingBand": kpis.get("lteServingBand"),
+        "lteServingEarfcn": _deep_num(kpis.get("lteServingEarfcn")),
+        "lteServingPci": _deep_num(kpis.get("lteServingPci")),
+        "lteServingCellId": kpis.get("lteServingCellId"),
+        "nrServingBand": kpis.get("nrServingBand"),
+        "nrServingArfcn": _deep_num(kpis.get("nrServingArfcn")),
+        "nrServingPci": _deep_num(kpis.get("nrServingPci")),
+        "nrServingCellId": kpis.get("nrServingCellId"),
+        "schedulerYield": _deep_num(kpis.get("schedulerYield") or kpis.get("schedulerYieldMbpsPerPrbPct")),
+        "pdschScheduledTimePct": _deep_num(kpis.get("pdschScheduledTimePct") or stat("pdschSlotPct", "average")),
+        "dlGrantRate": _deep_num(kpis.get("dlGrantRate")),
+        "loadState": kpis.get("loadState"),
+        "macToAppRatioPct": _deep_num(kpis.get("macToAppRatioPct") or kpis.get("transportRatio")),
+        "rlcDlTotalMbps": stat("rlcDlTotal", "average"),
+        "rlcDlNrMbps": stat("rlcDlNr", "average"),
+        "rlcDlLteMbps": stat("rlcDlLte", "average"),
+        "rlcToAppRatioPct": (
+            round(stat("rlcDlTotal", "average") / stat("dl", "average") * 100.0, 1)
+            if stat("rlcDlTotal", "average") is not None and stat("dl", "average") not in (None, 0)
+            else None
+        ),
+        "nrBlerAbove10": _deep_num(kpis.get("blerAbove10Share")),
+        "pdschBlerLteP90": stat("pdschBlerLte", "p90"),
+        "lteBlerAbove10": _deep_num(kpis.get("pdschBlerLteAbove10Share")),
+        "nrHarqRetxPct": stat("macUlRetx", "average"),
+        "lteHarqRetxPct": stat("macUlRetxLte", "average"),
+        "ulThroughputAvg": stat("ul", "average"),
+        "confidenceScore": _deep_num(kpis.get("confidenceScore")),
+        "handoverCount": _deep_num(kpis.get("handoverCount")),
+        "servingCellChangesCount": _deep_num(kpis.get("servingCellChangesCount")),
+        "scgReleaseCountDuringDl": _deep_num(kpis.get("scgReleaseCountDuringDl") if kpis.get("scgReleaseCountDuringDl") is not None else (kpis.get("endcSecondaryNode") or {}).get("removals")),
+        "endcSetupTimeMs": _deep_num(kpis.get("endcSetupTimeMs")),
+        "invalidZeroPhyFlag": 1.0 if kpis.get("invalidZeroPhy") or kpis.get("invalidZeroPhyFlag") else None,
+        "prbConsistencyWarning": 1.0 if kpis.get("prbConsistencyWarning") else None,
+        "rfThroughputContradictionWarning": 1.0 if kpis.get("rfThroughputContradictionWarning") else None,
+        "bwScellContradictionWarning": 1.0 if kpis.get("bwScellContradictionWarning") else None,
+    })
+    return _deep_blank_nr_only_metrics(values)
 
 
 def _deep_fmt(value, ndigits=1):
@@ -12518,100 +13445,316 @@ def _deep_fmt(value, ndigits=1):
     return str(round(n, ndigits))
 
 
-def _deep_delta(iam, other, unit):
-    """Formatted delta IAM vs one competitor. unit in {'%','dB','pp',''}."""
+def _deep_delta(iam, other, delta_kind="", display_unit=""):
+    """Formatted delta IAM vs one competitor.
+
+    delta_kind is about comparison math: pct_delta for Mbps-like values, dB for RF,
+    pp for percentages, and abs for counts/latency/power.
+    """
     iam_n, other_n = _deep_num(iam), _deep_num(other)
     if iam_n is None or other_n is None:
         return ""
-    if unit == "%":
+    if delta_kind == "pct_delta":
         if other_n == 0:
             return ""
         d = (iam_n - other_n) / abs(other_n) * 100.0
         return f"{'+' if d >= 0 else ''}{round(d, 1)}%"
     d = iam_n - other_n
     sign = "+" if d >= 0 else ""
-    if unit == "dB":
+    if delta_kind == "dB":
         return f"{sign}{round(d, 1)} dB"
-    if unit == "pp":
+    if delta_kind == "pp":
         return f"{sign}{round(d, 1)} pp"
-    return f"{sign}{_deep_fmt(d)}"
+    unit_suffix = (
+        f" {display_unit}"
+        if display_unit and delta_kind == "abs" and display_unit not in ("count", "flag", "text", "score")
+        else ""
+    )
+    return f"{sign}{_deep_fmt(d)}{unit_suffix}"
 
 
-# KPI Benchmark table spec: (label, key, unit, higher_is_better, domain)
+def _deep_delta_kind_for_unit(unit: str) -> str:
+    unit_text = str(unit or "").strip()
+    if unit_text == "Mbps" or unit_text == "Mbps/PRB":
+        return "pct_delta"
+    if unit_text in ("dB", "dBm"):
+        return "dB"
+    if unit_text == "%":
+        return "pp"
+    return "abs"
+
+
+def _deep_kpi_spec(
+    label,
+    key,
+    category,
+    unit="",
+    higher=True,
+    diagnosis_use="context",
+    required=False,
+    compact=False,
+    delta_kind=None,
+):
+    return {
+        "label": label,
+        "key": key,
+        "category": category,
+        "unit": unit,
+        "higherIsBetter": bool(higher),
+        "diagnosisUse": diagnosis_use,
+        "requiredForRootCause": bool(required),
+        "compact": bool(compact),
+        "deltaKind": delta_kind or _deep_delta_kind_for_unit(unit),
+    }
+
+
+# Canonical KPI Benchmark table catalog. Missing keys are intentionally kept in the
+# detailed table as unavailable so audit/export users can see data holes explicitly.
 _DEEP_KPI_TABLE = [
-    ("DL Throughput (Mbps)",      "dlThroughput",  "%",  True,  "Throughput"),
-    ("PDSCH DL Avg (Mbps)",       "pdschDlAvg",    "%",  True,  "Throughput"),
-    ("MAC DL Total (Mbps)",       "macDlTotal",    "%",  True,  "Throughput by RAT"),
-    ("MAC DL NR/5G (Mbps)",       "macDl5g",       "%",  True,  "Throughput by RAT"),
-    ("MAC DL LTE (Mbps)",         "macDlLte",      "%",  True,  "Throughput by RAT"),
-    ("NR throughput contrib %",   "nrThroughputContrib", "pp", True,  "Throughput by RAT"),
-    ("LTE throughput contrib %",  "lteThroughputContrib","pp", True,  "Throughput by RAT"),
-    ("PDSCH DL NR/5G (Mbps)",     "pdschDl5gMbps", "%",  True,  "Throughput by RAT"),
-    ("PDSCH DL LTE (Mbps)",       "pdschDlLteMbps","%",  True,  "Throughput by RAT"),
-    ("LTE RSRP Median (dBm)",     "rsrpLte",       "dB", True,  "RF Quality (LTE)"),
-    ("LTE SINR Median (dB)",      "sinrLte",       "dB", True,  "RF Quality (LTE)"),
-    ("LTE RSRQ Median (dB)",      "rsrqLte",       "dB", True,  "RF Quality (LTE)"),
-    ("NR RSRP Median (dBm)",      "rsrpNr",        "dB", True,  "NR RF Quality"),
-    ("NR SINR Median (dB)",       "sinrNr",        "dB", True,  "NR RF Quality"),
-    ("NR RSRQ Median (dB)",       "rsrqNr",        "dB", True,  "NR RF Quality"),
-    ("NR WB CQI Median",          "cqi",           "",   True,  "NR RF Quality"),
-    ("RSRP Total (RAT-avg dBm)",  "rsrpTotal",     "dB", True,  "RF Quality (Total)"),
-    ("SINR Total (RAT-avg dB)",   "sinrTotal",     "dB", True,  "RF Quality (Total)"),
-    ("5G Presence %",             "fivegPresence", "pp", True,  "5G Presence"),
-    ("4G Only %",                 "fourgOnly",     "pp", False, "5G Presence"),
-    ("NR n78 share %",            "n78",           "pp", True,  "5G Presence"),
-    ("NR n28 share %",            "n28",           "pp", True,  "5G Presence"),
-    ("NR PDSCH MCS Median",       "mcs",           "",   True,  "NR Modulation / MCS"),
-    ("NR 256QAM share %",         "qam256",        "pp", True,  "NR Modulation / MCS"),
-    ("NR 64QAM share %",          "qam64",         "pp", True,  "NR Modulation / MCS"),
-    ("NR 16QAM share %",          "qam16",         "pp", False, "NR Modulation / MCS"),
-    ("NR QPSK share %",           "qpsk",          "pp", False, "NR Modulation / MCS"),
-    ("NR PDSCH Rank Median",      "medianRank",    "",   True,  "NR MIMO"),
-    ("NR RI1 share %",            "ri1",           "pp", False, "NR MIMO"),
-    ("NR RI2 share %",            "ri2",           "pp", True,  "NR MIMO"),
-    ("NR RI>=3 share %",          "riGe3",         "pp", True,  "NR MIMO"),
-    ("Avg # SCells (LTE CA)",     "scellsAvg",     "",   True,  "Carrier Aggregation"),
-    ("Max # SCells (LTE CA)",     "scellsMax",     "",   True,  "Carrier Aggregation"),
-    ("SCells >0 share %",         "scellsActive",  "pp", True,  "Carrier Aggregation"),
-    ("LTE CA active share %",     "caActive",      "pp", True,  "Carrier Aggregation"),
-    ("CA Total BW (MHz)",         "caTotalBwMhz",     "",   True,  "Carrier Aggregation"),
-    ("Primary BW (MHz)",          "primaryBwMhz",     "",   True,  "Carrier Aggregation"),
-    ("Secondary BW sum (MHz)",    "sumSecondaryBwMhz","",   True,  "Carrier Aggregation"),
-    ("NR MAC DL BLER Avg %",      "blerAvg",       "pp", False, "NR BLER / Retx"),
-    ("NR MAC DL BLER P90 %",      "blerP90",       "pp", False, "NR BLER / Retx"),
-    ("NR BLER >10% share %",      "blerAbove10",   "pp", False, "NR BLER / Retx"),
-    ("NR UL Retx Avg %",          "ulRetx",        "pp", False, "NR BLER / Retx"),
-    ("LTE PDSCH BLER Avg %",      "pdschBlerLte",     "pp", False, "LTE BLER / Retx"),
-    ("MAC DL Residual BLER %",    "macDlResidualBler","pp", False, "LTE BLER / Retx"),
-    ("PDCCH BLER est. %",         "pdcchBlerEst",     "pp", False, "LTE BLER / Retx"),
-    ("LTE UL Retx Avg %",         "ulRetxLte",        "pp", False, "LTE BLER / Retx"),
-    ("TCP Handshake Median (ms)", "tcpHandshake",          "",   False, "Accessibility"),
-    ("DL completion %",           "dlCompletion",          "pp", True,  "Accessibility"),
-    ("DL success %",              "dlSuccess",             "pp", True,  "Accessibility"),
-    ("Available NR PRBs",         "availableBandwidthPrbs","",   True,  "Scheduler & PRB Allocation"),
-    ("Allocated PRBs (avg)",      "prbsAvg",               "",   True,  "Scheduler & PRB Allocation"),
-    ("Allocation ratio %",        "resourceAllocationIndex","pp", True, "Scheduler & PRB Allocation"),
-    ("PDSCH slot %",              "pdschSlotPct",          "pp", True,  "Scheduler & PRB Allocation"),
-    ("PRB efficiency (Mbps/PRB)", "prbEfficiency",         "",   True,  "Scheduler & PRB Allocation"),
-    ("Scheduled 5G avg (Mbps)",   "scheduled5gAvg",        "%",  True,  "Scheduler & PRB Allocation"),
-    ("DL PRB Utilization %",      "dlPrbUtilPct",          "pp", True,  "Scheduler & PRB Allocation"),
-    ("Avg DL PRBs",               "prbsAvgDl",             "",   True,  "Scheduler & PRB Allocation"),
-    ("Sched. bitrate/PRB",        "schBitratePerPrb",      "",   True,  "Scheduler & PRB Allocation"),
-    ("WB CQI CW0 Median",         "wbCqi0",                "",   True,  "CQI (per codeword)"),
-    ("WB CQI CW1 Median",         "wbCqi1",                "",   True,  "CQI (per codeword)"),
-    ("UL TX Power Avg (dBm)",     "txPower",               "",   False, "UL Power"),
-    ("PUSCH TX Power Avg (dBm)",  "puschTxPower",          "",   False, "UL Power"),
-    ("HO U-plane Interruption (ms)", "hoUplaneInterruptionMs", "", False, "Mobility"),
-    ("SgNB Additions",            "sgnbAdditions",          "",   True,  "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Add Success",          "sgnbAdditionSuccess",    "",   True,  "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Add Failure",          "sgnbAdditionFailure",    "",   False, "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Add Success %",        "sgnbAdditionSuccessRate","pp", True,  "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Removals",             "sgnbRemovals",           "",   True,  "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Removal Success",      "sgnbRemovalSuccess",     "",   True,  "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Removal Failure",      "sgnbRemovalFailure",     "",   False, "EN-DC Secondary Node (SgNB)"),
-    ("SgNB Removal Success %",    "sgnbRemovalSuccessRate", "pp", True,  "EN-DC Secondary Node (SgNB)"),
-    ("PPP DL Avg (Mbps)",         "pppRateAvg",             "%",  True,  "PPP Throughput"),
-    ("PPP DL Peak (Mbps)",        "pppRatePeak",            "%",  True,  "PPP Throughput"),
+    _deep_kpi_spec("DL Throughput steady avg Mbps", "steadyStateMbps", "DL service and throughput", "Mbps", True, "root_cause", True, True),
+    _deep_kpi_spec("DL Throughput byte avg Mbps", "dlByteThroughput", "DL service and throughput", "Mbps", True, "root_cause", True, True),
+    _deep_kpi_spec("DL Throughput app avg Mbps", "dlThroughput", "DL service and throughput", "Mbps", True, "root_cause", True, True),
+    _deep_kpi_spec("DL Throughput P10 Mbps", "dlP10", "DL service and throughput", "Mbps", True, "evidence"),
+    _deep_kpi_spec("DL Throughput P50 Mbps", "dlP50", "DL service and throughput", "Mbps", True, "evidence", False, True),
+    _deep_kpi_spec("DL Throughput P90 Mbps", "dlP90", "DL service and throughput", "Mbps", True, "evidence"),
+    _deep_kpi_spec("DL Throughput peak Mbps", "dlPeak", "DL service and throughput", "Mbps", True, "evidence", False, True),
+    _deep_kpi_spec("DL success %", "dlSuccess", "DL service and throughput", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("DL completion %", "dlCompletion", "DL service and throughput", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("DL session duration sec", "dlSessionDurationSec", "DL service and throughput", "sec", True, "confidence"),
+    _deep_kpi_spec("Steady-state duration sec", "steadyStateDurationSec", "DL service and throughput", "sec", True, "confidence"),
+    _deep_kpi_spec("Throughput sample count", "throughputSamples", "DL service and throughput", "count", True, "confidence", False, True),
+    _deep_kpi_spec("Byte-vs-curve delta %", "byteVsCurveDeltaPct", "DL service and throughput", "%", False, "warning", False, True),
+    _deep_kpi_spec("Curve-vs-authoritative delta %", "curveVsAuthoritativeDeltaPct", "DL service and throughput", "%", False, "warning"),
+    _deep_kpi_spec("Slow-start dominated flag", "slowStartDominatedFlag", "DL service and throughput", "flag", False, "confidence", False, True),
+
+    _deep_kpi_spec("PPP DL Avg Mbps", "pppRateAvg", "Application / TCP / PPP", "Mbps", True, "evidence"),
+    _deep_kpi_spec("PPP DL Peak Mbps", "pppRatePeak", "Application / TCP / PPP", "Mbps", True, "evidence"),
+    _deep_kpi_spec("TCP Handshake Median ms", "tcpHandshake", "Application / TCP / PPP", "ms", False, "root_cause", True, True),
+    _deep_kpi_spec("TCP RTT Median ms", "tcpRttMedian", "Application / TCP / PPP", "ms", False, "root_cause"),
+    _deep_kpi_spec("TCP retransmission %", "tcpRetransmissionPct", "Application / TCP / PPP", "%", False, "root_cause"),
+    _deep_kpi_spec("Packet loss %", "lostPacket", "Application / TCP / PPP", "%", False, "root_cause", False, True),
+    _deep_kpi_spec("Time to first byte ms", "timeToFirstByteMs", "Application / TCP / PPP", "ms", False, "root_cause"),
+    _deep_kpi_spec("Server IP / test server", "testServer", "Application / TCP / PPP", "text", True, "context"),
+    _deep_kpi_spec("File size MB", "fileSizeMb", "Application / TCP / PPP", "MB", True, "context"),
+    _deep_kpi_spec("Download time sec", "downloadTimeSec", "Application / TCP / PPP", "sec", False, "evidence"),
+
+    _deep_kpi_spec("5G Presence %", "fivegPresence", "RAT contribution and layer split", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("4G Only %", "fourgOnly", "RAT contribution and layer split", "%", False, "root_cause", True, True),
+    _deep_kpi_spec("NR throughput contribution %", "nrThroughputContrib", "RAT contribution and layer split", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE throughput contribution %", "lteThroughputContrib", "RAT contribution and layer split", "%", True, "evidence"),
+    _deep_kpi_spec("NR / LTE PDSCH split %", "nrLtePdschSplitPct", "RAT contribution and layer split", "%", True, "evidence"),
+    _deep_kpi_spec("NR traffic share %", "nrTrafficSharePct", "RAT contribution and layer split", "%", True, "evidence"),
+    _deep_kpi_spec("LTE traffic share %", "lteTrafficSharePct", "RAT contribution and layer split", "%", True, "evidence"),
+    _deep_kpi_spec("EN-DC dwell %", "endcDwellPct", "RAT contribution and layer split", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("Route NR presence %", "routeNrPresencePct", "RAT contribution and layer split", "%", True, "context"),
+    _deep_kpi_spec("Route n78 presence %", "routeN78PresencePct", "RAT contribution and layer split", "%", True, "context"),
+    _deep_kpi_spec("NR active-download dwell %", "nrActiveDlDwellPct", "RAT contribution and layer split", "%", True, "root_cause"),
+    _deep_kpi_spec("LTE active-download dwell %", "lteActiveDlDwellPct", "RAT contribution and layer split", "%", True, "evidence"),
+
+    _deep_kpi_spec("NR n78 share %", "n78", "NR band and C-Band", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("NR n28 share %", "n28", "NR band and C-Band", "%", True, "evidence"),
+    _deep_kpi_spec("NR n1 share %", "n1", "NR band and C-Band", "%", True, "evidence"),
+    _deep_kpi_spec("NR n3 share %", "n3", "NR band and C-Band", "%", True, "evidence"),
+    _deep_kpi_spec("NR n7 share %", "n7", "NR band and C-Band", "%", True, "evidence"),
+    _deep_kpi_spec("NR primary band", "nrPrimaryBand", "NR band and C-Band", "text", True, "context"),
+    _deep_kpi_spec("NR band distribution", "nrBandDistribution", "NR band and C-Band", "text", True, "context"),
+    _deep_kpi_spec("n78 continuous time sec", "n78ContinuousTimeSec", "NR band and C-Band", "sec", True, "root_cause"),
+    _deep_kpi_spec("n78 average retention duration sec", "n78AvgRetentionSec", "NR band and C-Band", "sec", True, "root_cause"),
+    _deep_kpi_spec("n78 drop count during DL", "n78DropCountDuringDl", "NR band and C-Band", "count", False, "root_cause"),
+    _deep_kpi_spec("NR band transition count", "nrBandTransitionCount", "NR band and C-Band", "count", False, "evidence"),
+
+    _deep_kpi_spec("LTE serving band", "lteServingBand", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("LTE serving EARFCN", "lteServingEarfcn", "LTE serving layer", "count", True, "context"),
+    _deep_kpi_spec("LTE serving PCI", "lteServingPci", "LTE serving layer", "count", True, "context"),
+    _deep_kpi_spec("LTE serving cell ID / eNB / sector", "lteServingCellId", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("LTE anchor band for EN-DC", "lteAnchorBand", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("LTE anchor PCI", "lteAnchorPci", "LTE serving layer", "count", True, "context"),
+    _deep_kpi_spec("LTE anchor cell ID", "lteAnchorCellId", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("NR serving band", "nrServingBand", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("NR serving ARFCN", "nrServingArfcn", "LTE serving layer", "count", True, "context"),
+    _deep_kpi_spec("NR serving PCI", "nrServingPci", "LTE serving layer", "count", True, "context"),
+    _deep_kpi_spec("NR serving cell ID", "nrServingCellId", "LTE serving layer", "text", True, "context"),
+    _deep_kpi_spec("Time on LTE serving cell %", "timeOnLteServingCellPct", "LTE serving layer", "%", True, "evidence"),
+    _deep_kpi_spec("Serving cell changes count", "servingCellChangesCount", "LTE serving layer", "count", False, "evidence"),
+    _deep_kpi_spec("Handover count", "handoverCount", "LTE serving layer", "count", False, "evidence"),
+
+    _deep_kpi_spec("LTE RSRP median dBm", "rsrpLte", "LTE RF", "dBm", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE RSRP P10 dBm", "rsrpLteP10", "LTE RF", "dBm", True, "root_cause"),
+    _deep_kpi_spec("LTE RSRP P90 dBm", "rsrpLteP90", "LTE RF", "dBm", True, "evidence"),
+    _deep_kpi_spec("LTE RSRQ median dB", "rsrqLte", "LTE RF", "dB", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE RSRQ P10 dB", "rsrqLteP10", "LTE RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("LTE RSRQ P90 dB", "rsrqLteP90", "LTE RF", "dB", True, "evidence"),
+    _deep_kpi_spec("LTE SINR median dB", "sinrLte", "LTE RF", "dB", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE SINR P10 dB", "sinrLteP10", "LTE RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("LTE SINR P90 dB", "sinrLteP90", "LTE RF", "dB", True, "evidence"),
+    _deep_kpi_spec("LTE CQI median", "cqiLte", "LTE RF", "", True, "root_cause"),
+    _deep_kpi_spec("WB CQI CW0 median", "wbCqi0", "LTE RF", "", True, "evidence"),
+    _deep_kpi_spec("WB CQI CW1 median", "wbCqi1", "LTE RF", "", True, "evidence"),
+
+    _deep_kpi_spec("NR RSRP median dBm", "rsrpNr", "NR RF", "dBm", True, "root_cause", True, True),
+    _deep_kpi_spec("NR RSRP P10 dBm", "rsrpNrP10", "NR RF", "dBm", True, "root_cause"),
+    _deep_kpi_spec("NR RSRP P90 dBm", "rsrpNrP90", "NR RF", "dBm", True, "evidence"),
+    _deep_kpi_spec("NR RSRQ median dB", "rsrqNr", "NR RF", "dB", True, "root_cause", True, True),
+    _deep_kpi_spec("NR RSRQ P10 dB", "rsrqNrP10", "NR RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("NR RSRQ P90 dB", "rsrqNrP90", "NR RF", "dB", True, "evidence"),
+    _deep_kpi_spec("NR SINR median dB", "sinrNr", "NR RF", "dB", True, "root_cause", True, True),
+    _deep_kpi_spec("NR SINR P10 dB", "sinrNrP10", "NR RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("NR SINR P90 dB", "sinrNrP90", "NR RF", "dB", True, "evidence"),
+    _deep_kpi_spec("NR WB CQI median", "cqi", "NR RF", "", True, "root_cause", True, True),
+    _deep_kpi_spec("CSI-RSRP median if available", "csiRsrpMedian", "NR RF", "dBm", True, "evidence"),
+    _deep_kpi_spec("CSI-SINR median if available", "csiSinrMedian", "NR RF", "dB", True, "evidence"),
+    _deep_kpi_spec("Best beam RSRP", "bestBeamRsrp", "NR RF", "dBm", True, "evidence"),
+    _deep_kpi_spec("Beam switch count", "beamSwitchCount", "NR RF", "count", False, "evidence"),
+
+    _deep_kpi_spec("RSRP Total RAT-avg dBm", "rsrpTotal", "Total / best available RF", "dBm", True, "evidence"),
+    _deep_kpi_spec("SINR Total RAT-avg dB", "sinrTotal", "Total / best available RF", "dB", True, "evidence"),
+    _deep_kpi_spec("RSRQ Total RAT-avg dB", "rsrqTotal", "Total / best available RF", "dB", True, "evidence"),
+    _deep_kpi_spec("Best available RSRP dBm", "bestAvailableRsrp", "Total / best available RF", "dBm", True, "root_cause"),
+    _deep_kpi_spec("Best available SINR dB", "bestAvailableSinr", "Total / best available RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("Best available RSRQ dB", "bestAvailableRsrq", "Total / best available RF", "dB", True, "root_cause"),
+    _deep_kpi_spec("RF sample count", "rfSampleCount", "Total / best available RF", "count", True, "confidence"),
+
+    _deep_kpi_spec("LTE PDSCH MCS median", "mcsLte", "LTE modulation / MCS / MIMO", "", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE PDSCH MCS P10", "mcsLteP10", "LTE modulation / MCS / MIMO", "", True, "root_cause"),
+    _deep_kpi_spec("LTE PDSCH MCS P90", "mcsLteP90", "LTE modulation / MCS / MIMO", "", True, "evidence"),
+    _deep_kpi_spec("LTE 256QAM share %", "qam256Lte", "LTE modulation / MCS / MIMO", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("LTE 64QAM share %", "qam64Lte", "LTE modulation / MCS / MIMO", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("LTE 16QAM share %", "qam16Lte", "LTE modulation / MCS / MIMO", "%", False, "evidence"),
+    _deep_kpi_spec("LTE QPSK share %", "qpskLte", "LTE modulation / MCS / MIMO", "%", False, "evidence"),
+    _deep_kpi_spec("LTE PDSCH rank median", "medianRankLte", "LTE modulation / MCS / MIMO", "", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE RI1 share %", "ri1Lte", "LTE modulation / MCS / MIMO", "%", False, "root_cause"),
+    _deep_kpi_spec("LTE RI2 share %", "ri2Lte", "LTE modulation / MCS / MIMO", "%", True, "root_cause"),
+    _deep_kpi_spec("LTE RI>=3 share %", "riGe3Lte", "LTE modulation / MCS / MIMO", "%", True, "root_cause"),
+
+    _deep_kpi_spec("NR PDSCH MCS median", "mcsNr", "NR modulation / MCS / MIMO", "", True, "root_cause", True, True),
+    _deep_kpi_spec("NR PDSCH MCS P10", "mcsNrP10", "NR modulation / MCS / MIMO", "", True, "root_cause"),
+    _deep_kpi_spec("NR PDSCH MCS P90", "mcsNrP90", "NR modulation / MCS / MIMO", "", True, "evidence"),
+    _deep_kpi_spec("NR 256QAM share %", "qam256Nr", "NR modulation / MCS / MIMO", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("NR 64QAM share %", "qam64Nr", "NR modulation / MCS / MIMO", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("NR 16QAM share %", "qam16Nr", "NR modulation / MCS / MIMO", "%", False, "evidence"),
+    _deep_kpi_spec("NR QPSK share %", "qpskNr", "NR modulation / MCS / MIMO", "%", False, "evidence"),
+    _deep_kpi_spec("NR PDSCH rank median", "medianRankNr", "NR modulation / MCS / MIMO", "", True, "root_cause", True, True),
+    _deep_kpi_spec("NR RI1 share %", "ri1", "NR modulation / MCS / MIMO", "%", False, "root_cause"),
+    _deep_kpi_spec("NR RI2 share %", "ri2", "NR modulation / MCS / MIMO", "%", True, "root_cause"),
+    _deep_kpi_spec("NR RI>=3 share %", "riGe3", "NR modulation / MCS / MIMO", "%", True, "root_cause"),
+
+    _deep_kpi_spec("Avg # SCells LTE CA", "scellsAvg", "LTE CA / bandwidth", "count", True, "root_cause", False, True),
+    _deep_kpi_spec("Max # SCells LTE CA", "scellsMax", "LTE CA / bandwidth", "count", True, "root_cause"),
+    _deep_kpi_spec("SCells >0 share %", "scellsActive", "LTE CA / bandwidth", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("LTE CA active share %", "caActive", "LTE CA / bandwidth", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("CA total BW MHz", "caTotalBwMhz", "LTE CA / bandwidth", "MHz", True, "root_cause"),
+    _deep_kpi_spec("Primary BW MHz", "primaryBwMhz", "LTE CA / bandwidth", "MHz", True, "evidence"),
+    _deep_kpi_spec("Secondary BW sum MHz", "sumSecondaryBwMhz", "LTE CA / bandwidth", "MHz", True, "evidence"),
+    _deep_kpi_spec("Number of active LTE carriers", "activeLteCarriers", "LTE CA / bandwidth", "count", True, "root_cause"),
+    _deep_kpi_spec("LTE CA combo", "lteCaCombo", "LTE CA / bandwidth", "text", True, "context"),
+    _deep_kpi_spec("LTE configured bandwidth MHz", "lteConfiguredBandwidthMhz", "LTE CA / bandwidth", "MHz", True, "root_cause"),
+
+    _deep_kpi_spec("NR active BW MHz", "nrActiveBwMhz", "NR bandwidth / NR-CA / BWP", "MHz", True, "root_cause", True, True),
+    _deep_kpi_spec("NR configured BW MHz", "nrConfiguredBwMhz", "NR bandwidth / NR-CA / BWP", "MHz", True, "root_cause"),
+    _deep_kpi_spec("NR BWP BW MHz", "nrBwpBwMhz", "NR bandwidth / NR-CA / BWP", "MHz", True, "root_cause"),
+    _deep_kpi_spec("NR number of active carriers", "nrActiveCarriers", "NR bandwidth / NR-CA / BWP", "count", True, "root_cause"),
+    _deep_kpi_spec("NR-CA active share %", "nrCaActiveShare", "NR bandwidth / NR-CA / BWP", "%", True, "root_cause"),
+    _deep_kpi_spec("NR SCell count", "nrScellCount", "NR bandwidth / NR-CA / BWP", "count", True, "root_cause"),
+    _deep_kpi_spec("NR total active bandwidth MHz", "nrTotalActiveBandwidthMhz", "NR bandwidth / NR-CA / BWP", "MHz", True, "root_cause"),
+
+    _deep_kpi_spec("Available NR PRBs", "availableBandwidthPrbs", "PRB / scheduler / allocation", "count", True, "root_cause", True, True),
+    _deep_kpi_spec("Allocated PRBs avg", "prbsAvg", "PRB / scheduler / allocation", "count", True, "root_cause", True, True),
+    _deep_kpi_spec("Allocation ratio %", "resourceAllocationIndex", "PRB / scheduler / allocation", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("PDSCH slot %", "pdschSlotPct", "PRB / scheduler / allocation", "%", True, "root_cause", True, True),
+    _deep_kpi_spec("PRB efficiency Mbps/PRB", "prbEfficiency", "PRB / scheduler / allocation", "Mbps/PRB", True, "root_cause", True, True),
+    _deep_kpi_spec("Scheduled 5G avg Mbps", "scheduled5gAvg", "PRB / scheduler / allocation", "Mbps", True, "root_cause", False, True),
+    _deep_kpi_spec("DL PRB Utilization %", "dlPrbUtilPct", "PRB / scheduler / allocation", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("LTE DL PRB Utilization %", "lteDlPrbUtilPct", "PRB / scheduler / allocation", "%", True, "root_cause"),
+    _deep_kpi_spec("NR DL PRB Utilization %", "nrDlPrbUtilPct", "PRB / scheduler / allocation", "%", True, "root_cause"),
+    _deep_kpi_spec("Avg DL PRBs", "prbsAvgDl", "PRB / scheduler / allocation", "count", True, "evidence"),
+    _deep_kpi_spec("LTE Avg DL PRBs", "lteAvgDlPrbs", "PRB / scheduler / allocation", "count", True, "evidence"),
+    _deep_kpi_spec("NR Avg DL PRBs", "nrAvgDlPrbs", "PRB / scheduler / allocation", "count", True, "evidence"),
+    _deep_kpi_spec("Scheduled bitrate/PRB", "schBitratePerPrb", "PRB / scheduler / allocation", "", True, "evidence"),
+    _deep_kpi_spec("Scheduler yield", "schedulerYield", "PRB / scheduler / allocation", "", True, "root_cause", False, True),
+    _deep_kpi_spec("PDSCH scheduled time %", "pdschScheduledTimePct", "PRB / scheduler / allocation", "%", True, "evidence"),
+    _deep_kpi_spec("DL grant rate", "dlGrantRate", "PRB / scheduler / allocation", "count", True, "evidence"),
+    _deep_kpi_spec("Load state", "loadState", "PRB / scheduler / allocation", "text", True, "context", False, True),
+
+    _deep_kpi_spec("PDSCH DL Avg Mbps", "pdschDlAvg", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause", False, True),
+    _deep_kpi_spec("PDSCH DL NR/5G Mbps", "pdschDl5gMbps", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause"),
+    _deep_kpi_spec("PDSCH DL LTE Mbps", "pdschDlLteMbps", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause"),
+    _deep_kpi_spec("MAC DL Total Mbps", "macDlTotal", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause", False, True),
+    _deep_kpi_spec("MAC DL NR/5G Mbps", "macDl5g", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause"),
+    _deep_kpi_spec("MAC DL LTE Mbps", "macDlLte", "MAC / RLC / PDSCH throughput", "Mbps", True, "root_cause"),
+    _deep_kpi_spec("RLC DL Total Mbps", "rlcDlTotalMbps", "MAC / RLC / PDSCH throughput", "Mbps", True, "evidence"),
+    _deep_kpi_spec("RLC DL NR/5G Mbps", "rlcDlNrMbps", "MAC / RLC / PDSCH throughput", "Mbps", True, "evidence"),
+    _deep_kpi_spec("RLC DL LTE Mbps", "rlcDlLteMbps", "MAC / RLC / PDSCH throughput", "Mbps", True, "evidence"),
+    _deep_kpi_spec("MAC-to-App ratio %", "macToAppRatioPct", "MAC / RLC / PDSCH throughput", "%", True, "warning"),
+    _deep_kpi_spec("RLC-to-App ratio %", "rlcToAppRatioPct", "MAC / RLC / PDSCH throughput", "%", True, "warning"),
+
+    _deep_kpi_spec("NR MAC DL BLER Avg %", "blerAvg", "BLER / retransmission", "%", False, "root_cause", True, True),
+    _deep_kpi_spec("NR MAC DL BLER P90 %", "blerP90", "BLER / retransmission", "%", False, "root_cause", False, True),
+    _deep_kpi_spec("NR BLER >10% share %", "blerAbove10", "BLER / retransmission", "%", False, "root_cause", False, True),
+    _deep_kpi_spec("LTE PDSCH BLER Avg %", "pdschBlerLte", "BLER / retransmission", "%", False, "root_cause", False, True),
+    _deep_kpi_spec("LTE PDSCH BLER P90 %", "pdschBlerLteP90", "BLER / retransmission", "%", False, "root_cause"),
+    _deep_kpi_spec("LTE BLER >10% share %", "lteBlerAbove10", "BLER / retransmission", "%", False, "root_cause"),
+    _deep_kpi_spec("MAC DL Residual BLER %", "macDlResidualBler", "BLER / retransmission", "%", False, "evidence"),
+    _deep_kpi_spec("PDCCH BLER estimated %", "pdcchBlerEst", "BLER / retransmission", "%", False, "evidence"),
+    _deep_kpi_spec("LTE HARQ retransmission %", "lteHarqRetxPct", "BLER / retransmission", "%", False, "root_cause"),
+    _deep_kpi_spec("NR HARQ retransmission %", "nrHarqRetxPct", "BLER / retransmission", "%", False, "root_cause"),
+    _deep_kpi_spec("LTE UL Retx Avg %", "ulRetxLte", "BLER / retransmission", "%", False, "evidence"),
+    _deep_kpi_spec("NR UL Retx Avg %", "ulRetx", "BLER / retransmission", "%", False, "evidence"),
+
+    _deep_kpi_spec("UL TX Power Avg dBm", "txPower", "UL / power", "dBm", False, "evidence"),
+    _deep_kpi_spec("PUSCH TX Power Avg dBm", "puschTxPower", "UL / power", "dBm", False, "evidence"),
+    _deep_kpi_spec("LTE PUSCH TX Power Avg dBm", "ltePuschTxPower", "UL / power", "dBm", False, "evidence"),
+    _deep_kpi_spec("NR PUSCH TX Power Avg dBm", "nrPuschTxPower", "UL / power", "dBm", False, "evidence"),
+    _deep_kpi_spec("UL throughput avg Mbps if available", "ulThroughputAvg", "UL / power", "Mbps", True, "evidence"),
+    _deep_kpi_spec("UL interference indicator if available", "ulInterferenceIndicator", "UL / power", "text", False, "evidence"),
+
+    _deep_kpi_spec("SgNB Additions", "sgnbAdditions", "EN-DC / SgNB events", "count", True, "evidence"),
+    _deep_kpi_spec("SgNB Add Success", "sgnbAdditionSuccess", "EN-DC / SgNB events", "count", True, "evidence"),
+    _deep_kpi_spec("SgNB Add Failure", "sgnbAdditionFailure", "EN-DC / SgNB events", "count", False, "root_cause"),
+    _deep_kpi_spec("SgNB Add Success %", "sgnbAdditionSuccessRate", "EN-DC / SgNB events", "%", True, "root_cause", False, True),
+    _deep_kpi_spec("SgNB Removals", "sgnbRemovals", "EN-DC / SgNB events", "count", False, "evidence"),
+    _deep_kpi_spec("SgNB Removal Success", "sgnbRemovalSuccess", "EN-DC / SgNB events", "count", True, "evidence"),
+    _deep_kpi_spec("SgNB Removal Failure", "sgnbRemovalFailure", "EN-DC / SgNB events", "count", False, "root_cause"),
+    _deep_kpi_spec("SgNB Removal Success %", "sgnbRemovalSuccessRate", "EN-DC / SgNB events", "%", True, "root_cause"),
+    _deep_kpi_spec("SCG failure count", "scgFailureCount", "EN-DC / SgNB events", "count", False, "root_cause"),
+    _deep_kpi_spec("SCG release count during DL", "scgReleaseCountDuringDl", "EN-DC / SgNB events", "count", False, "root_cause"),
+    _deep_kpi_spec("NR drop count during DL", "nrDropCountDuringDl", "EN-DC / SgNB events", "count", False, "root_cause", False, True),
+    _deep_kpi_spec("EN-DC setup time ms", "endcSetupTimeMs", "EN-DC / SgNB events", "ms", False, "root_cause"),
+
+    _deep_kpi_spec("HO U-plane interruption ms", "hoUplaneInterruptionMs", "Mobility / interruption", "ms", False, "root_cause"),
+    _deep_kpi_spec("Handover count", "handoverCount", "Mobility / interruption", "count", False, "evidence"),
+    _deep_kpi_spec("Handover success %", "handoverSuccessPct", "Mobility / interruption", "%", True, "root_cause"),
+    _deep_kpi_spec("Handover failure count", "handoverFailureCount", "Mobility / interruption", "count", False, "root_cause"),
+    _deep_kpi_spec("Ping-pong count", "pingPongCount", "Mobility / interruption", "count", False, "root_cause"),
+    _deep_kpi_spec("Serving cell changes count", "servingCellChangesCount", "Mobility / interruption", "count", False, "evidence"),
+    _deep_kpi_spec("NR SCG change count", "nrScgChangeCount", "Mobility / interruption", "count", False, "root_cause"),
+    _deep_kpi_spec("Time on best server %", "timeOnBestServerPct", "Mobility / interruption", "%", True, "context"),
+    _deep_kpi_spec("Neighbor better than serving share %", "neighborBetterThanServingSharePct", "Mobility / interruption", "%", False, "root_cause"),
+
+    _deep_kpi_spec("DL centroid latitude", "dlCentroidLat", "Location / comparability", "", True, "context"),
+    _deep_kpi_spec("DL centroid longitude", "dlCentroidLon", "Location / comparability", "", True, "context"),
+    _deep_kpi_spec("Distance between operator DL centroids m", "dlCentroidDistanceM", "Location / comparability", "m", False, "confidence"),
+    _deep_kpi_spec("Same-location validity flag", "sameLocationValidityFlag", "Location / comparability", "flag", True, "confidence", False, True),
+    _deep_kpi_spec("DT type: Static / Mobility / Event / Indoor / Auto", "dtType", "Location / comparability", "text", True, "context"),
+    _deep_kpi_spec("Device model", "deviceModel", "Location / comparability", "text", True, "confidence", False, True),
+    _deep_kpi_spec("Chipset", "chipset", "Location / comparability", "text", True, "confidence"),
+    _deep_kpi_spec("Device parity flag", "deviceParityFlag", "Location / comparability", "flag", True, "confidence", False, True),
+    _deep_kpi_spec("Test server parity flag", "testServerParityFlag", "Location / comparability", "flag", True, "confidence"),
+    _deep_kpi_spec("Route ID / DT index", "routeIdDtIndex", "Location / comparability", "text", True, "context"),
+    _deep_kpi_spec("Number of DTs combined", "numberOfDtsCombined", "Location / comparability", "count", True, "confidence", False, True),
+
+    _deep_kpi_spec("KPI availability flag per category", "kpiAvailabilityByCategory", "Data quality / availability", "text", True, "confidence"),
+    _deep_kpi_spec("PHY metrics unavailable flag", "phyMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning", False, True),
+    _deep_kpi_spec("RF metrics unavailable flag", "rfMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning"),
+    _deep_kpi_spec("CA metrics unavailable flag", "caMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning"),
+    _deep_kpi_spec("PRB metrics unavailable flag", "prbMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning", False, True),
+    _deep_kpi_spec("BLER metrics unavailable flag", "blerMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning"),
+    _deep_kpi_spec("TCP metrics unavailable flag", "tcpMetricsUnavailableFlag", "Data quality / availability", "flag", False, "warning"),
+    _deep_kpi_spec("Invalid zero PHY flag", "invalidZeroPhyFlag", "Data quality / availability", "flag", False, "warning", False, True),
+    _deep_kpi_spec("PRB consistency warning", "prbConsistencyWarning", "Data quality / availability", "flag", False, "warning", False, True),
+    _deep_kpi_spec("RF-throughput contradiction warning", "rfThroughputContradictionWarning", "Data quality / availability", "flag", False, "warning", False, True),
+    _deep_kpi_spec("BW/SCell contradiction warning", "bwScellContradictionWarning", "Data quality / availability", "flag", False, "warning"),
+    _deep_kpi_spec("Confidence score", "confidenceScore", "Data quality / availability", "score", True, "confidence", False, True),
+    _deep_kpi_spec("Confidence reasons", "confidenceReasons", "Data quality / availability", "text", True, "confidence"),
 ]
 
 
@@ -12643,15 +13786,32 @@ _SCHED_INTERP = {
 }
 
 
-def _deep_kpi_interpretation(label, iam, orange, inwi, higher):
+def _deep_kpi_interpretation(label, iam, orange, inwi, higher, iam_values=None):
     """Short rule-based interpretation per KPI row (best-effort, never raises)."""
     iam_n = _deep_num(iam)
     comps = {"Orange": _deep_num(orange), "INWI": _deep_num(inwi)}
     comp_vals = [v for v in comps.values() if v is not None]
     if iam_n is None:
-        is_nr_metric = label.startswith("NR ") or label.startswith("Available NR") or label.startswith("PDSCH slot") or label.startswith("Allocation ratio") or label.startswith("PRB eff") or label.startswith("Scheduled 5G")
+        label_text = str(label or "")
+        is_nr_metric = (
+            label_text.startswith("NR ")
+            or label_text.startswith("Available NR")
+            or label_text.startswith("n78 ")
+            or label_text.startswith("PDSCH slot")
+            or label_text.startswith("Allocation ratio")
+            or label_text.startswith("PRB eff")
+            or label_text.startswith("Scheduled 5G")
+        )
         if is_nr_metric:
+            iam_5g = _deep_num((iam_values or {}).get("fivegPresence"))
+            if iam_5g is not None and iam_5g > 0:
+                return "Métrique NR — source absente ou trop éparse dans ce scope."
             return "Métrique NR — non disponible (IAM en LTE only pour ce DT)."
+        is_lte_metric = label_text.startswith("LTE ") and (
+            "QAM" in label_text or "PDSCH MCS" in label_text or "PDSCH rank" in label_text
+        )
+        if is_lte_metric:
+            return "Métrique LTE — non disponible dans le scope courant."
         return "IAM value not available for this KPI in the current scope."
     if not comp_vals:
         return "No competitor reference available for this KPI."
@@ -12709,23 +13869,109 @@ def _deep_kpi_severity(iam_v, or_v, in_v, higher: bool) -> str:
 
 
 def _benchmark_deep_kpi_rows(iam, orange, inwi):
+    def row_value(value, unit):
+        if str(unit or "") == "text":
+            return value if value not in (None, "") else None
+        return _deep_num(value)
+
     rows = []
-    for entry in _DEEP_KPI_TABLE:
-        label, key, unit, higher = entry[0], entry[1], entry[2], entry[3]
-        domain = entry[4] if len(entry) > 4 else "—"
+    for index, entry in enumerate(_DEEP_KPI_TABLE, start=1):
+        label = entry.get("label")
+        key = entry.get("key")
+        unit = entry.get("unit") or ""
+        delta_kind = entry.get("deltaKind") or _deep_delta_kind_for_unit(unit)
+        higher = bool(entry.get("higherIsBetter"))
+        domain = entry.get("category") or "—"
         iam_v, or_v, in_v = iam.get(key), orange.get(key) if orange else None, inwi.get(key) if inwi else None
+        availability = {
+            "iam": iam_v is not None,
+            "orange": or_v is not None,
+            "inwi": in_v is not None,
+        }
         rows.append({
             "domain": domain,
+            "category": domain,
             "kpi": label,
-            "iam": _deep_num(iam_v),
-            "orange": _deep_num(or_v),
-            "inwi": _deep_num(in_v),
-            "vsOrange": _deep_delta(iam_v, or_v, unit),
-            "vsInwi": _deep_delta(iam_v, in_v, unit),
+            "iam": row_value(iam_v, unit),
+            "orange": row_value(or_v, unit),
+            "inwi": row_value(in_v, unit),
+            "vsOrange": _deep_delta(iam_v, or_v, delta_kind, unit),
+            "vsInwi": _deep_delta(iam_v, in_v, delta_kind, unit),
             "severity": _deep_kpi_severity(iam_v, or_v, in_v, higher),
-            "interpretation": _deep_kpi_interpretation(label, iam_v, or_v, in_v, higher),
+            "interpretation": _deep_kpi_interpretation(label, iam_v, or_v, in_v, higher, iam),
+            "unit": unit,
+            "higherIsBetter": higher,
+            "availability": availability,
+            "diagnosisUse": entry.get("diagnosisUse") or "context",
+            "requiredForRootCause": bool(entry.get("requiredForRootCause")),
+            "displayOrder": index,
+            "compact": bool(entry.get("compact")),
+            "key": key,
         })
     return rows
+
+
+def _benchmark_deep_kpi_export_payload(kpi_rows: list[dict], fmt: str = "json") -> tuple[bytes, str, str]:
+    fmt_norm = str(fmt or "json").strip().lower()
+    rows = list(kpi_rows or [])
+    if fmt_norm == "csv":
+        out = io.StringIO()
+        fieldnames = [
+            "category",
+            "kpi",
+            "unit",
+            "iam",
+            "orange",
+            "inwi",
+            "vsOrange",
+            "vsInwi",
+            "severity",
+            "interpretation",
+            "higherIsBetter",
+            "diagnosisUse",
+            "requiredForRootCause",
+            "displayOrder",
+            "compact",
+            "availabilityIam",
+            "availabilityOrange",
+            "availabilityInwi",
+        ]
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            availability = row.get("availability") or {}
+            writer.writerow({
+                "category": row.get("category") or row.get("domain") or "",
+                "kpi": row.get("kpi") or "",
+                "unit": row.get("unit") or "",
+                "iam": row.get("iam"),
+                "orange": row.get("orange"),
+                "inwi": row.get("inwi"),
+                "vsOrange": row.get("vsOrange") or "",
+                "vsInwi": row.get("vsInwi") or "",
+                "severity": row.get("severity") or "",
+                "interpretation": row.get("interpretation") or "",
+                "higherIsBetter": row.get("higherIsBetter"),
+                "diagnosisUse": row.get("diagnosisUse") or "",
+                "requiredForRootCause": row.get("requiredForRootCause"),
+                "displayOrder": row.get("displayOrder"),
+                "compact": row.get("compact"),
+                "availabilityIam": availability.get("iam"),
+                "availabilityOrange": availability.get("orange"),
+                "availabilityInwi": availability.get("inwi"),
+            })
+        return out.getvalue().encode("utf-8"), "text/csv; charset=utf-8", "IAM_Benchmark_KPI.csv"
+    payload = {
+        "schemaVersion": 1,
+        "table": "Benchmark KPI IAM",
+        "columns": ["KPI", "IAM", "Orange", "INWI", "IAM vs Orange", "IAM vs INWI", "Interprétation"],
+        "rows": rows,
+    }
+    return (
+        json.dumps(_json_safe(payload), ensure_ascii=False, indent=2).encode("utf-8"),
+        "application/json",
+        "IAM_Benchmark_KPI.json",
+    )
 
 
 def _deep_make_finding(domain, kpi, iam_value, benchmark_value, severity, finding, root_cause,
@@ -15137,6 +16383,8 @@ def _deep_export_extract_operator(dataset: dict, operator_entry: dict, transfer_
     op_name = str((operator_entry or {}).get("operator") or "").upper()
     kpis = (operator_entry or {}).get("kpis") or {}
     mod = kpis.get("pdschModulation") or {}
+    mod_nr = kpis.get("pdschModulationNr") or {}
+    mod_lte = kpis.get("pdschModulationLte") or {}
     band = _deep_export_analysis_row(dataset, "nrBandExposureAnalysis", op_name)
     mimo = _deep_export_analysis_row(dataset, "mimoRankAnalysis", op_name)
     bler = _deep_export_analysis_row(dataset, "blerRetxAnalysis", op_name)
@@ -15144,13 +16392,28 @@ def _deep_export_extract_operator(dataset: dict, operator_entry: dict, transfer_
     ca = _deep_export_analysis_row(dataset, "caScellsAnalysis", op_name)
     dl_tr = transfer_lookup.get((op_name, "DL")) or {}
     ping_success = transport.get("pingSuccessRate")
-    return {
+    fiveg_presence = _deep_num(kpis.get("nrPresencePct"))
+    def _split_share(split_mod, generic_mod, field, use_generic_when):
+        split_value = _deep_num(split_mod.get(field))
+        if split_value is not None:
+            return split_value
+        if use_generic_when:
+            return _deep_num(generic_mod.get(field))
+        return None
+    def _split_stat(split_key, generic_key, use_generic_when):
+        split_value = _deep_num((kpis.get(split_key) or {}).get("median"))
+        if split_value is not None:
+            return split_value
+        if use_generic_when:
+            return _deep_num((kpis.get(generic_key) or {}).get("median"))
+        return None
+    values = {
         "_operator": operator_entry.get("operator") or op_name,
         "dlThroughput": _deep_num((kpis.get("dl") or {}).get("average")),
         "rsrp": _deep_num((kpis.get("rsrp") or {}).get("median")),
         "sinr": _deep_num((kpis.get("sinr") or {}).get("median")),
         "cqi": _deep_num((kpis.get("cqi") or {}).get("median")),
-        "fivegPresence": _deep_num(kpis.get("nrPresencePct")),
+        "fivegPresence": fiveg_presence,
         "fourgOnly": _deep_num(kpis.get("lteOnlyPresencePct")),
         "n78": _deep_num(band.get("n78Share")),
         "n28": _deep_num(band.get("n28Share")),
@@ -15158,7 +16421,19 @@ def _deep_export_extract_operator(dataset: dict, operator_entry: dict, transfer_
         "qam64": _deep_num(mod.get("qam64Share")),
         "qam16": _deep_num(mod.get("qam16Share")),
         "qpsk": _deep_num(mod.get("qpskShare")),
+        "mcsNr": _split_stat("pdschMcsNr", "pdschMcs", fiveg_presence not in (None, 0.0)),
+        "mcsLte": _split_stat("pdschMcsLte", "pdschMcs", fiveg_presence in (None, 0.0)),
+        "qam256Nr": _split_share(mod_nr, mod, "qam256Share", fiveg_presence not in (None, 0.0)),
+        "qam64Nr": _split_share(mod_nr, mod, "qam64Share", fiveg_presence not in (None, 0.0)),
+        "qam16Nr": _split_share(mod_nr, mod, "qam16Share", fiveg_presence not in (None, 0.0)),
+        "qpskNr": _split_share(mod_nr, mod, "qpskShare", fiveg_presence not in (None, 0.0)),
+        "qam256Lte": _split_share(mod_lte, mod, "qam256Share", fiveg_presence in (None, 0.0)),
+        "qam64Lte": _split_share(mod_lte, mod, "qam64Share", fiveg_presence in (None, 0.0)),
+        "qam16Lte": _split_share(mod_lte, mod, "qam16Share", fiveg_presence in (None, 0.0)),
+        "qpskLte": _split_share(mod_lte, mod, "qpskShare", fiveg_presence in (None, 0.0)),
         "medianRank": _deep_num((kpis.get("scheduledRank") or {}).get("median")),
+        "medianRankNr": _split_stat("riNr", "scheduledRank", fiveg_presence not in (None, 0.0)),
+        "medianRankLte": _split_stat("riLte", "scheduledRank", fiveg_presence in (None, 0.0)),
         "ri1": _deep_num(mimo.get("ri1Share")),
         "ri2": _deep_num(mimo.get("ri2Share")),
         "riGe3": _deep_num(mimo.get("riGe3Share")),
@@ -15166,11 +16441,17 @@ def _deep_export_extract_operator(dataset: dict, operator_entry: dict, transfer_
         "scellsMax": _deep_num(ca.get("maxScells")),
         "scellsActive": _deep_num(ca.get("scellsActiveShare")),
         "lteCaActive": _deep_num(ca.get("lteCaActiveShare")),
+        "caActive": _deep_num(ca.get("lteCaActiveShare")),
         "prbEfficiency": _deep_num((operator_entry.get("kpis") or {}).get("prbEfficiency")),
         "blerAvg": _deep_num(bler.get("blerAvg")),
         "blerP90": _deep_num(bler.get("blerP90")),
         "blerAbove10": _deep_num(bler.get("blerGt10Share")),
         "ulRetxAvg": (
+            _deep_num(transport.get("ulRetxAvg"))
+            if transport.get("ulRetxAvg") is not None
+            else _deep_num((operator_entry.get("kpis") or {}).get("macUlRetx", {}).get("average"))
+        ),
+        "ulRetx": (
             _deep_num(transport.get("ulRetxAvg"))
             if transport.get("ulRetxAvg") is not None
             else _deep_num((operator_entry.get("kpis") or {}).get("macUlRetx", {}).get("average"))
@@ -15181,6 +16462,7 @@ def _deep_export_extract_operator(dataset: dict, operator_entry: dict, transfer_
         "dlCompletion": _deep_num(dl_tr.get("avgCompletionPct")),
         "dlSuccess": _deep_num(dl_tr.get("successRate")),
     }
+    return _deep_blank_nr_only_metrics(values)
 
 
 def _deep_export_quantize(value, digits: int | None):
@@ -15351,51 +16633,7 @@ def _benchmark_deep_export_model(dataset: dict, deep: dict | None = None) -> dic
     inwi = _deep_export_extract_operator(dataset, operator_map.get("INWI"), transfer_lookup) if operator_map.get("INWI") else None
     inwi["mcs"] = _deep_num(((operator_map.get("INWI").get("kpis") or {}).get("pdschMcs") or {}).get("median")) if inwi else None
 
-    kpi_specs = [
-        ("DL Throughput (Mbps)", "dlThroughput", 1, "%", "IAM is far behind Orange but above INWI."),
-        ("Median RSRP (dBm)", "rsrp", 1, "dB", "IAM RSRP is slightly better than Orange; coverage is not the main issue."),
-        ("Median SINR (dB)", "sinr", 1, "dB", "Both are low; IAM needs SINR improvement to unlock higher modulation/MCS."),
-        ("Median CQI", "cqi", 0, "", "IAM radio quality feedback is weaker despite slightly better RSRP/SINR."),
-        ("5G Presence %", "fivegPresence", 1, "pp", "IAM has more 5G time than Orange, but on low band only."),
-        ("4G Only %", "fourgOnly", 1, "pp", f"{_deep_fmt(iam.get('fourgOnly'))}% 4G-only time still limits peak DL and user experience."),
-        ("NR n78 share %", "n78", 1, "pp", "Key strategic gap: IAM 5G observed only on n28; Orange uses n78."),
-        ("NR n28 share %", "n28", 1, "pp", "IAM 5G low-band gives coverage but not comparable capacity."),
-        ("256QAM share %", "qam256", 1, "pp", "No 256QAM observed; radio conditions/scheduler/MCS must be improved."),
-        ("64QAM share %", "qam64", 1, "pp", "Moderate modulation share; most samples still in 16QAM."),
-        ("16QAM share %", "qam16", 1, "pp", "IAM is heavily stuck in 16QAM."),
-        ("QPSK share %", "qpsk", 1, "pp", "Orange has lower modulation distribution but higher throughput due to n78/capacity."),
-        ("Median Rank", "medianRank", 0, "", "Critical IAM MIMO limitation: mostly RI1/RI2, no RI>=3."),
-        ("RI1 share %", "ri1", 1, "pp", "High RI1 share indicates poor spatial multiplexing."),
-        ("RI2 share %", "ri2", 1, "pp", "IAM needs stronger RI2+ persistence."),
-        ("RI>=3 share %", "riGe3", 1, "pp", "No high-rank usage; validate 4T4R/NR MIMO configuration."),
-        ("Avg # SCells", "scellsAvg", 2, "", "IAM CA depth is weak versus INWI; similar to Orange LTE CA only."),
-        ("Max # SCells", "scellsMax", 0, "", "IAM maximum aggregation is limited."),
-        ("SCells >0 share %", "scellsActive", 1, "pp", "CA is not persistent enough; target higher SCell activation."),
-        ("LTE CA active share %", "lteCaActive", 1, "pp", "LTE CA use exists but remains insufficient for throughput ambition."),
-        ("BLER Avg %", "blerAvg", 1, "pp", "IAM BLER is acceptable but worse than Orange."),
-        ("BLER P90 %", "blerP90", 1, "pp", "Peak BLER periods affect throughput stability."),
-        ("BLER >10% share %", "blerAbove10", 1, "pp", "IAM has much more high-BLER samples."),
-        ("UL Retx Avg %", "ulRetxAvg", 1, "pp", "UL retransmission indicates possible UL quality/interference/power control issue."),
-        ("PDSCH DL Avg (Mbps)", "pdschDlAvg", 1, "%", "Large scheduler/NR capacity gap versus Orange."),
-        ("TCP Handshake Median (ms)", "tcpHandshake", 0, "ms", "IAM transport latency is worse than both competitors."),
-        ("Ping Success Rate %", "pingSuccessRate", 0, "pp", "Low ping success in both IAM/Orange; verify test setup and packet-loss path."),
-        ("DL completion %", "dlCompletion", 0, "pp", "Download sessions complete; issue is performance, not session reliability."),
-        ("DL success %", "dlSuccess", 0, "pp", "No basic accessibility issue visible in this sample."),
-    ]
-    kpi_rows = []
-    for label, key, digits, unit, interpretation in kpi_specs:
-        iam_v = _deep_export_quantize(iam.get(key), digits)
-        orange_v = _deep_export_quantize((orange or {}).get(key) if orange else None, digits)
-        inwi_v = _deep_export_quantize((inwi or {}).get(key) if inwi else None, digits)
-        kpi_rows.append({
-            "kpi": label,
-            "iam": iam_v,
-            "orange": orange_v,
-            "inwi": inwi_v,
-            "vsOrange": _deep_export_delta(iam_v, orange_v, unit, digits),
-            "vsInwi": _deep_export_delta(iam_v, inwi_v, unit, digits),
-            "interpretation": interpretation,
-        })
+    kpi_rows = _benchmark_deep_kpi_rows(iam, orange, inwi)
 
     episodes = ((dataset.get("iamServingCells") or {}).get("episodesAll") or [])
     sequence_cells = []
@@ -15715,10 +16953,11 @@ def generate_benchmark_deep_xlsx(deep: dict, dataset: dict | None = None) -> byt
 
 
 # Bump whenever _benchmark_nemo_build_dataset / _nemo_operator_kpis analysis logic
-# changes (e.g. DT-weighted cumulative DL average, Deep Benchmark). Stale cached
+# changes (e.g. DT-weighted cumulative DL average, Deep Benchmark, duplicate
+# source-file deduplication). Stale cached
 # dataset blobs (in-memory + SQLite library) are then rebuilt from the already-parsed
 # operator_files — no TXT re-parse — instead of being served as-is.
-_BENCHMARK_NEMO_ANALYSIS_VERSION = 59
+_BENCHMARK_NEMO_ANALYSIS_VERSION = 68
 
 
 def _benchmark_nemo_dataset_current(dataset) -> bool:
@@ -15751,6 +16990,7 @@ def _benchmark_nemo_build_dataset(
     dl_mode: str | None = None,
     window_mode: str | None = None,
 ) -> dict:
+    operator_files = _benchmark_nemo_deduplicate_operator_sources(operator_files)
     dl_mode = _benchmark_nemo_normalize_dl_mode(dl_mode)
     dl_mode_label = _benchmark_nemo_dl_mode_label(dl_mode)
     window_mode = _benchmark_nemo_normalize_window_mode(window_mode)
@@ -15864,10 +17104,9 @@ def _benchmark_nemo_build_dataset(
         elif op_name == "ORANGE":
             orange_serving_cells = cells
 
-    # Align operator 5G/4G presence KPIs with the dwell-based serving-cell breakdown so the
-    # comparator's "5G presence % (time-based)" rows match the Technology Status table.
-    # In Active-DL scope this must use the download-window breakdown; otherwise it uses
-    # the all-window breakdown.
+    # Attach serving-cell dwell as separate LTE/NR cell-presence KPIs. Do not overwrite
+    # nrPresencePct/lteOnlyPresencePct: those are true technology-status percentages by second,
+    # while LTE cell dwell can coexist with NR in EN-DC.
     _serving_cells_by_op = {"IAM": iam_serving_cells, "INWI": inwi_serving_cells, "ORANGE": orange_serving_cells}
     for op_data in prepared_operator_files:
         sc = _serving_cells_by_op.get(str(op_data.get("operator") or "").upper())
@@ -15880,10 +17119,10 @@ def _benchmark_nemo_build_dataset(
         kpis = op_data.get("kpis")
         if not isinstance(breakdown, dict) or not breakdown or not isinstance(kpis, dict):
             continue
-        if breakdown.get("5G") is not None:
-            kpis["nrPresencePct"] = breakdown.get("5G")
         if breakdown.get("4G") is not None:
-            kpis["lteOnlyPresencePct"] = breakdown.get("4G")
+            kpis["ltePresencePct"] = breakdown.get("4G")
+        if breakdown.get("5G") is not None:
+            kpis["nrCellPresencePct"] = breakdown.get("5G")
     iam_vs_best_5g = _nemo_build_5g_comparator_analysis(prepared_operator_files, diagnosis)
 
     layer_throughput_analysis = _nemo_build_layer_throughput_analysis(prepared_operator_files, iam_serving_cells)
@@ -16040,7 +17279,7 @@ def _benchmark_nemo_build_dataset(
         # This isolates the real HTTP download session and yields its authoritative timing &
         # throughput from the SAME export that drives the timeline — no separate
         # session-statistics file needed.
-        dl_events = _nemo_extract_dl_events(session_rows)
+        dl_events = _nemo_extract_dl_events_for_operator(item, session_rows)
         # Scope the timeline to the download session window (DAA→DAD), +1s tail so the last
         # partial-second bucket isn't clipped.
         scope_intervals = []
@@ -16085,6 +17324,15 @@ def _benchmark_nemo_build_dataset(
             _kp_dict = dl_events.get("kpis")
             if isinstance(_kp_dict, dict) and "nrDwellPct" in _kp_dict:
                 _kp_dict["nrDwellPct"] = _sc_dl5g
+        if dl_events.get("kpis"):
+            # Expose the authoritative reconstructed DL-session KPIs to the Deep KPI table
+            # and macro consumers. These values are computed from the same event window as
+            # the timeline, while _nemo_operator_kpis() is row-pool oriented.
+            item_kpis = item.setdefault("kpis", {})
+            if isinstance(item_kpis, dict):
+                for _k, _v in (dl_events.get("kpis") or {}).items():
+                    if _v is not None:
+                        item_kpis[_k] = _v
         # Per-operation session summary (download / upload / pings) for the upload, latency
         # and RF cards — all derived from the same time series.
         op_entry["sessionStats"] = {
@@ -19341,6 +20589,43 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(xlsx_bytes)
+                return
+
+            if path == "/api/benchmark-deep/kpi-export":
+                body = _parse_json_body(self) or {}
+                try:
+                    index = int(body.get("index", -1))
+                except (TypeError, ValueError):
+                    index = -1
+                dl_mode = _benchmark_nemo_normalize_dl_mode(body.get("dlMode"))
+                window_mode = _benchmark_nemo_normalize_window_mode(body.get("windowMode"))
+                if index is not None and index >= 0:
+                    dataset = _benchmark_nemo_dt_dataset(index, dl_mode=dl_mode, window_mode=window_mode)
+                else:
+                    dataset = BENCHMARK_NEMO_DATASET.get("data") or {}
+                    if (
+                        _benchmark_nemo_normalize_dl_mode(dataset.get("dlMode")) != dl_mode
+                        or _benchmark_nemo_normalize_window_mode(dataset.get("windowMode")) != window_mode
+                    ):
+                        loaded = _load_benchmark_nemo_files(dl_mode=dl_mode, window_mode=window_mode)
+                        dataset = loaded.get("dataset") or {}
+                dataset = _ensure_deep_benchmark(dataset or {})
+                rows = (((dataset or {}).get("deepBenchmark") or {}).get("kpiBenchmark") or [])
+                if not rows:
+                    _json(self, {"status": "error", "message": "No Benchmark KPI IAM table available. Load the benchmark files first."}, 400)
+                    return
+                payload_bytes, content_type, file_name = _benchmark_deep_kpi_export_payload(
+                    rows,
+                    body.get("format") or "json",
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", f'attachment; filename="{file_name}"')
+                self.send_header("Content-Length", str(len(payload_bytes)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload_bytes)
                 return
 
             if path == "/api/benchmark-mycom/load":

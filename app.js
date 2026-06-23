@@ -1170,6 +1170,7 @@ document.addEventListener("DOMContentLoaded", () => {
     nemoDtScopeRequestSeq: 0,
     nemoMacroDtTypeOverride: "Auto",
     nemoMacroThresholds: null,
+    nemoDeepKpiMode: "compact",
   };
   const statisticsState = {
     dataset: null,
@@ -3726,6 +3727,55 @@ document.addEventListener("DOMContentLoaded", () => {
           " · delivery " +
           escapeHtml(fmtPct(row.deliveryEfficiencyPct, 1)) +
           "</div></td>" +
+          // NR BW cfg / active
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtMhz(row.nrConfiguredBwMhz)) +
+          '</div><div style="font-size:10px;color:#94a3b8">act ' +
+          escapeHtml(fmtMhz(row.nrActiveBwMhz)) +
+          "</div></td>" +
+          // NR-CA active share / NR traffic share
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtPct(row.nrCaActiveSharePct, 1)) +
+          '</div><div style="font-size:10px;color:#94a3b8">traf ' +
+          escapeHtml(fmtPct(row.nrTrafficSharePct, 1)) +
+          "</div></td>" +
+          // PDSCH scheduled %
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtPct(row.pdschScheduledPct, 1)) +
+          "</div></td>" +
+          // n78 continuous / retention · drops · transitions
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtNum(row.n78ContinuousSec, 1)) +
+          ' s</div><div style="font-size:10px;color:#94a3b8">ret ' +
+          escapeHtml(fmtNum(row.n78AvgRetentionSec, 1)) +
+          "s · drop " +
+          escapeHtml(fmtNum(row.n78DropCount, 0)) +
+          " · tr " +
+          escapeHtml(fmtNum(row.nrBandTransitionCount, 0)) +
+          "</div></td>" +
+          // Serving cell PCI(rat) / band · EARFCN  (server host on hover)
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)" title="Server: ' +
+          escapeHtml(String(row.serverIp || "—")) +
+          '">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtNum(row.servingPci, 0)) +
+          (row.servingPciRat ? " (" + escapeHtml(row.servingPciRat) + ")" : "") +
+          '</div><div style="font-size:10px;color:#94a3b8">' +
+          escapeHtml(row.servingBand || "—") +
+          " · " +
+          escapeHtml(fmtNum(row.servingEarfcn, 0)) +
+          "</div></td>" +
+          // Handover count / serving-cell changes
+          '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
+          '<div style="font-size:11px;color:#e2e8f0">' +
+          escapeHtml(fmtNum(row.handoverCount, 0)) +
+          '</div><div style="font-size:10px;color:#94a3b8">chg ' +
+          escapeHtml(fmtNum(row.cellChangeCount, 0)) +
+          "</div></td>" +
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
           conclusionHtml +
           "</td>" +
@@ -3818,6 +3868,24 @@ document.addEventListener("DOMContentLoaded", () => {
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("Efficiency = Mbps/MHz. The smaller line adds scheduler yield and delivery efficiency.") +
       ">Efficiency / yield</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("NR configured (primary) bandwidth over the total active aggregated bandwidth (MHz), forward-filled from the sparse BW change-events.") +
+      ">NR BW cfg/act</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("NR-CA active share = % of download seconds with ≥1 SCell active. Traffic share = NR PDSCH throughput as a % of NR+LTE PDSCH.") +
+      ">NR-CA / traffic</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("PDSCH scheduled-time % (PDSCH slot ratio) during the active download window.") +
+      ">PDSCH sched%</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("n78 continuous time (longest hold) over average retention per hold; smaller line shows n78 drops and NR band transitions during the download.") +
+      ">n78 cont/ret</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("Dominant serving PCI (RAT), band and EARFCN during the download. Server host shown on hover for test-server parity.") +
+      ">Serving cell</th>" +
+      '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
+      titleAttr("Handover count and serving-cell (PCI) changes during the download window.") +
+      ">HO / cell chg</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("IAM only: macro diagnosis, evidence, blocked causes, warnings, and confidence reasons.") +
       ">Conclusion</th>" +
@@ -6523,6 +6591,45 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
+  const downloadDeepBenchmarkKpi = async (format) => {
+    const index =
+      benchmarkState && typeof benchmarkState.nemoDtScopeIndex === "number"
+        ? benchmarkState.nemoDtScopeIndex
+        : -1;
+    const fmt = format === "csv" ? "csv" : "json";
+    try {
+      const response = await fetch("/api/benchmark-deep/kpi-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          index,
+          format: fmt,
+          dlMode: benchmarkState.nemoDlMode || "app_rate_dl",
+          windowMode: benchmarkState.nemoWindowMode || "all_dt_session",
+        }),
+      });
+      if (!response.ok) {
+        let msg = "HTTP " + response.status;
+        try {
+          const j = await response.json();
+          msg = j.message || msg;
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const buf = await response.arrayBuffer();
+      downloadArrayBufferAsFile(
+        buf,
+        fmt === "csv" ? "IAM_Benchmark_KPI.csv" : "IAM_Benchmark_KPI.json",
+        fmt === "csv" ? "text/csv" : "application/json",
+      );
+    } catch (error) {
+      console.error("[Deep Benchmark] KPI export failed:", error);
+      if (window.showToast)
+        window.showToast(String(error.message || error), "error");
+      else alert("Benchmark KPI export failed: " + (error.message || error));
+    }
+  };
+
   const renderBenchmarkDeepPanel = (deep) => {
     if (!benchmarkNemoDeep) return;
     if (!deep || !deep.execSummary) {
@@ -6611,6 +6718,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const es = deep.execSummary;
     const kpiRows = Array.isArray(deep.kpiBenchmark) ? deep.kpiBenchmark : [];
+    const kpiMode = benchmarkState.nemoDeepKpiMode === "detailed" ? "detailed" : "compact";
+    const visibleKpiRows =
+      kpiMode === "compact"
+        ? kpiRows.filter((row) => row && row.compact)
+        : kpiRows;
     const actions = Array.isArray(deep.actionPlan) ? deep.actionPlan : [];
     const rawQa = deep.rawParsingQa || null;
 
@@ -6629,9 +6741,19 @@ document.addEventListener("DOMContentLoaded", () => {
       )
       .join("");
 
-    const kpiTableRows = kpiRows
-      .map(
-        (r) =>
+    let currentKpiCategory = "";
+    const kpiTableRows = visibleKpiRows
+      .map((r) => {
+        const category = r.category || r.domain || "—";
+        const categoryRow =
+          kpiMode === "detailed" && category !== currentKpiCategory
+            ? ((currentKpiCategory = category),
+              '<tr class="bn-kpi-category-row"><td colspan="7">' +
+                escapeHtml(category) +
+                "</td></tr>")
+            : "";
+        return (
+          categoryRow +
           "<tr><td>" +
           escapeHtml(r.kpi || "") +
           '</td><td class="bn-num">' +
@@ -6646,8 +6768,9 @@ document.addEventListener("DOMContentLoaded", () => {
           escapeHtml(r.vsInwi || "—") +
           "</td><td>" +
           escapeHtml(r.interpretation || "") +
-          "</td></tr>",
-      )
+          "</td></tr>"
+        );
+      })
       .join("");
 
     const rawQaRows = Array.isArray(rawQa && rawQa.operators)
@@ -6711,6 +6834,14 @@ document.addEventListener("DOMContentLoaded", () => {
       escapeHtml(es.title || t("deepSubtitle")) +
       "</p></div>" +
       '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<button type="button" id="benchmarkNemoDeepKpiCompact" class="benchmark-nemo-deep-btn ' +
+      (kpiMode === "compact" ? "" : "benchmark-nemo-deep-btn--ghost") +
+      '">Compact KPI</button>' +
+      '<button type="button" id="benchmarkNemoDeepKpiDetailed" class="benchmark-nemo-deep-btn ' +
+      (kpiMode === "detailed" ? "" : "benchmark-nemo-deep-btn--ghost") +
+      '">Detailed KPI</button>' +
+      '<button type="button" id="benchmarkNemoDeepKpiJson" class="benchmark-nemo-deep-btn benchmark-nemo-deep-btn--ghost">JSON</button>' +
+      '<button type="button" id="benchmarkNemoDeepKpiCsv" class="benchmark-nemo-deep-btn benchmark-nemo-deep-btn--ghost">CSV</button>' +
       '<button type="button" id="benchmarkNemoDeepBackToTop" class="benchmark-nemo-deep-btn benchmark-nemo-deep-btn--ghost">' +
       escapeHtml(t("deepBackToTop")) +
       "</button>" +
@@ -6788,6 +6919,24 @@ document.addEventListener("DOMContentLoaded", () => {
     benchmarkNemoDeep.style.display = "block";
     const exportBtn = document.getElementById("benchmarkNemoDeepExport");
     if (exportBtn) exportBtn.addEventListener("click", downloadDeepBenchmark);
+    const compactBtn = document.getElementById("benchmarkNemoDeepKpiCompact");
+    if (compactBtn) {
+      compactBtn.addEventListener("click", () => {
+        benchmarkState.nemoDeepKpiMode = "compact";
+        renderBenchmarkDeepPanel(deep);
+      });
+    }
+    const detailedBtn = document.getElementById("benchmarkNemoDeepKpiDetailed");
+    if (detailedBtn) {
+      detailedBtn.addEventListener("click", () => {
+        benchmarkState.nemoDeepKpiMode = "detailed";
+        renderBenchmarkDeepPanel(deep);
+      });
+    }
+    const jsonBtn = document.getElementById("benchmarkNemoDeepKpiJson");
+    if (jsonBtn) jsonBtn.addEventListener("click", () => downloadDeepBenchmarkKpi("json"));
+    const csvBtn = document.getElementById("benchmarkNemoDeepKpiCsv");
+    if (csvBtn) csvBtn.addEventListener("click", () => downloadDeepBenchmarkKpi("csv"));
     const backBtn = document.getElementById("benchmarkNemoDeepBackToTop");
     if (backBtn) {
       backBtn.addEventListener("click", () => {

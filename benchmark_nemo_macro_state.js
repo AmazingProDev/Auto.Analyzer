@@ -32,7 +32,7 @@
       "CAPACITY_LOAD_LIMITATION",
       "SCHEDULER_ALLOCATION_LIMITATION",
       "SERVER_TCP_APPLICATION_LIMITATION",
-      "LTE_ONLY_BENCHMARK_GAP",
+      "LTE_ONLY_IAM_UNDERPERFORMANCE",
       "MIXED_OR_INCONCLUSIVE",
     ];
     const TECHNICAL_WEIGHTS = {
@@ -334,6 +334,23 @@
           ),
           cqiMean: firstNumber(download.cqiMean, evt.cqiMean, cqiFallback),
           avgMcs: firstNumber(download.avgMcs, evt.avgMcs),
+          // Extended NR / cell-configuration KPIs (added 2026-06).
+          nrConfiguredBwMhz: firstNumber(download.nrConfiguredBwMhz, evt.nrConfiguredBwMhz),
+          nrActiveBwMhz: firstNumber(download.nrActiveBwMhz, evt.nrActiveBwMhz),
+          nrCaActiveSharePct: firstNumber(download.nrCaActiveSharePct, evt.nrCaActiveSharePct),
+          nrTrafficSharePct: firstNumber(download.nrTrafficSharePct, evt.nrTrafficSharePct),
+          pdschScheduledPct: firstNumber(download.pdschScheduledPct, evt.pdschScheduledPct),
+          n78ContinuousSec: firstNumber(download.n78ContinuousSec, evt.n78ContinuousSec),
+          n78AvgRetentionSec: firstNumber(download.n78AvgRetentionSec, evt.n78AvgRetentionSec),
+          n78DropCount: firstNumber(download.n78DropCount, evt.n78DropCount),
+          nrBandTransitionCount: firstNumber(download.nrBandTransitionCount, evt.nrBandTransitionCount),
+          servingPci: firstNumber(download.servingPci, evt.servingPci),
+          servingPciRat: download.servingPciRat || evt.servingPciRat || null,
+          servingBand: download.servingBand || evt.servingBand || null,
+          servingEarfcn: firstNumber(download.servingEarfcn, evt.servingEarfcn),
+          serverIp: download.serverIp || evt.serverIp || null,
+          handoverCount: firstNumber(download.handoverCount, evt.handoverCount),
+          cellChangeCount: firstNumber(download.cellChangeCount, evt.cellChangeCount),
           dlCentroid: download.dlCentroid || evt.dlCentroid || null,
           dlMedianSpeedKmh: firstNumber(
             download.dlMedianSpeedKmh,
@@ -388,16 +405,36 @@
       const normSinr = metricNormalize(allRows, (row) => row.ssSinrMean);
       const normMod256 = metricNormalize(allRows, (row) => row.mod256Pct);
       if (lteOnly) {
+        // CQI / 256QAM / MCS read as 0 in an LTE-only export are "not exported", not real
+        // values — ignore them (drop the term and renormalize the weights) instead of
+        // scoring the operator as worst. SINR/RSRP/DL are always present (negatives are valid).
+        const positiveOnly = (getter) => (row) => {
+          const value = asNumber(getter(row));
+          return value !== null && value > 0 ? value : null;
+        };
         const normRsrp = metricNormalize(allRows, (row) => row.ssRsrpMean);
         const normDl = metricNormalize(allRows, (row) => dlThroughput(row));
-        const normCqi = metricNormalize(allRows, (row) => row.cqiMean);
+        const normCqiValid = metricNormalize(allRows, positiveOnly((row) => row.cqiMean));
+        const normMod256Valid = metricNormalize(allRows, positiveOnly((row) => row.mod256Pct));
+        const terms = [
+          { w: 0.35, norm: normSinr, get: (row) => row.ssSinrMean, allowNonPositive: true },
+          { w: 0.25, norm: normRsrp, get: (row) => row.ssRsrpMean, allowNonPositive: true },
+          { w: 0.2, norm: normDl, get: (row) => dlThroughput(row), allowNonPositive: false },
+          { w: 0.1, norm: normCqiValid, get: (row) => row.cqiMean, allowNonPositive: false },
+          { w: 0.1, norm: normMod256Valid, get: (row) => row.mod256Pct, allowNonPositive: false },
+        ];
         competitors.forEach((row) => {
-          row._macroTechScore =
-            0.35 * normSinr(row) +
-            0.25 * normRsrp(row) +
-            0.2 * normDl(row) +
-            0.1 * normCqi(row) +
-            0.1 * normMod256(row);
+          let num = 0;
+          let den = 0;
+          terms.forEach((term) => {
+            const value = asNumber(term.get(row));
+            const valid = value !== null && (term.allowNonPositive || value > 0);
+            if (valid) {
+              num += term.w * term.norm(row);
+              den += term.w;
+            }
+          });
+          row._macroTechScore = den > 0 ? num / den : 0;
         });
       } else {
         const normNrDwell = metricNormalize(allRows, (row) => row.nrDwellPct);
@@ -520,8 +557,8 @@
           action:
             "LTE-only segment (no 5G for any operator): check IAM's LTE serving layer — coverage footprint, azimuth/tilt, overshooting, interference, PCI/RS pollution and serving-cell selection at the DT centroid. Separately verify whether 5G/n78 should exist here.",
         },
-        LTE_ONLY_BENCHMARK_GAP: {
-          label: "LTE-only benchmark gap",
+        LTE_ONLY_IAM_UNDERPERFORMANCE: {
+          label: "LTE-only IAM underperformance",
           action:
             "No 5G detected for any operator in this DT segment; treat as an LTE performance gap and diagnose with LTE RF / CQI / modulation / bandwidth / load / scheduler, not 5G/n78 causes.",
         },
@@ -631,7 +668,12 @@
               ((bestThroughput && bestThroughput.operator) || "the best competitor") +
               "."),
       );
-      pieces.push("Primary macro diagnosis: " + label + ".");
+      if (Array.isArray(diagnosis.context) && diagnosis.context.length) {
+        pieces.push(
+          "Context: " + diagnosis.context.map((item) => item.message).join(" "),
+        );
+      }
+      pieces.push("Primary root cause: " + label + ".");
       if (diagnosis.primaryCode === "N78_UNDER_USED") {
         pieces.push(
           "IAM extracts fewer Mbps mainly because it spends less of the active download on n78 C-Band than " +
@@ -652,7 +694,7 @@
             ((bestTechnical && bestTechnical.operator) || "the best operator") +
             " (lower SS-SINR / RSRP), which is consistent with the lower throughput.",
         );
-      } else if (diagnosis.primaryCode === "LTE_ONLY_BENCHMARK_GAP") {
+      } else if (diagnosis.primaryCode === "LTE_ONLY_IAM_UNDERPERFORMANCE") {
         pieces.push(
           "No 5G was detected for any operator on this DT segment; this is an LTE-only benchmark gap, not an IAM-specific 5G/n78 problem.",
         );
@@ -678,6 +720,11 @@
           diagnosis.blockedCauses
             .map((item) => item.message)
             .join(" "),
+        );
+      }
+      if (diagnosis.directional) {
+        pieces.push(
+          "Treat as directional, not statistically firm — the download is short and/or has few throughput/RF samples.",
         );
       }
       if (diagnosis.confidence) {
@@ -753,11 +800,19 @@
         score -= 15;
         reasons.push(rfWarning.message);
       }
-      if (ctx.devicesComparable !== true) {
+      // Device / location penalties apply ONLY when parity / co-location is mismatched or
+      // genuinely unknown — never when it is known-good (=== true).
+      if (ctx.devicesComparable === false) {
         score -= 10;
-        reasons.push("device parity unknown or mismatched");
+        reasons.push("devices differ across operators");
+      } else if (ctx.devicesComparable !== true) {
+        score -= 10;
+        reasons.push("device parity unknown");
       }
-      if (ctx.sameLocationKnown !== true) {
+      if (ctx.sameLocationKnown === false) {
+        score -= 15;
+        reasons.push("operators not co-located (same-location check failed)");
+      } else if (ctx.sameLocationKnown !== true) {
         score -= 15;
         reasons.push("same-location comparability unknown");
       }
@@ -800,6 +855,7 @@
       const secondary = [];
       const blockedCauses = [];
       const warnings = [];
+      const context = [];
       const actions = [];
       const matches = [];
 
@@ -920,6 +976,22 @@
       if (ctx) {
         ctx.lteOnly = lteOnly;
         ctx.phyUnavailable = phyUnavailable;
+      }
+      // Context = measurement conditions, kept separate from root cause, blocked causes and
+      // data-quality warnings. These describe the segment, they are not IAM-specific faults.
+      if (lteOnly) {
+        context.push({
+          code: "LTE_ONLY_SEGMENT",
+          message:
+            "LTE-only benchmark: no operator used 5G/n78 on this DT segment, so 5G/n78 absence is shared context, not an IAM root cause.",
+        });
+      }
+      if (phyUnavailable) {
+        context.push({
+          code: "PHY_METRICS_UNAVAILABLE",
+          message:
+            "NR/PHY resource KPIs (CQI/MCS/rank/BW/PRB) were not exported for IAM in this segment; shown as “—” and excluded from the root-cause logic.",
+        });
       }
 
       if (iam) {
@@ -1297,18 +1369,31 @@
               iam.deliveryEfficiencyPct < 75)
           )
         ) {
-          // A radio (RF) limitation explains the gap upstream of the application — and a
-          // competitor reaching far higher throughput in the same context proves the server
-          // can deliver more. So block server/TCP when RF is the detected limiter.
-          const rfLimitationDetected = matches.some(
-            (m) =>
-              m.code === "RF_COVERAGE_QUALITY_LIMITATION" ||
-              m.code === "LTE_RF_COVERAGE_QUALITY_LIMITATION",
-          );
-          if (rfLimitationDetected || iamRfPoor || iamRfWorse) {
+          // Server / TCP is a last resort: it may fire ONLY when no upstream radio cause
+          // already explains the gap AND IAM's radio KPIs are acceptable. Any matched radio
+          // cause (5G/n78/RF/bandwidth/CA/MIMO/modulation/load/scheduler) or weak RF blocks it
+          // — a competitor reaching far higher throughput proves the server can deliver more.
+          const RADIO_CAUSE_CODES = new Set([
+            "NO_5G_FOR_IAM",
+            "LOW_5G_RETENTION",
+            "NO_N78_CBAND",
+            "N78_UNDER_USED",
+            "RF_COVERAGE_QUALITY_LIMITATION",
+            "LTE_RF_COVERAGE_QUALITY_LIMITATION",
+            "ACTIVE_BANDWIDTH_LIMITATION",
+            "CA_LIMITATION",
+            "MIMO_RANK_LIMITATION",
+            "MODULATION_LIMITATION",
+            "CAPACITY_LOAD_LIMITATION",
+            "SCHEDULER_ALLOCATION_LIMITATION",
+          ]);
+          const radioCauseMatched = matches.some((m) => RADIO_CAUSE_CODES.has(m.code));
+          if (radioCauseMatched || iamRfPoor || iamRfWorse || !goodRf) {
             addBlockedCause(
               "SERVER_TCP_APPLICATION_LIMITATION",
-              "Server / TCP blocked: a radio (RF) limitation is detected first, and a competitor reaches far higher throughput in the same context.",
+              radioCauseMatched || iamRfPoor || iamRfWorse
+                ? "Server / TCP blocked: an upstream radio cause already explains the gap (and a competitor reaches far higher throughput in the same context)."
+                : "Server / TCP blocked: IAM radio KPIs are not clearly acceptable, so the gap cannot be attributed to the application path.",
             );
           } else {
             addMatch(
@@ -1330,7 +1415,7 @@
           // LTE-only segment with no clear LTE sub-cause → name it an LTE-only benchmark gap
           // rather than a generic "mixed / inconclusive".
           addMatch(
-            lteOnly ? "LTE_ONLY_BENCHMARK_GAP" : "MIXED_OR_INCONCLUSIVE",
+            lteOnly ? "LTE_ONLY_IAM_UNDERPERFORMANCE" : "MIXED_OR_INCONCLUSIVE",
             lteOnly
               ? "No 5G for any operator and no dominant LTE sub-cause isolated; LTE-only performance gap."
               : "No single upstream macro cause dominated after the available checks.",
@@ -1394,13 +1479,17 @@
           "Macro verdict was pulled upstream to stay consistent with the detailed causal-chain break.";
       }
 
+      // Tri-state co-location: true = co-located, false = measurably apart, null = unknown
+      // (no GPS for one side). Only false/null draw a confidence penalty.
       const sameLocationMeters = distanceScore(iam, bestTechnical || bestThroughput);
+      const sameLocationKnown =
+        sameLocationMeters === null ? null : sameLocationMeters <= 250;
       const confidence = scoreMacroConfidence(
         {
           iam,
           warnings,
           devicesComparable: ctx.devicesComparable,
-          sameLocationKnown: sameLocationMeters !== null,
+          sameLocationKnown,
         },
         thresholds,
       );
@@ -1418,6 +1507,15 @@
                   : "IAM extracts fewer Mbps per MHz than the throughput leader, so spectral efficiency still contributes to the gap.",
             }
           : null;
+      // Directional = short download or thin sampling → the verdict is indicative, not a
+      // statistically firm conclusion.
+      const directional =
+        (asNumber(iam && iam.dlDurationS) !== null &&
+          iam.dlDurationS < thresholds.minDlDurationSec) ||
+        (asNumber(iam && iam.throughputSamples) !== null &&
+          iam.throughputSamples < thresholds.minThroughputSamples) ||
+        (asNumber(iam && iam.rfSamples) !== null &&
+          iam.rfSamples < thresholds.minRfSamples);
       const diagnosis = {
         primaryCode: primary.code,
         primaryLabel: ruleDefinition(primary.code).label,
@@ -1427,6 +1525,8 @@
         evidence,
         secondary,
         blockedCauses,
+        context,
+        directional,
         action: [ruleDefinition(primary.code).action],
         confidence,
         efficiencyInsight,
