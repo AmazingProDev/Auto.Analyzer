@@ -668,10 +668,13 @@ test("LTE-only DT (no operator has 5G): LTE RF limitation, 5G/n78/server blocked
   assert.ok(!d.secondary.some((s) => s.code === "LTE_ONLY_SEGMENT"));
   // few RF samples -> directional
   assert.equal(d.directional, true);
+  assert.match(d.conclusionText, /Final Macro Diagnosis/);
   assert.match(d.conclusionText, /Context:/);
   assert.match(d.conclusionText, /directional/i);
   assert.match(d.conclusionText, /LTE-only|LTE RF quality/i);
-  assert.match(d.conclusionText, /penalties:/i);
+  // confidence reasons now rendered as "... because <reasons>"
+  assert.match(d.conclusionText, /Confidence: Low\. This diagnosis should be treated as .* because /i);
+  assert.match(d.conclusionText, /Excluded or unreliable KPIs:/);
 });
 
 test("server/TCP fires only when RF is good and no upstream radio cause explains the gap", () => {

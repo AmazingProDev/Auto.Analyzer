@@ -714,98 +714,163 @@
     }
 
     function buildConclusion(ctx, diagnosis) {
-      const iam = ctx.iam;
-      const bestThroughput = ctx.bestThroughput;
-      const bestTechnical = ctx.bestTechnical;
-      const severity = diagnosis.severity || "Directional";
-      const label = diagnosis.primaryLabel || "Mixed / inconclusive";
-      const pieces = [];
-      pieces.push(
-        severity +
-          ": IAM is " +
-          (diagnosis.gapPct == null
-            ? "directional versus peers"
-            : formatNumber(diagnosis.gapPct, 1) +
-              "% (" +
-              formatNumber(diagnosis.gapMbps, 0) +
-              " Mbps) behind " +
-              ((bestThroughput && bestThroughput.operator) || "the best competitor") +
-              "."),
-      );
-      if (Array.isArray(diagnosis.context) && diagnosis.context.length) {
-        pieces.push(
-          "Context: " + diagnosis.context.map((item) => item.message).join(" "),
-        );
-      }
-      pieces.push("Primary root cause: " + label + ".");
-      if (diagnosis.primaryCode === "N78_UNDER_USED") {
-        pieces.push(
-          "IAM extracts fewer Mbps mainly because it spends less of the active download on n78 C-Band than " +
-            ((bestTechnical && bestTechnical.operator) || "the technical reference") +
+      // Produces the structured "Final Macro Diagnosis" narrative (drawer "Full explanation"),
+      // with a specialised variant for the n78-usage-share / active-NR-BW case.
+      const iam = ctx.iam || {};
+      const bestThroughput = ctx.bestThroughput || {};
+      const bestCapacity = ctx.bestCapacity || ctx.bestTechnical || {};
+      const conf = diagnosis.confidence || {};
+      const num = (v, d) => formatNumber(v, d == null ? 1 : d);
+      const certainty = diagnosis.directional
+        ? "Directional diagnosis"
+        : conf.label === "High"
+          ? "High-confidence diagnosis"
+          : conf.label === "Medium"
+            ? "Probable diagnosis"
+            : "Low-confidence directional diagnosis";
+      const confInterp =
+        diagnosis.directional || conf.label !== "High"
+          ? "directional, not statistically firm,"
+          : "a firm directional finding";
+      const confReasons = (conf.reasons || []).length
+        ? conf.reasons.join(", ")
+        : "the available KPIs are internally consistent";
+      const gapLine =
+        "IAM achieved " +
+        num(dlThroughput(iam)) +
+        " Mbps versus " +
+        num(dlThroughput(bestThroughput)) +
+        " Mbps for " +
+        (bestThroughput.operator || "the best competitor") +
+        ", corresponding to a " +
+        num(diagnosis.gapPct) +
+        "% gap, around " +
+        num(diagnosis.gapMbps, 0) +
+        " Mbps. The result is classified as " +
+        (diagnosis.severity || "directional") +
+        ".";
+      const secWarn = []
+        .concat((diagnosis.secondary || []).map((s) => s.label || s.code))
+        .concat((diagnosis.warnings || []).map((w) => w.message || w.code));
+      const secText = secWarn.length ? secWarn.join("; ") : "none material";
+      const excluded = [];
+      if (iam._mcsUnavailable) excluded.push("MCS");
+      if (iam._deliveryUnavailable) excluded.push("delivery efficiency");
+      if (iam.metricsUnavailable) excluded.push("NR PHY resource KPIs (CQI/MCS/rank/BW/PRB)");
+      const excludedText = excluded.length ? excluded.join(", ") : "none";
+
+      // ── Specialised: n78 usage share / active NR bandwidth limitation ──
+      if (
+        diagnosis.primaryCode === "N78_RETENTION_BANDWIDTH_LIMITATION" &&
+        /usage share/i.test(diagnosis.primaryLabel || "")
+      ) {
+        const iamN78 = (iam.nrBandDwellPct || {}).n78;
+        const capN78 = (bestCapacity.nrBandDwellPct || {}).n78;
+        return [
+          "Final Macro Diagnosis.",
+          "Directional diagnosis: n78 usage share / active NR bandwidth limitation.",
+          gapLine,
+          "Context: 5G/n78 benchmark. IAM is NR-dominant, with " +
+            num(iam.nrTrafficSharePct) +
+            "% of DL traffic carried on NR and " +
+            num(iam.nrDwellPct) +
+            "% 5G presence during the active DL window. Therefore, the issue is not lack of 5G. IAM also uses n78, so the issue is not absence of C-Band.",
+          "The main optimization opportunity is lower n78 usage share and lower active NR bandwidth compared with " +
+            (bestCapacity.operator || "the capacity reference") +
+            ". IAM n78 share is " +
+            num(iamN78) +
+            "% versus " +
+            num(capN78) +
+            "% for " +
+            (bestCapacity.operator || "the capacity reference") +
+            ", and IAM active NR bandwidth is " +
+            num(iam.nrActiveBwMhz, 0) +
+            " MHz versus " +
+            num(bestCapacity.nrActiveBwMhz, 0) +
+            " MHz. This reduces IAM's available high-capacity NR layer during the download.",
+          "RF is not the primary limitation versus " +
+            (bestThroughput.operator || "the throughput reference") +
+            " because IAM has " +
+            num(iam.ssSinrMean) +
+            " dB NR SINR versus " +
+            num(bestThroughput.ssSinrMean) +
+            " dB, and IAM NR RSRP is " +
+            num(iam.ssRsrpMean) +
+            " dBm versus " +
+            num(bestThroughput.ssRsrpMean) +
+            " dBm. IAM spectral efficiency is also " +
+            num(iam.spectralEffMbpsPerMhz, 2) +
+            " bps/Hz versus " +
+            num(bestThroughput.spectralEffMbpsPerMhz, 2) +
+            " bps/Hz, so the gap is not explained by poorer radio efficiency alone.",
+          "Secondary contributors / warnings: " +
+            secText +
+            ". Scheduler/PRB indicators should be treated with caution if PRB consistency warnings are active.",
+          "Recommended actions: verify n78 usage share, check active NR bandwidth and BWP configuration, confirm whether IAM can use the full n78 capacity layer, review scheduler allocation after validating PRB aggregation, and verify BLER/HARQ and link-adaptation counters.",
+          "Confidence: " +
+            (conf.label || "—") +
+            ". This diagnosis is " +
+            confInterp +
+            " because " +
+            confReasons +
             ".",
-        );
-      } else if (diagnosis.primaryCode === "ACTIVE_BANDWIDTH_LIMITATION") {
-        pieces.push(
-          "The active-download bandwidth available to IAM stays below the technical reference.",
-        );
-      } else if (diagnosis.primaryCode === "RF_COVERAGE_QUALITY_LIMITATION") {
-        pieces.push(
-          "RF quality is materially worse for IAM during the active download window.",
-        );
-      } else if (diagnosis.primaryCode === "LTE_RF_COVERAGE_QUALITY_LIMITATION") {
-        pieces.push(
-          "No 5G/n78 was detected for any operator on this DT segment, so this is an LTE-only gap — not 'No 5G for IAM'. The most likely cause is weaker LTE RF quality for IAM versus " +
-            ((bestTechnical && bestTechnical.operator) || "the best operator") +
-            " (lower SS-SINR / RSRP), which is consistent with the lower throughput.",
-        );
-      } else if (diagnosis.primaryCode === "LTE_ONLY_IAM_UNDERPERFORMANCE") {
-        pieces.push(
-          "No 5G was detected for any operator on this DT segment; this is an LTE-only benchmark gap, not an IAM-specific 5G/n78 problem.",
-        );
-      } else if (diagnosis.primaryCode === "IAM_CLOSE_TO_BEST") {
-        pieces.push(
-          "This is framed as an optimization opportunity rather than a hard failure.",
-        );
+        ].join(" ");
       }
-      if (diagnosis.efficiencyInsight) {
-        const eff = diagnosis.efficiencyInsight;
-        pieces.push(
-          "Per-MHz efficiency is " +
-            formatNumber(eff.iamValue, 2) +
-            " versus " +
-            formatNumber(eff.referenceValue, 2) +
-            " bps/Hz for " +
-            (eff.referenceOperator || "the reference") +
-            ", so the gap is not explained by poorer spectral efficiency alone.",
+
+      // ── Generic structured narrative ──
+      const blocked = diagnosis.blockedCauses || [];
+      const blockedSentences = blocked
+        .slice(0, 2)
+        .map(
+          (b) =>
+            "It is not primarily " +
+            (ruleDefinition(b.code).label || b.code) +
+            " — " +
+            (b.message || ""),
         );
-      }
-      if (Array.isArray(diagnosis.blockedCauses) && diagnosis.blockedCauses.length) {
-        pieces.push(
-          diagnosis.blockedCauses
-            .map((item) => item.message)
-            .join(" "),
-        );
-      }
-      if (diagnosis.directional) {
-        pieces.push(
-          "Treat as directional, not statistically firm — the download is short and/or has few throughput/RF samples.",
-        );
-      }
-      if (diagnosis.confidence) {
-        pieces.push(
-          diagnosis.confidence.reasons.length
-            ? "Confidence " +
-                diagnosis.confidence.label +
-                " — penalties: " +
-                diagnosis.confidence.reasons.join("; ") +
-                "."
-            : "Confidence " + diagnosis.confidence.label + ".",
-        );
-      }
-      if (iam && iam.deviceModel && ctx.devicesComparable === false) {
-        pieces.push("Devices differ across operators, so keep the result directional.");
-      }
-      return pieces.join(" ");
+      const evid = (diagnosis.evidence || [])
+        .slice(0, 3)
+        .map((e) => e.kpi)
+        .filter(Boolean);
+      const evidText = evid.length ? evid.join(", ") : "the available KPI gaps";
+      const actions = (diagnosis.action || []).filter(Boolean);
+      const contextText =
+        (diagnosis.context || []).map((c) => c.message).join(" ") || "Directional benchmark.";
+      const out = [
+        "Final Macro Diagnosis.",
+        certainty + ": " + (diagnosis.primaryLabel || "Mixed / inconclusive") + ".",
+        gapLine,
+        "Context: " + contextText,
+      ];
+      if (blockedSentences.length) out.push(blockedSentences.join(" "));
+      out.push(
+        "The main limitation is " +
+          (diagnosis.primaryLabel || "mixed / inconclusive") +
+          ". This is supported by " +
+          evidText +
+          ".",
+      );
+      out.push(
+        "Secondary contributors / warnings: " +
+          secText +
+          ". These elements may contribute to the gap, but they are not stronger than the primary diagnosis.",
+      );
+      if (actions.length) out.push("Recommended actions: " + actions.join("; ") + ".");
+      out.push(
+        "Confidence: " +
+          (conf.label || "—") +
+          ". This diagnosis should be treated as " +
+          confInterp +
+          " because " +
+          confReasons +
+          ".",
+      );
+      out.push(
+        "Excluded or unreliable KPIs: " +
+          excludedText +
+          ". These KPIs should be validated or re-exported before confirming deeper causes such as scheduler, BLER, CA, MIMO, or TCP/application limitation.",
+      );
+      return out.join(" ");
     }
 
     function scoreMacroConfidence(ctx, thresholds) {
@@ -1874,6 +1939,7 @@
           iam,
           bestThroughput,
           bestTechnical,
+          bestCapacity,
           devicesComparable: ctx.devicesComparable,
         },
         diagnosis,

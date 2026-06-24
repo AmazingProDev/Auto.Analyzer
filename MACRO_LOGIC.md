@@ -176,6 +176,13 @@ contradiction is a hard penalty); a segment without that contradiction floors at
 - **Table cell:** the IAM conclusion cell shows only label · gap · severity · confidence. Everything
   else — full explanation, evidence, context, **secondary contributors**, symptoms, blocked causes,
   warnings and recommended actions — lives in the evidence drawer.
+- **Conclusion narrative (`conclusionText`):** `buildConclusion` emits a structured "Final Macro
+  Diagnosis" report — certainty line, gap line, context, "not primarily X because …" for the top
+  blocked causes, primary + supporting evidence, secondary/warnings, recommended actions, confidence
+  ("treated as directional … because <reasons>") and excluded/unreliable KPIs. The
+  `N78_RETENTION_BANDWIDTH_LIMITATION` (usage-share) primary uses a dedicated n78 narrative
+  (NR-dominant context, n78-share + active-NR-BW vs the capacity ref, RF-not-primary, fixed n78
+  action list).
 
 ## 10. Worked example — DT7 Kenitra (LTE-only)
 `lteOnly` → `context = [LTE_ONLY_SEGMENT, PHY_METRICS_UNAVAILABLE]`; 5G/n78 blocked; RF fires
