@@ -3579,11 +3579,6 @@ document.addEventListener("DOMContentLoaded", () => {
             severityBadge +
             (confidenceBadge || "") +
             "</div>" +
-            (secondaryBadges
-              ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-                secondaryBadges +
-                "</div>"
-              : "") +
             '<details style="font-size:10px;color:#94a3b8"><summary style="cursor:pointer;color:#cbd5e1;font-weight:700">Evidence drawer</summary>' +
             '<div style="margin-top:6px;display:grid;gap:8px">' +
             '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Full explanation</div>' +
@@ -3611,6 +3606,13 @@ document.addEventListener("DOMContentLoaded", () => {
               diagnosis.context || [],
               (item) => escapeHtml(item.message || item.code || ""),
               "No special context.",
+            ) +
+            "</div>" +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Secondary contributors</div>' +
+            renderList(
+              diagnosis.secondary || [],
+              (item) => escapeHtml((item.label ? item.label + " — " : "") + (item.detail || "")),
+              "No secondary contributors.",
             ) +
             "</div>" +
             '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Symptoms (not root cause)</div>' +
@@ -3751,13 +3753,13 @@ document.addEventListener("DOMContentLoaded", () => {
           " · delivery " +
           escapeHtml(fmtPct(row.deliveryEfficiencyPct, 1)) +
           "</div></td>" +
-          // NR BW cfg / active
+          // NR BW: configured/BWP (top) / active used for diagnosis (bottom)
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
-          '<div style="font-size:11px;color:#e2e8f0">' +
+          '<div style="font-size:11px;color:#e2e8f0">cfg ' +
           escapeHtml(fmtMhz(row.nrConfiguredBwMhz)) +
           '</div><div style="font-size:10px;color:#94a3b8">act ' +
           escapeHtml(fmtMhz(row.nrActiveBwMhz)) +
-          "</div></td>" +
+          " (diag)</div></td>" +
           // NR-CA active share / NR traffic share
           '<td style="padding:8px 10px;border-bottom:1px solid rgba(148,163,184,0.08)">' +
           '<div style="font-size:11px;color:#e2e8f0">' +
@@ -3891,7 +3893,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ">256QAM / rank</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("Observed AGGREGATED bandwidth (CA total) during active download seconds — this is the measured aggregate across carriers, distinct from the NR configured/active BW columns. The smaller line is average SCell count.") +
-      ">Aggregated BW / SCells</th>" +
+      ">Observed aggregated BW / SCells</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("Mean PRB utilization plus the derived load-state label.") +
       ">PRB / Load</th>" +
@@ -3899,8 +3901,8 @@ document.addEventListener("DOMContentLoaded", () => {
       titleAttr("Efficiency = Mbps/MHz. The smaller line adds scheduler yield and delivery efficiency.") +
       ">Efficiency / yield</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("NR CONFIGURED (primary cell) bandwidth over NR ACTIVE bandwidth (MHz), forward-filled from the sparse BW change-events. NR active BW is what the active-bandwidth root-cause evidence uses.") +
-      ">NR cfg / active BW</th>" +
+      titleAttr("Top line = NR configured / BWP bandwidth (primary-cell BWP). Bottom line (act) = NR ACTIVE bandwidth used for diagnosis — this is what the active-bandwidth root-cause evidence uses. Both MHz, forward-filled from the sparse BW change-events. Distinct from the observed aggregated (CA total) BW column.") +
+      ">NR cfg-BWP / active BW (diag)</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("NR-CA active share = % of download seconds with ≥1 SCell active. Traffic share = NR PDSCH throughput as a % of NR+LTE PDSCH.") +
       ">NR-CA / traffic</th>" +

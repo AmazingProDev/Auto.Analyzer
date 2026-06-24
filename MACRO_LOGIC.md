@@ -168,10 +168,14 @@ contradiction is a hard penalty); a segment without that contradiction floors at
   (`schedulerLowConfidence`), not a firm secondary, when `prbConsistencyWarning` is active.
 - **Invalid-zero KPIs:** MCS = 0 while CQI/rank/modulation are valid → MCS is set to `—` and excluded;
   delivery = 0 for **all** operators while DL>0 → delivery `—` and excluded.
-- **Bandwidth columns:** Observed **Aggregated BW** (CA total) vs **NR configured** vs **NR active**.
-  The active-bandwidth root-cause evidence uses **NR active BW**.
-- **Table cell:** the IAM conclusion cell shows only label · severity · gap · confidence; the full
-  explanation lives in the evidence drawer (“Full explanation”).
+- **n78 continuity stability** = `n78DropCount == 0` **and** `nrBandTransitionCount == 0`. When stable,
+  the label is the usage-share variant and the evidence states the gap is *lower n78 usage share /
+  exposure across the scope, not n78 drop/instability*.
+- **Bandwidth columns:** **Observed aggregated BW** (CA total) vs **NR cfg-BWP BW** vs **NR active BW
+  (diag)**. The active-bandwidth root-cause evidence uses **NR active BW**.
+- **Table cell:** the IAM conclusion cell shows only label · gap · severity · confidence. Everything
+  else — full explanation, evidence, context, **secondary contributors**, symptoms, blocked causes,
+  warnings and recommended actions — lives in the evidence drawer.
 
 ## 10. Worked example — DT7 Kenitra (LTE-only)
 `lteOnly` → `context = [LTE_ONLY_SEGMENT, PHY_METRICS_UNAVAILABLE]`; 5G/n78 blocked; RF fires

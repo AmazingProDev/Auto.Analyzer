@@ -1390,10 +1390,13 @@
                 " MHz.",
             );
             // n78 continuity is a SEPARATE dimension from share — only imply instability when
-            // there are actual drops (refinement 2).
+            // there are actual drops / band transitions (refinements 2 & 5).
             const _drops = asNumber(iam && iam.n78DropCount);
             const _cont = asNumber(iam && iam.n78ContinuousSec);
             const _ret = asNumber(iam && iam.n78AvgRetentionSec);
+            const _tr = asNumber(iam && iam.nrBandTransitionCount);
+            const stableContinuity =
+              (_drops === null || _drops === 0) && (_tr === null || _tr === 0);
             if (_cont !== null || _ret !== null || _drops !== null) {
               pushEvidence(
                 evidence,
@@ -1406,11 +1409,13 @@
                   " s, avg retention " +
                   formatNumber(_ret, 1) +
                   " s" +
-                  (_drops !== null
-                    ? _drops === 0
-                      ? " with no n78 drops — continuity is stable, so the gap is usage share, not instability."
-                      : " with " + _drops + " n78 drop(s) during the download."
-                    : "."),
+                  (stableContinuity
+                    ? " — continuity is stable (0 n78 drops, 0 band transitions). The issue is lower n78 usage share / exposure across the selected scope, not n78 drop/instability."
+                    : " with " +
+                      (_drops || 0) +
+                      " n78 drop(s) and " +
+                      (_tr || 0) +
+                      " NR band transition(s) during the download."),
               );
             }
           }
@@ -1837,11 +1842,13 @@
       // Refinement 1: when the combined n78/BW cause is primary AND n78 continuity is stable
       // (no drops), label it as a usage-share limitation rather than a retention limitation.
       let primaryLabel = ruleDefinition(primary.code).label;
-      if (
-        primary.code === "N78_RETENTION_BANDWIDTH_LIMITATION" &&
-        asNumber(iam && iam.n78DropCount) === 0
-      ) {
-        primaryLabel = "n78 usage share / active NR bandwidth limitation";
+      if (primary.code === "N78_RETENTION_BANDWIDTH_LIMITATION") {
+        const _d = asNumber(iam && iam.n78DropCount);
+        const _t = asNumber(iam && iam.nrBandTransitionCount);
+        const continuityStable = (_d === null || _d === 0) && (_t === null || _t === 0);
+        if (continuityStable) {
+          primaryLabel = "n78 usage share / active NR bandwidth limitation";
+        }
       }
       const diagnosis = {
         primaryCode: primary.code,
