@@ -159,6 +159,20 @@ Primary **N78_RETENTION_BANDWIDTH_LIMITATION**, Optimization opportunity, capaci
 IAM (→ RF blocked), scheduler secondary, Server/TCP blocked. Confidence **Low** on the real data (PRB
 contradiction is a hard penalty); a segment without that contradiction floors at **Medium**.
 
+## 9c. Validity & presentation refinements
+- **Label:** when the combined cause is primary AND n78 continuity is stable (`n78DropCount === 0`),
+  the label reads **"n78 usage share / active NR bandwidth limitation"** (vs "…retention…"). Evidence
+  reports n78 **share** and n78 **continuity** separately, and does not imply a drop/instability when
+  drop count is 0.
+- **Scheduler under PRB warning:** the ref-relative scheduler/PRB signal is shown as a **warning**
+  (`schedulerLowConfidence`), not a firm secondary, when `prbConsistencyWarning` is active.
+- **Invalid-zero KPIs:** MCS = 0 while CQI/rank/modulation are valid → MCS is set to `—` and excluded;
+  delivery = 0 for **all** operators while DL>0 → delivery `—` and excluded.
+- **Bandwidth columns:** Observed **Aggregated BW** (CA total) vs **NR configured** vs **NR active**.
+  The active-bandwidth root-cause evidence uses **NR active BW**.
+- **Table cell:** the IAM conclusion cell shows only label · severity · gap · confidence; the full
+  explanation lives in the evidence drawer (“Full explanation”).
+
 ## 10. Worked example — DT7 Kenitra (LTE-only)
 `lteOnly` → `context = [LTE_ONLY_SEGMENT, PHY_METRICS_UNAVAILABLE]`; 5G/n78 blocked; RF fires
 (IAM SINR 2.1 vs INWI 8.6, gap 6.5>3) → **primary `LTE_RF_COVERAGE_QUALITY_LIMITATION`**; PHY rules

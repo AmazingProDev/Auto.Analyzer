@@ -999,17 +999,46 @@
         iam.ssSinrMean >= bestTechnical.ssSinrMean &&
         iam.ssRsrpMean >= bestTechnical.ssRsrpMean;
       const allRows = Object.values(perOp || {}).filter(Boolean);
+      // Invalid-zero KPI handling (refinements 4 & 5): mutate perOp so both the diagnosis and
+      // the UI table show "—" and ignore these values.
+      allRows.forEach((row) => {
+        const dl = dlThroughput(row) || 0;
+        // MCS = 0 while CQI / rank / modulation are valid → MCS "not exported", not real.
+        if (
+          dl > 0 &&
+          (asNumber(row.avgMcs) || 0) === 0 &&
+          (((asNumber(row.cqiMean) || 0) > 0) ||
+            ((asNumber(row.avgRank) || 0) > 0) ||
+            asNumber(row.mod256Pct) !== null)
+        ) {
+          row.avgMcs = null;
+          row._mcsUnavailable = true;
+        }
+      });
+      // Delivery efficiency = 0 for every operator while DL > 0 → unavailable, not real.
+      const allDeliveryZero =
+        allRows.length > 0 &&
+        allRows.every(
+          (row) => (dlThroughput(row) || 0) > 0 && (asNumber(row.deliveryEfficiencyPct) || 0) === 0,
+        );
+      if (allDeliveryZero) {
+        allRows.forEach((row) => {
+          row.deliveryEfficiencyPct = null;
+          row._deliveryUnavailable = true;
+        });
+      }
+      // NR active bandwidth (falls back to observed aggregated BW when not exported).
+      const activeBwOf = (op) =>
+        asNumber(op && (op.nrActiveBwMhz != null ? op.nrActiveBwMhz : op.aggBwMhz));
       const allZeroScells =
         allRows.length > 0 &&
         allRows.every((row) => (asNumber(row.scellCount) || 0) === 0);
+      // Active-bandwidth root cause uses NR active BW (refinement 7), not observed aggregated.
+      const iamActiveBwVal = activeBwOf(iam);
+      const refActiveBwVal = activeBwOf(bestTechnical);
       const bwGapPct =
-        asNumber(iam && iam.aggBwMhz) !== null &&
-        asNumber(bestTechnical && bestTechnical.aggBwMhz) !== null &&
-        bestTechnical.aggBwMhz > 0
-          ? round1(
-              ((bestTechnical.aggBwMhz - iam.aggBwMhz) / bestTechnical.aggBwMhz) *
-                100,
-            )
+        iamActiveBwVal !== null && refActiveBwVal !== null && refActiveBwVal > 0
+          ? round1(((refActiveBwVal - iamActiveBwVal) / refActiveBwVal) * 100)
           : null;
       const scellGap =
         asNumber(iam && iam.scellCount) !== null &&
@@ -1360,6 +1389,30 @@
                 formatNumber(capActiveBw, 0) +
                 " MHz.",
             );
+            // n78 continuity is a SEPARATE dimension from share — only imply instability when
+            // there are actual drops (refinement 2).
+            const _drops = asNumber(iam && iam.n78DropCount);
+            const _cont = asNumber(iam && iam.n78ContinuousSec);
+            const _ret = asNumber(iam && iam.n78AvgRetentionSec);
+            if (_cont !== null || _ret !== null || _drops !== null) {
+              pushEvidence(
+                evidence,
+                "n78 continuity",
+                _cont,
+                null,
+                null,
+                "n78 continuous " +
+                  formatNumber(_cont, 1) +
+                  " s, avg retention " +
+                  formatNumber(_ret, 1) +
+                  " s" +
+                  (_drops !== null
+                    ? _drops === 0
+                      ? " with no n78 drops — continuity is stable, so the gap is usage share, not instability."
+                      : " with " + _drops + " n78 drop(s) during the download."
+                    : "."),
+              );
+            }
           }
         }
 
@@ -1400,14 +1453,14 @@
           );
           pushEvidence(
             evidence,
-            "Active bandwidth",
-            iam && iam.aggBwMhz,
-            bestTechnical && bestTechnical.aggBwMhz,
+            "NR active bandwidth",
+            iamActiveBwVal,
+            refActiveBwVal,
             bwGapPct,
-            "Active BW " +
-              formatNumber(iam && iam.aggBwMhz, 1) +
+            "NR active BW " +
+              formatNumber(iamActiveBwVal, 1) +
               " MHz vs " +
-              formatNumber(bestTechnical && bestTechnical.aggBwMhz, 1) +
+              formatNumber(refActiveBwVal, 1) +
               " MHz.",
           );
         }
@@ -1552,17 +1605,29 @@
           const sched5gBelow =
             capSched5g !== null && iamSched5g !== null && capSched5g > 0 && iamSched5g < capSched5g * 0.8;
           if (prbBelow || sched5gBelow) {
-            addContributor(
-              "SCHEDULER_ALLOCATION_LIMITATION",
+            const detail =
               "Scheduled NR capacity below the capacity reference" +
-                (prbBelow
-                  ? " — bitrate/PRB " + formatNumber(iamPrb, 2) + " vs " + formatNumber(capPrb, 2)
-                  : "") +
-                (sched5gBelow
-                  ? " — scheduled-5G " + formatNumber(iamSched5g, 0) + " vs " + formatNumber(capSched5g, 0) + " Mbps"
-                  : "") +
-                ".",
-            );
+              (prbBelow
+                ? " — bitrate/PRB " + formatNumber(iamPrb, 2) + " vs " + formatNumber(capPrb, 2)
+                : "") +
+              (sched5gBelow
+                ? " — scheduled-5G " + formatNumber(iamSched5g, 0) + " vs " + formatNumber(capSched5g, 0) + " Mbps"
+                : "") +
+              ".";
+            // When the PRB-consistency warning is active the PRB/scheduling metrics may not
+            // aggregate across carriers/RATs, so this is a low-confidence signal — show it as a
+            // warning, not a firm secondary root cause (refinement 3).
+            if (prbWarningActive) {
+              addWarning(
+                "schedulerLowConfidence",
+                "Low-confidence scheduler/PRB signal — " +
+                  detail +
+                  " (PRB may not aggregate across carriers/RATs).",
+                "IAM",
+              );
+            } else {
+              addContributor("SCHEDULER_ALLOCATION_LIMITATION", detail);
+            }
           }
         }
 
@@ -1769,9 +1834,18 @@
           iam.throughputSamples < thresholds.minThroughputSamples) ||
         (asNumber(iam && iam.rfSamples) !== null &&
           iam.rfSamples < thresholds.minRfSamples);
+      // Refinement 1: when the combined n78/BW cause is primary AND n78 continuity is stable
+      // (no drops), label it as a usage-share limitation rather than a retention limitation.
+      let primaryLabel = ruleDefinition(primary.code).label;
+      if (
+        primary.code === "N78_RETENTION_BANDWIDTH_LIMITATION" &&
+        asNumber(iam && iam.n78DropCount) === 0
+      ) {
+        primaryLabel = "n78 usage share / active NR bandwidth limitation";
+      }
       const diagnosis = {
         primaryCode: primary.code,
-        primaryLabel: ruleDefinition(primary.code).label,
+        primaryLabel,
         severity,
         gapPct,
         gapMbps,

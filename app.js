@@ -3565,12 +3565,15 @@ document.addEventListener("DOMContentLoaded", () => {
       .map((row) => {
         const isIam = String(row.operator || "").toUpperCase() === "IAM";
         const conclusionHtml = isIam
-          ? '<div style="display:flex;flex-direction:column;gap:8px;min-width:320px">' +
+          ? '<div style="display:flex;flex-direction:column;gap:6px;min-width:260px">' +
             '<div style="font-size:11px;font-weight:800;color:#e2e8f0">' +
             escapeHtml(diagnosis.primaryLabel || "Mixed / inconclusive") +
             "</div>" +
-            '<div style="font-size:10px;color:#cbd5e1;line-height:1.5">' +
-            escapeHtml(diagnosis.conclusionText || "") +
+            '<div style="font-size:10px;color:#cbd5e1">Gap ' +
+            (diagnosis.gapPct == null ? "—" : escapeHtml(fmtPct(diagnosis.gapPct, 1))) +
+            (diagnosis.gapMbps == null
+              ? ""
+              : " · " + escapeHtml(fmtMbps(diagnosis.gapMbps))) +
             "</div>" +
             '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
             severityBadge +
@@ -3583,6 +3586,10 @@ document.addEventListener("DOMContentLoaded", () => {
               : "") +
             '<details style="font-size:10px;color:#94a3b8"><summary style="cursor:pointer;color:#cbd5e1;font-weight:700">Evidence drawer</summary>' +
             '<div style="margin-top:6px;display:grid;gap:8px">' +
+            '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Full explanation</div>' +
+            '<div style="line-height:1.5">' +
+            escapeHtml(diagnosis.conclusionText || "") +
+            "</div></div>" +
             '<div><div style="font-weight:700;color:#e2e8f0;margin-bottom:4px">Evidence</div>' +
             renderList(
               diagnosis.evidence,
@@ -3883,8 +3890,8 @@ document.addEventListener("DOMContentLoaded", () => {
       titleAttr("256QAM share and average rank summarize spectral efficiency and MIMO usage once RF is comparable.") +
       ">256QAM / rank</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("Active BW is the mean aggregated bandwidth during active download seconds. The smaller line is average SCell count.") +
-      ">Active BW / SCells</th>" +
+      titleAttr("Observed AGGREGATED bandwidth (CA total) during active download seconds — this is the measured aggregate across carriers, distinct from the NR configured/active BW columns. The smaller line is average SCell count.") +
+      ">Aggregated BW / SCells</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("Mean PRB utilization plus the derived load-state label.") +
       ">PRB / Load</th>" +
@@ -3892,8 +3899,8 @@ document.addEventListener("DOMContentLoaded", () => {
       titleAttr("Efficiency = Mbps/MHz. The smaller line adds scheduler yield and delivery efficiency.") +
       ">Efficiency / yield</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
-      titleAttr("NR configured (primary) bandwidth over the total active aggregated bandwidth (MHz), forward-filled from the sparse BW change-events.") +
-      ">NR BW cfg/act</th>" +
+      titleAttr("NR CONFIGURED (primary cell) bandwidth over NR ACTIVE bandwidth (MHz), forward-filled from the sparse BW change-events. NR active BW is what the active-bandwidth root-cause evidence uses.") +
+      ">NR cfg / active BW</th>" +
       '<th style="text-align:left;padding:6px 10px;color:#94a3b8;font-size:10px;font-weight:600;border-bottom:1px solid var(--bn-divider)"' +
       titleAttr("NR-CA active share = % of download seconds with ≥1 SCell active. Traffic share = NR PDSCH throughput as a % of NR+LTE PDSCH.") +
       ">NR-CA / traffic</th>" +
